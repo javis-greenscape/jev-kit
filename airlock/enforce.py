@@ -181,7 +181,10 @@ def _bash_deny_reason(entry):
     return (
         "BLOCKED (airlock enforce): this looks like a %s search. Run instead:\n"
         "    %s\n"
-        "Wrong call? Add `[airlock-ok: <reason>]` to this Bash call's description to override."
+        # "this call", not "this Bash call": the same rule fires for the
+        # PowerShell tool on a Windows machine without Git Bash, where the
+        # Bash tool is never registered at all.
+        "Wrong call? Add `[airlock-ok: <reason>]` to this call's description to override."
         % (scope, suggestion)
     )
 

@@ -276,18 +276,32 @@ def check_wiring(r, launcher):
         if not os.path.isfile(path):
             r.skip("%s does not exist" % path)
             continue
+        # Parse it rather than substring-matching the raw text: in JSON every
+        # backslash of a Windows path is written as an escaped pair, so
+        # `C:\Users\...` never appears literally in the file and a text
+        # search for it always misses.
         try:
             with open(path) as f:
-                text = f.read()
+                data = json.load(f)
         except Exception as exc:
-            r.bad("%s unreadable: %s" % (path, str(exc)[:120]))
+            r.bad("%s unreadable or not valid JSON: %s" % (path, str(exc)[:120]))
             continue
-        if launcher and launcher in text:
+        commands = []
+        for entries in (data.get("hooks") or {}).values():
+            if not isinstance(entries, list):
+                continue
+            for entry in entries:
+                if not isinstance(entry, dict):
+                    continue
+                for h in entry.get("hooks") or []:
+                    if isinstance(h, dict) and isinstance(h.get("command"), str):
+                        commands.append(h["command"])
+        if launcher and any(launcher.lower() in c.lower() for c in commands):
             r.ok("%s registers the airlock hook at %s" % (path, launcher))
             found = True
-        elif "airlock" in text:
-            r.bad("%s mentions airlock but not this launcher (%s). Re-run the "
-                  "installer with --wire" % (path, launcher))
+        elif any("airlock" in c.lower() for c in commands):
+            r.bad("%s registers an airlock hook, but not this launcher (%s). "
+                  "Re-run the installer with --wire" % (path, launcher))
         else:
             r.skip("%s has no airlock hook (run the installer with --wire)" % path)
     if not found:

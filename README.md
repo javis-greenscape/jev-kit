@@ -158,6 +158,16 @@ current one. `settings.json` and the systemd units already reference
 You were probably pointed at this repository and told to install it. Do these
 in order:
 
+0. **On native Windows (no WSL), read
+   [docs/INSTALL-WINDOWS.md](docs/INSTALL-WINDOWS.md) instead of this list and
+   follow it.** The installer is Python, not bash
+   (`py -3 install\windows_install.py --check-only`); the hook command has two
+   shapes and the installer picks between them by detecting Git for Windows,
+   so do not hand-write it; the warm daemon does not exist there, and a doctor
+   reporting it as `skip` is correct rather than a fault; and `es.exe`
+   (voidtools Everything) replaces `plocate` for file search -- **detect it,
+   never install it**, and if it is missing say so and let the human decide.
+   Inside WSL, this list applies unchanged.
 1. Read this section and `install/README.md`. Do not start by reading the
    whole repository.
 2. Run `install/install.sh --check-only` and report the plan and any
@@ -206,38 +216,53 @@ Do **not** do any of these without asking first:
 | **WSL2** (Ubuntu, systemd on) | Supported. Identical to Linux once `systemd=true` is in `/etc/wsl.conf` and the distribution has been restarted. See [Install on WSL](#install-on-wsl). |
 | **WSL2** (systemd off) | Works, degraded, and the installer detects it. No daemon (a direct HTTPS call per judgement, roughly 0.9 s instead of 0.3 s), no timers, no hourly index refresh. The guard itself is unaffected. |
 | **macOS** | Plausible but **untested**. The guard is stdlib Python and should run. There is no systemd, so `--no-systemd` is required, and the daemon, all timers and `plocate` are out. `launchd` equivalents are not written. Nobody has run it. |
-| **Native Windows** (no WSL) | **Not supported yet.** The hook command form, the Unix-socket daemon, the systemd units and the `plocate` file-search rule all assume POSIX. See [Native Windows: the gap](#native-windows-the-gap) below. |
+| **Native Windows** (no WSL) | **The core is supported and was tested on a real Windows 11 machine.** Guard in shadow and enforce, the rules table, the key file, file search steered at [Everything](https://www.voidtools.com/) (`es.exe`) instead of `plocate`, health check, installer, doctor, uninstall. **No daemon** (see below), and belay, compaction, browser, review and tuning are **not ported**. See [Install on native Windows](docs/INSTALL-WINDOWS.md). |
 
-## Native Windows: the gap
+#### What "supported" means on native Windows
 
-Native Windows is **not supported yet**, and nothing in this repository has
-ever been run there. The intent is Windows and Linux both, with
-[Everything](https://www.voidtools.com/) (`es.exe`) providing file search on
-Windows where Linux uses `plocate`. That is planned, not built. What "make it
-work" actually means, smallest first:
+| | |
+|---|---|
+| **Works** | The `PreToolUse` guard in shadow and enforce mode, through the Bash tool and the PowerShell tool alike. The whole rules table. The key file at `%APPDATA%\airlock\env`. The file-search rule, steering at `es.exe` with path-scoped, regex and case flags. The health check. `install/windows_install.py`, `windows_doctor.py`, `windows_uninstall.py` and their `.cmd`/`.ps1` launchers. |
+| **Out of scope, by design** | **The warm daemon.** It listens on a Unix domain socket, which Windows does not have; the client falls back cleanly to a direct HTTPS call per judgement, about **0.9 s** cold against about **0.3 s** warm on Linux. A named pipe is the right analogue but needs a non-stdlib dependency, and a localhost TCP listener is precisely the design this project refuses. |
+| **Out of scope, not ported** | `belay`, `compaction`, `browser`, `review`, `tuning`. Also `filesearch/`: on Linux airlock *builds* the index, and on Windows it deliberately does not — Everything is third-party software with its own installer and service, so airlock only *detects* it and steers at it. |
+| **Tested how** | The unit suite on **Windows Python 3.11.9, Windows 11**: 659 tests, OK, 84 skipped (each skip prints why it is POSIX-only). Real PreToolUse events piped at the installed hook for a deny (Bash and PowerShell), an allow, a malformed payload and the kill switch. The installer, doctor and uninstaller run for real into a scratch directory. `es.exe` 1.1.0.38 detected and queried. |
+| **Not tested there** | **A Jev-judged deny.** The Windows machine was kept keyless on purpose, so every judged path there fail-opened — which is itself the fail-open evidence. The judged path is verified on Linux only. |
 
-| Item | What native Windows needs | Size |
-|---|---|---|
-| **Shadow mode's detached worker** | `start_new_session=True` is POSIX-only and raises on Windows. Needs `creationflags=DETACHED_PROCESS \| CREATE_NEW_PROCESS_GROUP`. Shadow is the default mode, so this is on the first-run path. | small |
-| **Python launcher** | Windows has no `python3` on PATH. Probe the `py` launcher, then `python.exe`, and resolve to an absolute interpreter path, since a hook runs with a minimal environment. | small |
-| **Hook command form** | The same command string with a Windows interpreter and an absolute Windows path, backslashes escaped in JSON. `install/wire.sh` is bash, so the writer needs a Python or PowerShell equivalent. | small |
-| **Path handling** | `$HOME` is usually unset (`%USERPROFILE%`); a drive root is `C:\`, not `/`, and there may be several; separators may be either slash; comparisons must be case-insensitive. | medium |
-| **File search** | The `plocate` suggestion string becomes `es.exe -i "<pattern>"`; `es`/`es.exe` must join the already-indexed tool family so R8 does not suggest replacing the indexed tool with itself; `filesearch/` becomes a *detection* check rather than an installer, because Everything maintains its own index and is not installable from here. | medium |
-| **No systemd** | Task Scheduler equivalents for the timers (`schtasks /sc HOURLY` covers them); the daemon would need a Task or a Windows service. Each unit's `Nice`/`CPUQuota` intent maps only coarsely. | medium |
-| **The daemon's transport** | It listens on a Unix domain socket, mode 700, with no TCP listener at all. The recommended first Windows release simply **skips it** and uses the direct-HTTPS fallback the client already has (~0.9 s against ~0.3 s warm), exactly as WSL-without-systemd does today. A named pipe is the correct analogue but needs a non-stdlib dependency; a localhost TCP listener is stdlib-only but is precisely the design this project refuses. | large, or small if skipped |
-| **The shell scripts** | The installer, doctor, wire, deploy and rollback are all bash. Either require Git Bash, or port the installer and doctor to Python, which they arguably should be anyway given the guard is stdlib Python. | large |
+## Native Windows: what is done and what is left
 
-The smallest credible native-Windows release, in dependency order: the
-detached worker, the Python launcher, the hook command form, path handling,
-then file search -- with the daemon skipped and the installer and doctor
-ported to Python. That is the guard itself, in shadow mode, with the
-file-search rule pointing at `es.exe`, no daemon and nothing scheduled.
+Native Windows was the gap in the first release. The core is now built and has
+been run on a real Windows 11 machine; what follows is what that cost and what
+is still open, so nobody has to re-derive it.
+
+| Item | How it was resolved |
+|---|---|
+| **Shadow mode's detached worker** | `start_new_session=True` is POSIX-only. Windows gets `DETACHED_PROCESS \| CREATE_NEW_PROCESS_GROUP \| CREATE_NO_WINDOW` (the third stops a console flashing on every judged call), from `airlock/platform_compat.py`. |
+| **Python launcher** | The installer resolves an absolute interpreter: an explicit `AIRLOCK_PYTHON`, then `sys.executable`, then `C:\Windows\py.exe`, then a `python.exe` on `PATH` — skipping the Microsoft Store alias stub, which is not an interpreter and would produce a hook that opens the Store. |
+| **Hook command form** | Written by `install/windows_install.py`, in one of **two** shapes, because they are not interchangeable: `"py.exe" "hook.py"` for Git Bash, and `& "py.exe" "hook.py"` for PowerShell, which needs the call operator. The installer detects which shell applies. Install Git for Windows later and you must re-wire. |
+| **Path handling** | `airlock/winpath.py`: `C:\...`, `C:/...`, Git Bash's `/c/...` and Cygwin's `/cygdrive/c/...` all reduce to one canonical spelling, compared case-insensitively. A drive root or a UNC share root is disk-wide. |
+| **File search** | The suggestion comes from one platform-neutral function, `policy.filename_search_suggestion()`: `plocate` on Linux, `es.exe` on Windows. `es` joins the indexed-tool family, so a command already using Everything is never told to use Everything. `airlock/everything.py` detects `es.exe` and the running index and **never installs** either. |
+| **No systemd** | The health check can be registered with Task Scheduler, but **only** behind an explicit `--schedule-health` flag. Nothing else is scheduled. |
+| **The daemon's transport** | **Skipped, as recommended.** `client.ask()` checks up front that the platform has Unix sockets and goes straight to the direct HTTPS call, rather than letting `socket.AF_UNIX` raise into a blanket `except`. `python -m airlock.daemon` says so and exits 0 on Windows. |
+| **The shell scripts** | The installer, doctor and uninstaller are ported to Python, as that item suggested they arguably should have been anyway. `install/_wire.py` is shared with the bash path. `deploy.sh`, `rollback.sh` and `wire.sh` remain bash and Linux-only; their Windows jobs are done by `windows_install.py` and the `current.txt` pointer. |
+
+Still open on Windows, and deliberately so: `belay`, `compaction`, `browser`,
+`review` and `tuning` are not ported; the warm daemon has no Windows
+transport; and the Jev-judged deny path has been verified on Linux only,
+because the Windows test machine was kept keyless on purpose.
+
+One number worth knowing before you measure anything there: the hook entry
+point takes roughly **450 ms** on Windows against roughly **40 ms** on Linux,
+for the same code. Almost all of it is CPython start-up plus the antivirus
+filter in front of every `CreateProcess`. Nothing in this repository moves it,
+and every PreToolUse hook on that machine pays it.
 
 ## Install guides
 
-Two guides live in `docs/`:
+Three guides live in `docs/`:
 [INSTALL-WSL.md](docs/INSTALL-WSL.md) (a Windows PC running WSL2 Ubuntu, and
-the closest thing to a step-by-step for a Linux server too) and
+the closest thing to a step-by-step for a Linux server too),
+[INSTALL-WINDOWS.md](docs/INSTALL-WINDOWS.md) (native Windows, no WSL: the
+core of the kit, with Everything instead of `plocate` and no daemon) and
 [INSTALL-SECOND-MACHINE.md](docs/INSTALL-SECOND-MACHINE.md) (installing on a
 machine that belongs to somebody else, kept in shadow mode for a week before
 arming anything).

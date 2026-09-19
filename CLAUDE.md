@@ -10,8 +10,14 @@ rollback.
 yours, without asking first. See the README's "If you are an AI agent"
 paragraph.
 
+**On native Windows (no WSL)?** Follow
+[docs/INSTALL-WINDOWS.md](docs/INSTALL-WINDOWS.md) instead: a Python
+installer rather than bash, no warm daemon, and `es.exe` (voidtools
+Everything) in place of `plocate` for file search.
+
 **Working on the code?** `python3 -m unittest discover -s tests` must pass
-(500 tests). The rules table is `airlock/rules.py`; everything fails open.
+(659 tests on Linux; the same suite on Windows Python skips 84 POSIX-only
+tests and passes the rest). The rules table is `airlock/rules.py`; everything fails open.
 
 ## graphify
 
