@@ -5,10 +5,10 @@ The ordering is structural, not a convention someone has to remember.
 takes the redacted text as its only input. There is no code path in this module
 that can reach a model call, a cache key or an output record holding raw text.
 
-That ordering is the thing the vetting report told us to steal from jevlogs
-(`docs/community-vetting.md`, item 9): "our airlock/redact.py exists but is not
-structurally guaranteed to run before the state is built -- that ordering
-guarantee is the thing to steal."
+That ordering is what this takes from reachjalil/jevlogs (see
+`docs/CREDITS.md`): airlock/redact.py already existed here, but nothing
+structurally guaranteed it ran before the state was built. The guarantee is the
+part worth copying.
 """
 import hashlib
 import json

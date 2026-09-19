@@ -16,7 +16,7 @@ Two rules this module exists to enforce, both of them borrowed:
    the guard out of a deny. Only rows that carry a prompt are read.
 
 2. **Everything is redacted before it goes anywhere.** Widening what the state
-   contains is the risk the vetting report flagged against this port, so
+   contains is the risk this port carries, so
    `airlock/redact.py` runs before the text is returned, not after, and the
    result is capped hard.
 

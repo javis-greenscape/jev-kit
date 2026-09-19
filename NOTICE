@@ -5,6 +5,9 @@ This product includes software and wording developed by third parties.
 Licence identifiers below were verified against the GitHub API on 2026-09-19
 (`gh api repos/<owner>/<repo>/license`), not written from memory.
 
+`docs/CREDITS.md` is the readable companion to this file: who to thank, and for
+what. This file carries the notices the licences require.
+
 ===============================================================================
 1. Code and wording ported into this repository
 ===============================================================================
@@ -103,8 +106,8 @@ reachjalil/jevlogs -- MIT
     No code copied.
 
 RINNECODER/jev-behavior-study -- MIT
-    Findings cited in `docs/community-vetting.md` and `eval/README.md`.
-    No code copied.
+    Findings cited in `docs/CREDITS.md`, `eval/README.md`, `eval/ablation.py`
+    and `tuning/`. No code copied.
 
 ===============================================================================
 3. Third-party repositories the installers clone or invoke
@@ -139,8 +142,8 @@ govern their own code.
 
 Dicklesworthstone/skillranker
     MIT plus a rider excluding Anthropic and anyone acting under their
-    direction. Not used, by decision recorded in `docs/community-vetting.md`.
+    direction. Not used, and no code copied.
 
 GiesN/typesafe-jev-workflow
-    No LICENSE file, so no grant of permission. Two ideas were noted in
-    `docs/community-vetting.md`; no code was copied and none should be.
+    No LICENSE file at the time of checking, so no grant of permission. Not
+    used, and no code copied.

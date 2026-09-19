@@ -50,7 +50,7 @@ worth reading before you install anything: what it sends off the machine.
 | `eval/` | Labelled cases for every rule, and the ablations. | n/a | Nothing. |
 | `bench/` | A/B benchmark: enforce mode against no guard at all. | n/a | Nothing until you run it. |
 | `install/` | One installer, a doctor, deploy/rollback/wire, the migration script. | n/a | Nothing. |
-| `docs/` | The community vetting report the ported patterns came from, and the install guides. | n/a | Nothing. |
+| `docs/` | Credits for the community projects the ported patterns came from, and the install guides. | n/a | Nothing. |
 
 ## Install (for a person or an agent)
 
@@ -593,8 +593,8 @@ exists, so it stays a per-machine choice.
 `tuning/calibrate.sh` exports the eval's predictions in the format `jevcal`
 expects, and writes a threshold lock file under `eval/`. Tune against observed
 correctness, never against reported confidence: a model's confidence and its
-accuracy are different measurements, and the vetting report in
-`docs/community-vetting.md` has the numbers showing how far apart they can get.
+accuracy are different measurements, and the published measurement cited in
+[`docs/CREDITS.md`](docs/CREDITS.md) shows how far apart they can get.
 
 ## Migrating to airlock
 

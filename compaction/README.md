@@ -8,8 +8,8 @@ need to stay in history.
 
 ## What it sends off the machine
 
-**This is the largest default-on data egress of anything vetted for this
-repository.** Per `docs/community-vetting.md`: the plugin builds a
+**This is the largest default-on data egress of anything used by this
+repository.** Read from its own source: the plugin builds a
 conversation state of up to `maxStateTokens` (default **25,000 tokens**) made
 of tool inputs and tool-result text, truncated only for size, with **no
 redaction pass anywhere in the plugin's source** -- there is no `redact()`
@@ -25,11 +25,10 @@ thousand characters. Compaction is a different order of exposure.
 
 Compaction is genuinely useful and, run manually, genuinely fast. Measured
 once on this box, 2026-09-19: a manual `/compact` took a 49,288-token session
-down to 23,111 tokens in 906 ms. The vetted verdict is **skip for now, revisit
-only behind a redactor** -- the idea and the code are both good, the exposure
-is the problem. This component exists so a machine that has made its own
-decision about that trade-off can install it deliberately, not so that it
-becomes a default.
+down to 23,111 tokens in 906 ms. **The decision taken here was to ship the
+installer but never to turn it on**: the exposure above is why. This component
+exists so a machine that has made its own decision about that trade-off can
+install it deliberately, not so that it becomes a default.
 
 It is **off by default** everywhere in this repository. `install/install.sh`
 never turns it on without `--compaction`, and nothing here ever will.
@@ -60,11 +59,10 @@ compaction/install.sh
 
 ## If you want it, but redacted
 
-The vetting report's condition for adopting this properly is a fork: lift
-`jev-belay`'s `SECRET_RULES` redactor and apply it in `historyEntries()`
-before the state is built, and drop `maxStateTokens` hard. That is not what
-this `install.sh` does -- it installs upstream as published. Forking it is a
-separate, deliberate piece of work.
+What that would take is a fork: lift `jev-belay`'s `SECRET_RULES` redactor and
+apply it in `historyEntries()` before the state is built, and drop
+`maxStateTokens` hard. That is not what this `install.sh` does -- it installs
+upstream as published. Forking it is a separate, deliberate piece of work.
 
 ## Uninstall
 

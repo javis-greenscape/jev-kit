@@ -348,7 +348,7 @@ def user_requested_question():
     wording is the second belt, not the first.
 
     The criteria follow the house style the behaviour study validated
-    (`docs/community-vetting.md`, finding 4): describe what each answer covers
+    (RINNECODER/jev-behavior-study, see `docs/CREDITS.md`): describe what each answer covers
     with concrete examples, rather than adding a sterner preamble.
     """
     return {

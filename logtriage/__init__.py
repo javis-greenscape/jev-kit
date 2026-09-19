@@ -1,8 +1,8 @@
 """logtriage: label log lines, redact-first, local rules before the model.
 
-Ported in design from reachjalil/jevlogs (docs/community-vetting.md, item 9),
-whose privacy architecture the vetting report called "the template we should be
-copying". Three properties, in this order, and the order is the whole point:
+Ported in design from reachjalil/jevlogs (MIT, see docs/CREDITS.md), whose
+privacy architecture this follows. Three properties, in this order, and the
+order is the whole point:
 
   1. REDACT FIRST. Nothing downstream -- a local rule, a cache key, the model
      state, the emitted JSON -- ever sees the raw line. Not "we remember to

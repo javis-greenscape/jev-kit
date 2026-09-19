@@ -4,11 +4,11 @@
 commit `98f39e0`. On the Claude Code **Stop** event it looks at the last
 turn's mutations and check commands, and -- only if there is evidence of a
 change with no fresh passing check -- asks TypeSafe's Jev model four
-questions about whether the final message overclaims completion. See
-`docs/community-vetting.md` for the full writeup: **ADOPT AS IS**, scoped to
-one account at a time.
+questions about whether the final message overclaims completion. It is used
+here unmodified, at a pin, scoped to one account at a time; see
+[`docs/CREDITS.md`](../docs/CREDITS.md) for the pin and the licence.
 
-What it sends off the machine, per the vetting report: the task text, the
+What it sends off the machine, read from its own source: the task text, the
 final assistant message, and check command lines, all run through a 13-rule
 secret redactor first, capped at 1,500 + 2,000 characters. No diffs, no file
 contents, no tool inputs.

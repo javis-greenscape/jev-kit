@@ -3,8 +3,8 @@
 # release under releases/<sha>, flip 'current' at it, install the wrapper,
 # and PRINT the Stop-hook settings.json block -- this script never edits
 # settings.json itself. Apply it to whichever account's settings you mean to
-# run belay in; the vetting report (docs/community-vetting.md) recommends
-# starting with one account only, in log mode, for a week.
+# run belay in. Start with one account only, in log mode, for a week, before
+# turning it on anywhere else.
 set -uo pipefail
 
 UPSTREAM_URL="https://github.com/valentynkit/jev-belay"

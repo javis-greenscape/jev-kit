@@ -1,8 +1,9 @@
 # docclass: classify the pages of a document against a taxonomy
 
 `classify_page(text, taxonomy)` plus a CLI for text-layer PDFs. The shape is
-ported from kyotofin/tax-doc-classifier (`docs/community-vetting.md`, item 5);
-none of its content is, because US tax forms are irrelevant here.
+ported from kyotofin/tax-doc-classifier (Apache-2.0, see
+[`docs/CREDITS.md`](../docs/CREDITS.md)); none of its content is, because US tax
+forms are irrelevant here.
 
 ## The three properties worth having
 

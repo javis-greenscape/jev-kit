@@ -1,8 +1,7 @@
 """A local credential belt: pure-code patterns for credential-shaped text.
 
-Ported from valentynkit/jev-commit's `jev_commit/belt.py` (MIT), which the
-vetting report singled out as "a better local secret belt than we have"
-(`docs/community-vetting.md`, item 4). Two things came across:
+Ported from valentynkit/jev-commit's `jev_commit/belt.py` (MIT, see
+`docs/CREDITS.md`). Two things came across:
 
   - the split between HIGH-PRECISION patterns, which are specific enough to
     act on, and HIGH-RECALL ones, which are not and only ever inform; and
@@ -113,8 +112,8 @@ def _safe_line(line, matched):
     """The context line, with the matched credential cut out of it FIRST and
     the general redactor run over what is left.
 
-    Order matters, and it is the ordering lesson from jevlogs
-    (docs/community-vetting.md, item 9): nothing downstream -- a log row, a
+    Order matters, and it is the ordering lesson from reachjalil/jevlogs
+    (see docs/CREDITS.md): nothing downstream -- a log row, a
     deny message, a report -- should ever be able to see the raw text. The
     matched value is replaced by its own four-character prefix, because that
     is the only part callers are allowed to have; then the whole line goes

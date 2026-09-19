@@ -1,5 +1,5 @@
 """The `user_requested` softener and the `ask` outcome, ported from
-leepokai/jev-guard (see docs/community-vetting.md, item 12).
+leepokai/jev-guard (MIT, see docs/CREDITS.md).
 
 Two properties matter more than any of the mechanics:
 

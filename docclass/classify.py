@@ -1,8 +1,8 @@
 """classify_page(text, taxonomy) -- two stages, an escape hatch, and a gate.
 
 Ported in shape from kyotofin/tax-doc-classifier's `src/classify.ts`
-(`criterionFor` / `firstListCriteria` / `familyOf`), per the vetting report's
-"PORT THE PATTERN" verdict.
+(`criterionFor` / `firstListCriteria` / `familyOf`); Apache-2.0, see
+`docs/CREDITS.md`. The pattern was ported, not the code.
 
 The three properties worth having, and why:
 
@@ -103,8 +103,8 @@ def confidence_gate(taxonomy):
 
 def _criteria_from(entries, escape_text):
     """A Choice `criteria` object in the {what, not_for, examples} shape the
-    behaviour study found actually works (docs/community-vetting.md, item 11,
-    finding 4: describe what each option covers; a sterner preamble does
+    behaviour study found actually works (RINNECODER/jev-behavior-study, see
+    docs/CREDITS.md: describe what each option covers; a sterner preamble does
     nothing), plus the escape option."""
     criteria = {}
     for name, entry in entries.items():

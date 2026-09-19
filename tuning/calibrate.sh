@@ -4,7 +4,7 @@
 #
 # airlock/policy.py ships CONFIDENCE_THRESHOLD = 0.8 and MARGIN_THRESHOLD = 0.4.
 # Those were chosen by judgement, not measurement. jevcal (abhixhek/jevcal,
-# docs/community-vetting.md item 10) picks a threshold that holds a stated
+# MIT, see docs/CREDITS.md) picks a threshold that holds a stated
 # accuracy among the decisions kept, verifies it on held-out rows, and writes a
 # lock file `jevcal check` can later fail CI on when the model drifts.
 #
@@ -19,8 +19,8 @@
 #
 # Tune against OBSERVED CORRECTNESS, never against reported confidence. The
 # behaviour study measured a case where the mean reported confidence of an
-# entirely wrong answer was 0.9744 (docs/community-vetting.md, item 11,
-# findings 4 and 7). jevcal scores against the gold labels in
+# entirely wrong answer was 0.9744 (RINNECODER/jev-behavior-study, see
+# docs/CREDITS.md). jevcal scores against the gold labels in
 # eval/cases.jsonl, which is the right way round.
 set -uo pipefail
 

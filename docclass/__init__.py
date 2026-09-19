@@ -1,7 +1,7 @@
 """docclass: classify the pages of a document against a taxonomy.
 
-The shape is ported from kyotofin/tax-doc-classifier (docs/community-vetting.md,
-item 5). US tax forms are irrelevant here; the structure is not:
+The shape is ported from kyotofin/tax-doc-classifier (Apache-2.0, see
+docs/CREDITS.md). US tax forms are irrelevant here; the structure is not:
 
   - a JSON file of document-type criteria, not a table baked into code;
   - a TWO-STAGE Choice, family first and then member within that family, so

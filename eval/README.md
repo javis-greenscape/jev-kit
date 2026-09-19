@@ -82,7 +82,7 @@ written rather than relabelled to match the model.
 `eval/ablation.py` answers one question: does `task_kind` move when only the
 `subagent_type` changes?
 
-jev-behavior-study's first finding (`docs/community-vetting.md`, item 11) is
+jev-behavior-study's first finding ([`docs/CREDITS.md`](../docs/CREDITS.md)) is
 that a surface cue in the state can dominate the judgement -- holding everything
 else fixed and calling a journey "a five-minute walk" took the model from 20/20
 correct to 0/20. The tier guard puts `subagent_type` into the state alongside

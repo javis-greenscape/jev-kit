@@ -1,9 +1,9 @@
 # logtriage: label log lines, cheaply and without leaking them
 
 Reads log lines on stdin, emits one JSON object per line on stdout with a
-triage label. The design is ported from reachjalil/jevlogs
-(`docs/community-vetting.md`, item 9), whose privacy architecture the vetting
-report called "the template we should be copying".
+triage label. The design is ported from reachjalil/jevlogs (MIT, see
+[`docs/CREDITS.md`](../docs/CREDITS.md)), whose privacy architecture it
+follows.
 
 ## Three steps, in this order, structurally
 

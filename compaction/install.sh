@@ -108,6 +108,6 @@ cat <<'EOF'
 Installed. Before you rely on this, re-read compaction/README.md: this
 plugin sends up to ~25,000 tokens of raw tool inputs and tool-result text per
 compaction request, unredacted, to TypeSafe. That was true at the time this
-was vetted (docs/community-vetting.md) and nothing in this install changes
+was read from its source (see docs/CREDITS.md) and nothing in this install changes
 it.
 EOF

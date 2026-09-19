@@ -1000,7 +1000,7 @@ def prefilter_commit_secret(ctx):
 # --- R10: general risk, the catch-all ----------------------------------------
 #
 # Ported in spirit from leepokai/jev-guard's ACTION_QUESTIONS (`src/guard.js`,
-# see docs/community-vetting.md section 12), which asks a `risk` score on
+# MIT, see docs/CREDITS.md), which asks a `risk` score on
 # EVERY non-read-only tool call. Asking on every call is exactly the cost this
 # project exists to avoid, so the port keeps the question and drops the
 # blanket: R10 runs only when
@@ -1552,7 +1552,7 @@ RULES = [
         deny_when=warn_general_risk,
         fallback=True,
         why="Ported in spirit from leepokai/jev-guard's ACTION_QUESTIONS risk score "
-            "(docs/community-vetting.md s12), narrowed to calls no other rule covers "
+            "(docs/CREDITS.md), narrowed to calls no other rule covers "
             "and that a code pre-filter marks as reaching outside the working tree. "
             "Warn only, never deny.",
     ),

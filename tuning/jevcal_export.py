@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Export our questions and our eval cases in the shapes jevcal expects.
 
-jevcal (abhixhek/jevcal, `docs/community-vetting.md` item 10) is the missing
+jevcal (abhixhek/jevcal, MIT, see `docs/CREDITS.md`) is the missing
 rigour under the confidence thresholds in airlock/policy.py, which were
 picked by hand. It wants three files:
 

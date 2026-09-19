@@ -1,5 +1,5 @@
-"""The local credential belt, ported from jev-commit (docs/community-vetting.md
-item 4), and rule R9's use of it.
+"""The local credential belt, ported from valentynkit/jev-commit (MIT, see
+docs/CREDITS.md), and rule R9's use of it.
 
 The belt's value is entirely in its precision: a credential belt that fires on
 `risk-assessment` or on `sk-your_key_here` gets switched off within a week and

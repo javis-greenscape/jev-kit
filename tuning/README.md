@@ -168,7 +168,8 @@ LLM (OpenAI, OpenRouter or Anthropic) with our dataset. `calibrate.sh` uses only
 **Tune against observed correctness, never against reported confidence.** jevcal
 scores against the gold labels in `eval/cases.jsonl`, which is the right way
 round. The behaviour study measured a case where the mean reported confidence of
-an entirely wrong answer was 0.9744 (`docs/community-vetting.md`, item 11).
+an entirely wrong answer was 0.9744 (RINNECODER/jev-behavior-study, see
+[`docs/CREDITS.md`](../docs/CREDITS.md)).
 
 ### The drift gate
 
