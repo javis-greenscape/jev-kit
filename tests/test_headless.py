@@ -128,8 +128,10 @@ class TestHostCapacity(unittest.TestCase):
         self.assertEqual(headless.cpu_count(override=12), 12)
 
     def test_cpu_count_falls_back_to_a_safe_small_number(self):
-        with mock.patch("os.cpu_count", return_value=None):
-            self.assertGreaterEqual(headless.cpu_count(), 1)
+        with mock.patch("os.cpu_count", return_value=None), \
+             mock.patch("airlock.headless._affinity_cpu_count", return_value=None), \
+             mock.patch("airlock.headless._cgroup_cpu_quota_count", return_value=None):
+            self.assertEqual(headless.cpu_count(), 2)
 
     def test_gs_sized_host_is_small(self):
         self.assertTrue(headless.is_small_host(cpus=4))
@@ -146,6 +148,83 @@ class TestHostCapacity(unittest.TestCase):
             self.assertTrue(headless.is_small_host())
         with mock.patch("airlock.headless.cpu_count", return_value=12):
             self.assertFalse(headless.is_small_host())
+
+
+class TestCpuCountConstrained(unittest.TestCase):
+    """Codex P2 on PR #2: os.cpu_count() reports the HOST's logical core
+    count, not what a container's --cpus quota or a taskset affinity mask
+    actually lets this process use -- so on a 12-core host capped to 4,
+    R3's warning was suppressed exactly where uncapped work still contends."""
+
+    def test_uses_the_smallest_of_affinity_cgroup_and_os_cpu_count(self):
+        with mock.patch("airlock.headless._affinity_cpu_count", return_value=8), \
+             mock.patch("airlock.headless._cgroup_cpu_quota_count", return_value=4), \
+             mock.patch("os.cpu_count", return_value=12):
+            self.assertEqual(headless.cpu_count(), 4)
+
+    def test_affinity_alone_caps_below_os_cpu_count(self):
+        with mock.patch("airlock.headless._affinity_cpu_count", return_value=4), \
+             mock.patch("airlock.headless._cgroup_cpu_quota_count", return_value=None), \
+             mock.patch("os.cpu_count", return_value=12):
+            self.assertEqual(headless.cpu_count(), 4)
+
+    def test_cgroup_quota_alone_caps_below_os_cpu_count(self):
+        with mock.patch("airlock.headless._affinity_cpu_count", return_value=None), \
+             mock.patch("airlock.headless._cgroup_cpu_quota_count", return_value=4), \
+             mock.patch("os.cpu_count", return_value=12):
+            self.assertEqual(headless.cpu_count(), 4)
+
+    def test_no_constraint_signal_falls_back_to_os_cpu_count(self):
+        with mock.patch("airlock.headless._affinity_cpu_count", return_value=None), \
+             mock.patch("airlock.headless._cgroup_cpu_quota_count", return_value=None), \
+             mock.patch("os.cpu_count", return_value=12):
+            self.assertEqual(headless.cpu_count(), 12)
+
+    def test_override_bypasses_all_detection(self):
+        with mock.patch("airlock.headless._affinity_cpu_count", return_value=2), \
+             mock.patch("airlock.headless._cgroup_cpu_quota_count", return_value=2), \
+             mock.patch("os.cpu_count", return_value=2):
+            self.assertEqual(headless.cpu_count(override=99), 99)
+
+
+class TestCgroupCpuQuotaCount(unittest.TestCase):
+    def _cgroup(self, files):
+        d = tempfile.mkdtemp()
+        for rel, content in files.items():
+            path = Path(d) / rel
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(content)
+        return d
+
+    def test_v2_quota_and_period(self):
+        root = self._cgroup({"cpu.max": "400000 100000\n"})
+        self.assertEqual(headless._cgroup_cpu_quota_count(root), 4)
+
+    def test_v2_unlimited_is_no_evidence(self):
+        root = self._cgroup({"cpu.max": "max 100000\n"})
+        self.assertIsNone(headless._cgroup_cpu_quota_count(root))
+
+    def test_v2_partial_core_rounds_up(self):
+        root = self._cgroup({"cpu.max": "150000 100000\n"})
+        self.assertEqual(headless._cgroup_cpu_quota_count(root), 2)
+
+    def test_v1_quota_and_period(self):
+        root = self._cgroup({
+            "cpu/cpu.cfs_quota_us": "200000\n",
+            "cpu/cpu.cfs_period_us": "100000\n",
+        })
+        self.assertEqual(headless._cgroup_cpu_quota_count(root), 2)
+
+    def test_v1_unlimited_quota_is_no_evidence(self):
+        root = self._cgroup({
+            "cpu/cpu.cfs_quota_us": "-1\n",
+            "cpu/cpu.cfs_period_us": "100000\n",
+        })
+        self.assertIsNone(headless._cgroup_cpu_quota_count(root))
+
+    def test_missing_files_are_no_evidence(self):
+        root = self._cgroup({})
+        self.assertIsNone(headless._cgroup_cpu_quota_count(root))
 
 
 class TestMergeIntoRulesJson(unittest.TestCase):

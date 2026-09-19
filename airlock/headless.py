@@ -43,8 +43,6 @@ None for "not available").
 """
 import json
 import os
-import shutil
-import subprocess
 import time
 
 #: The rule id and the action a headless machine wants it set to.
@@ -56,8 +54,18 @@ def _run_loginctl():
     """stdout of `loginctl list-sessions --no-legend`, or None if unavailable.
 
     None means "no evidence", never "headless". Any failure -- binary absent,
-    no logind, D-Bus unreachable, a hang -- returns None."""
+    no logind, D-Bus unreachable, a hang -- returns None.
+
+    `shutil` and `subprocess` are imported here, not at module top: this is
+    the only code in this module that needs them, and headless.py is now
+    imported unconditionally on the hook's hot path (for is_small_host /
+    cpu_count) whether or not any rule ever fires. A module-level import of
+    both cost enough to push an already-tight entry point over its 100ms
+    budget (measured 91.5ms -> 120.5ms median; see rules.py's import of this
+    module and airlock/tests/test_entry_point_is_fast)."""
     try:
+        import shutil
+        import subprocess
         if not shutil.which("loginctl"):
             return None
         out = subprocess.run(
@@ -73,6 +81,7 @@ def _run_loginctl():
 
 def _loginctl_show(session_id):
     try:
+        import subprocess
         out = subprocess.run(
             ["loginctl", "show-session", session_id, "-p", "Type", "-p", "Class", "-p", "Seat"],
             stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=5,
@@ -139,20 +148,67 @@ def is_wsl(env=None, proc_version=None):
 SMALL_HOST_CPU_THRESHOLD = 6
 
 
+def _affinity_cpu_count():
+    """CPUs this process may actually schedule on, per its affinity mask
+    (`taskset`, a container's `--cpuset-cpus`). None when the platform has
+    no `os.sched_getaffinity` (macOS, native Windows) or it fails."""
+    try:
+        return len(os.sched_getaffinity(0))
+    except Exception:
+        return None
+
+
+def _cgroup_cpu_quota_count(cgroup_root="/sys/fs/cgroup"):
+    """CPUs implied by a cgroup CPU quota (a container's `--cpus=N`, which
+    an affinity mask does not see). Tries cgroup v2's single `cpu.max`
+    file, then cgroup v1's separate quota/period files. `max`/absent/
+    unreadable/non-positive all mean "no evidence", never a count."""
+    try:
+        with open(os.path.join(cgroup_root, "cpu.max")) as f:
+            quota_str, period_str = f.read().split()
+        if quota_str == "max":
+            return None
+        quota, period = int(quota_str), int(period_str)
+    except Exception:
+        try:
+            with open(os.path.join(cgroup_root, "cpu", "cpu.cfs_quota_us")) as f:
+                quota = int(f.read().strip())
+            with open(os.path.join(cgroup_root, "cpu", "cpu.cfs_period_us")) as f:
+                period = int(f.read().strip())
+        except Exception:
+            return None
+    if quota <= 0 or period <= 0:
+        return None
+    return max(1, -(-quota // period))  # ceil division, no float/math import
+
+
 def cpu_count(override=None):
     """Number of CPUs available to this process.
 
     `override` is the injection point every caller forwards, matching
     `is_wsl`'s `env`/`proc_version` arguments: pass an int to force the
-    answer in a test. Falls back to 2 (a conservative small number) if
-    `os.cpu_count()` cannot tell."""
+    answer in a test. Otherwise the SMALLEST of: the affinity mask, a
+    cgroup CPU quota, and `os.cpu_count()` -- a host's logical core count
+    overstates what a constrained process (a container capped at `--cpus`,
+    a taskset job) can actually use, which is exactly the case
+    is_small_host() below exists to catch. Falls back to 2 (a conservative
+    small number) if none of the three can tell."""
     if override is not None:
         return override
+    candidates = []
+    n = _affinity_cpu_count()
+    if n:
+        candidates.append(n)
+    n = _cgroup_cpu_quota_count()
+    if n:
+        candidates.append(n)
     try:
         n = os.cpu_count()
     except Exception:
         n = None
-    return n if n else 2
+    if n:
+        candidates.append(n)
+    return min(candidates) if candidates else 2
 
 
 def is_small_host(cpus=None):
