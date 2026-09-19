@@ -1,0 +1,123 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1760 640" width="1760" height="640" role="img" aria-labelledby="t d">
+  <title id="t">jev-kit: how a tool call passes through the guard</title>
+  <desc id="d">An agent's tool call enters from the left. A free code pre-filter lets about 93 percent of calls straight through. The few that look risky are judged by Jev in about 0.3 seconds, and the call is then allowed, warned, rewritten or blocked. Any error lets the call through.</desc>
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#0C1118"/>
+      <stop offset="1" stop-color="#0A0E14"/>
+    </linearGradient>
+    <linearGradient id="fadeIn" gradientUnits="userSpaceOnUse" x1="60" y1="0" x2="300" y2="0">
+      <stop offset="0" stop-color="#00F0B5" stop-opacity="0"/>
+      <stop offset="1" stop-color="#00F0B5" stop-opacity="1"/>
+    </linearGradient>
+    <linearGradient id="greyOut" gradientUnits="userSpaceOnUse" x1="540" y1="400" x2="760" y2="600">
+      <stop offset="0" stop-color="#5B6675" stop-opacity="0.9"/>
+      <stop offset="1" stop-color="#5B6675" stop-opacity="0"/>
+    </linearGradient>
+    <radialGradient id="halo" cx="0.5" cy="0.5" r="0.5">
+      <stop offset="0" stop-color="#00F0B5" stop-opacity="0.35"/>
+      <stop offset="1" stop-color="#00F0B5" stop-opacity="0"/>
+    </radialGradient>
+    <filter id="glow" filterUnits="userSpaceOnUse" x="0" y="0" width="1760" height="640">
+      <feGaussianBlur stdDeviation="5" result="b"/>
+      <feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+    <style>
+      text { font-family: "Inter", "Segoe UI", "Helvetica Neue", Arial, sans-serif; }
+      .mono { font-family: "JetBrains Mono", "SFMono-Regular", Consolas, "Liberation Mono", monospace; }
+      .stage { fill: #E6EDF3; font-size: 25px; font-weight: 600; }
+      .sub { fill: #98A4B3; font-size: 19px; }
+      .num { font-size: 40px; font-weight: 700; }
+      .out { font-size: 23px; font-weight: 600; }
+      .outsub { fill: #98A4B3; font-size: 17px; }
+    </style>
+  </defs>
+
+  <rect width="1760" height="640" fill="url(#bg)"/>
+
+  <!-- wordmark -->
+  <text x="88" y="128" fill="#00F0B5" font-size="76" font-weight="700" letter-spacing="1">jev-kit</text>
+  <rect x="90" y="150" width="252" height="5" rx="2.5" fill="#00F0B5"/>
+  <text x="88" y="196" fill="#98A4B3" font-size="27">Jev, wired into Claude Code</text>
+
+  <!-- promise, top right -->
+  <text x="1672" y="118" text-anchor="end" fill="#E6EDF3" font-size="27" font-weight="600">A fast judge inside your agent's loop.</text>
+  <text x="1672" y="154" text-anchor="end" fill="#98A4B3" font-size="21">Typed decisions with probabilities, not text.</text>
+
+  <!-- main track -->
+  <rect x="60" y="398" width="240" height="4" fill="url(#fadeIn)"/>
+  <rect x="300" y="398" width="990" height="4" fill="#00F0B5" filter="url(#glow)"/>
+
+  <!-- stage 1: the tool call -->
+  <circle cx="200" cy="400" r="34" fill="url(#halo)"/>
+  <circle cx="200" cy="400" r="11" fill="#00F0B5" filter="url(#glow)"/>
+  <text x="200" y="318" text-anchor="middle" class="stage">Agent tool call</text>
+  <text x="200" y="346" text-anchor="middle" class="sub mono">Bash · Agent · Read</text>
+
+  <!-- stage 2: code pre-filter, most calls leave here -->
+  <g>
+    <rect x="520" y="352" width="16" height="96" rx="8" fill="#0C1118" stroke="#00F0B5" stroke-width="3"/>
+    <text x="528" y="290" text-anchor="middle" class="stage">Code pre-filter</text>
+    <text x="528" y="318" text-anchor="middle" class="sub">scope and shape decided in code</text>
+    <!-- the fan of calls that exit for free -->
+    <g fill="none" stroke="url(#greyOut)" stroke-width="2.5" stroke-linecap="round">
+      <path d="M540 408 C600 416 660 470 720 560"/>
+      <path d="M540 408 C610 420 690 480 770 580"/>
+      <path d="M540 408 C590 430 630 500 670 590"/>
+      <path d="M540 408 C620 412 720 450 820 540"/>
+      <path d="M540 408 C575 440 595 520 615 600"/>
+      <path d="M540 408 C630 408 750 430 860 500"/>
+    </g>
+    <text x="500" y="510" text-anchor="end" class="num" fill="#E6EDF3">~93%</text>
+    <text x="500" y="540" text-anchor="end" class="sub">of calls pass straight through.</text>
+    <text x="500" y="566" text-anchor="end" class="sub">No model call, no cost.</text>
+  </g>
+
+  <!-- stage 3: Jev judges -->
+  <g>
+    <circle cx="1040" cy="400" r="58" fill="url(#halo)"/>
+    <circle cx="1040" cy="400" r="30" fill="#0C1118" stroke="#00F0B5" stroke-width="3.5" filter="url(#glow)"/>
+    <text x="1040" y="409" text-anchor="middle" fill="#00F0B5" font-size="25" font-weight="700">Jev</text>
+    <text x="1040" y="262" text-anchor="middle" class="stage">Jev judges the intent</text>
+    <text x="1040" y="290" text-anchor="middle" class="sub">about 0.3 s, fractions of a cent</text>
+    <!-- confidence and margin bars -->
+    <g class="mono" font-size="16" fill="#98A4B3">
+      <text x="952" y="492">confidence</text>
+      <rect x="1062" y="480" width="120" height="10" rx="5" fill="#1B2430"/>
+      <rect x="1062" y="480" width="104" height="10" rx="5" fill="#00F0B5"/>
+      <text x="952" y="518">margin</text>
+      <rect x="1062" y="506" width="120" height="10" rx="5" fill="#1B2430"/>
+      <rect x="1062" y="506" width="78" height="10" rx="5" fill="#00F0B5" fill-opacity="0.7"/>
+    </g>
+    <text x="1040" y="556" text-anchor="middle" class="sub">acts only above both bars</text>
+  </g>
+
+  <!-- stage 4: four outcomes -->
+  <g fill="none" stroke-width="4" stroke-linecap="round" filter="url(#glow)">
+    <path d="M1290 400 C1360 400 1370 250 1450 250" stroke="#00F0B5"/>
+    <path d="M1290 400 C1360 400 1380 350 1450 350" stroke="#F5A623"/>
+    <path d="M1290 400 C1360 400 1380 450 1450 450" stroke="#8A3FFC"/>
+    <path d="M1290 400 C1360 400 1370 550 1450 550" stroke="#E5484D"/>
+  </g>
+  <circle cx="1290" cy="400" r="9" fill="#00F0B5" filter="url(#glow)"/>
+  <g>
+    <circle cx="1456" cy="250" r="9" fill="#00F0B5"/>
+    <text x="1482" y="250" class="out" fill="#00F0B5">allow</text>
+    <text x="1482" y="274" class="outsub">silent, the call runs as written</text>
+
+    <circle cx="1456" cy="350" r="9" fill="#F5A623"/>
+    <text x="1482" y="350" class="out" fill="#F5A623">warn</text>
+    <text x="1482" y="374" class="outsub">a note the agent reads</text>
+
+    <circle cx="1456" cy="450" r="9" fill="#8A3FFC"/>
+    <text x="1482" y="450" class="out" fill="#A974FF">rewrite</text>
+    <text x="1482" y="474" class="outsub">right-size the sub-agent</text>
+
+    <circle cx="1456" cy="550" r="9" fill="#E5484D"/>
+    <text x="1482" y="550" class="out" fill="#E5484D">block</text>
+    <text x="1482" y="574" class="outsub">with the command to run instead</text>
+  </g>
+
+  <!-- fail-open footer -->
+  <text x="1040" y="612" text-anchor="middle" class="mono" font-size="17" fill="#5B6675">any error, timeout or outage: the call goes through</text>
+</svg>

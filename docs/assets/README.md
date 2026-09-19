@@ -1,8 +1,10 @@
 # Image assets the README expects
 
-None of these files exist yet. The README references the hero inside an HTML
-comment so the page reads correctly while it is absent; uncomment that block
-once `hero.png` lands here.
+`hero.svg` exists and is what the README shows: a hand-written SVG (1760x640
+viewBox) rather than a generated bitmap, so its labels are exact and it stays
+sharp at any width. Every number on it comes from `docs/measurements.md`; change
+the two together. `social-preview.png` is set in the repository Settings and is
+not referenced from Markdown.
 
 | File | Size | Where it is used | What it shows |
 |---|---|---|---|

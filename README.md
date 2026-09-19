@@ -26,9 +26,7 @@
   <a href="#faq">FAQ</a>
 </p>
 
-<!-- Hero image not generated yet. See docs/assets/README.md for the spec.
-<img src="docs/assets/hero.png" alt="jev-kit: a tool call passing through the guard" width="880">
--->
+<img src="docs/assets/hero.svg" alt="jev-kit: an agent's tool call passes a free code pre-filter that lets about 93% straight through; the rest are judged by Jev in about 0.3 s and then allowed, warned, rewritten or blocked. Any error lets the call through." width="100%">
 
 </div>
 
