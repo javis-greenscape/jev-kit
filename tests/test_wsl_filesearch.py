@@ -21,11 +21,22 @@ class TestFilenameSearchSuggestionWsl(unittest.TestCase):
             policy.PLOCATE_SUGGESTION,
         )
 
-    def test_wsl_mixed_roots_with_a_windows_host_root_gets_es_wsl(self):
+    def test_wsl_mixed_roots_get_both_indexes(self):
         # The real failing command's roots: a Linux root and a /mnt/c root.
+        # Everything cannot search the Linux side and plocate cannot search
+        # /mnt, so naming either one alone would silently drop half the search
+        # (Codex P1 on PR #1; this test previously asserted the ES-only answer).
         self.assertEqual(
             policy.filename_search_suggestion(
                 wsl=True, roots=["/home/alice", "/mnt/c/Users"],
+            ),
+            policy.ES_WSL_MIXED_SUGGESTION,
+        )
+
+    def test_wsl_windows_only_roots_get_es_wsl(self):
+        self.assertEqual(
+            policy.filename_search_suggestion(
+                wsl=True, roots=["/mnt/c/Users", "/mnt/d/data"],
             ),
             policy.ES_WSL_SUGGESTION,
         )
@@ -113,7 +124,7 @@ class TestEvaluateSearchWsl(unittest.TestCase):
             wsl=True,
         )
         self.assertTrue(verdict["would_deny"])
-        self.assertEqual(verdict["suggestion"], policy.ES_WSL_SUGGESTION)
+        self.assertEqual(verdict["suggestion"], policy.ES_WSL_MIXED_SUGGESTION)
 
     def test_same_scenario_with_es_command_already_used_does_not_deny(self):
         verdict = policy.evaluate_search(
@@ -128,6 +139,78 @@ class TestEvaluateSearchWsl(unittest.TestCase):
         )
         self.assertFalse(verdict["would_deny"])
 
+
+
+class TestMixedRootsNameBothIndexes(unittest.TestCase):
+    """Codex P1 on PR #1: a disk-wide search spanning both filesystems was
+    answered with the Everything suggestion alone, because any_root_is_windows_host
+    is satisfied by a single /mnt root. Everything cannot search the Linux side,
+    so that advice silently drops every result from the $HOME roots."""
+
+    def test_mixed_roots_get_both_commands(self):
+        s = policy.filename_search_suggestion(
+            windows=False, roots=["/home/someone", "/mnt/c/Users"], wsl=True)
+        self.assertIs(s, policy.ES_WSL_MIXED_SUGGESTION)
+        self.assertIn("plocate", s)
+        self.assertIn("es -path", s)
+
+    def test_windows_only_roots_still_get_everything_alone(self):
+        self.assertIs(
+            policy.filename_search_suggestion(
+                windows=False, roots=["/mnt/c/Users", "/mnt/d/data"], wsl=True),
+            policy.ES_WSL_SUGGESTION)
+
+    def test_linux_only_roots_still_get_plocate_alone(self):
+        self.assertIs(
+            policy.filename_search_suggestion(
+                windows=False, roots=["/home/someone", "/opt"], wsl=True),
+            policy.PLOCATE_SUGGESTION)
+
+    def test_the_command_that_started_this(self):
+        """`find "$HOME" /mnt/c/Users -name x` -- the real failing call."""
+        self.assertIs(
+            policy.filename_search_suggestion(
+                windows=False, roots=["/home/someone", "/mnt/c/Users"], wsl=True),
+            policy.ES_WSL_MIXED_SUGGESTION)
+
+    def test_any_root_is_linux_side(self):
+        self.assertTrue(policy.any_root_is_linux_side(["/home/x", "/mnt/c"]))
+        self.assertTrue(policy.any_root_is_linux_side(["/opt"]))
+        self.assertFalse(policy.any_root_is_linux_side(["/mnt/c/Users"]))
+        self.assertFalse(policy.any_root_is_linux_side([]))
+        self.assertFalse(policy.any_root_is_linux_side(None))
+
+
+class TestEsOnlyInCommandPosition(unittest.TestCase):
+    """Codex P2 on PR #1: _ES_RE accepted `es` in any whitespace-delimited
+    argument, so `find / -name es` read as already-indexed and suppressed the
+    deny it should have produced."""
+
+    def test_es_as_an_argument_is_not_a_command(self):
+        self.assertFalse(policy.command_already_uses_indexed_search(
+            "find / -name es", windows=False, wsl=True))
+
+    def test_quoted_es_argument_is_not_a_command(self):
+        self.assertFalse(policy.command_already_uses_indexed_search(
+            'find /mnt/c -name "es"', windows=False, wsl=True))
+
+    def test_es_at_the_start_is_a_command(self):
+        self.assertTrue(policy.command_already_uses_indexed_search(
+            'es -path "/mnt/c" -n 50 "x"', windows=False, wsl=True))
+
+    def test_es_after_a_separator_is_a_command(self):
+        for cmd in ('cd /tmp && es -n 5 "x"', 'ls | es "x"', 'true; es "x"'):
+            with self.subTest(cmd=cmd):
+                self.assertTrue(policy.command_already_uses_indexed_search(
+                    cmd, windows=False, wsl=True))
+
+    def test_es_exe_still_recognised(self):
+        self.assertTrue(policy.command_already_uses_indexed_search(
+            'es.exe -n 5 "x"', windows=False, wsl=True))
+
+    def test_es_inside_a_word_is_not_a_command(self):
+        self.assertFalse(policy.command_already_uses_indexed_search(
+            "grep -r bytes .", windows=False, wsl=True))
 
 if __name__ == "__main__":
     unittest.main()

@@ -431,6 +431,18 @@ ES_WSL_SUGGESTION = (
     "     Linux side only. Everything's index answers instantly. Add -r for a regex\n"
     "     pattern, -i to make the match case-sensitive)"
 )
+
+# Mixed roots: the command spans both filesystems, and neither index covers
+# the other's ground. Replacing it with either one alone silently drops every
+# result from the other half, which is worse than the crawl it is replacing --
+# so name both, in the order the original roots were given.
+ES_WSL_MIXED_SUGGESTION = (
+    "plocate -d ~/.cache/plocate/home.db -i '<pattern>'    # the Linux $HOME roots\n"
+    'es -path "<folder>" -n 50 "<pattern>"                 # the /mnt/<drive> roots\n'
+    "    (this search spans both filesystems and no single index covers both:\n"
+    "     plocate never indexes /mnt/<drive>, and Everything never indexes the\n"
+    "     Linux side. Run both and combine, or split the search by root)"
+)
 GRAPHIFY_SUGGESTION = "graphify query"
 
 # A WSL mount point for a Windows drive: "/mnt/c", "/mnt/c/Users/...".
@@ -465,6 +477,17 @@ def any_root_is_windows_host(roots):
     return False
 
 
+def any_root_is_linux_side(roots):
+    """True when any root is NOT on the Windows host, i.e. ground plocate can
+    actually index. The complement of root_is_windows_host over the same list,
+    so a mixed search (`find "$HOME" /mnt/c/Users -name x`) answers True to
+    this AND to any_root_is_windows_host, and neither index alone will do."""
+    for root in roots or []:
+        if not root_is_windows_host(root):
+            return True
+    return False
+
+
 # The indexed tool this platform already has. One function so the rule text,
 # the deny reason and the doctor all say the same thing on each OS, and no
 # caller has to test sys.platform for itself.
@@ -474,7 +497,10 @@ def filename_search_suggestion(windows=None, roots=None, wsl=None):
     Native Windows always gets ES_SUGGESTION. Otherwise, under WSL, a root
     that lives on the Windows host (/mnt/<drive>/...) gets ES_WSL_SUGGESTION
     instead of the plocate suggestion, since plocate's index never covers
-    that ground. Everything else gets PLOCATE_SUGGESTION. `wsl` defaults
+    that ground; roots on BOTH sides get ES_WSL_MIXED_SUGGESTION, which names
+    both commands, since replacing a mixed search with either index alone
+    silently drops every result from the other half. Everything else gets
+    PLOCATE_SUGGESTION. `wsl` defaults
     lazily from airlock.headless.is_wsl() so existing zero-arg and
     windows=-only call sites keep working unchanged; a failure to detect WSL
     is treated as False, never raised."""
@@ -487,15 +513,19 @@ def filename_search_suggestion(windows=None, roots=None, wsl=None):
         except Exception:
             wsl = False
     if wsl and any_root_is_windows_host(roots):
+        if any_root_is_linux_side(roots):
+            return ES_WSL_MIXED_SUGGESTION
         return ES_WSL_SUGGESTION
     return PLOCATE_SUGGESTION
 
 
 _LOCATE_RE = re.compile(r"(?<![A-Za-z0-9_])(plocate|locate)(?![A-Za-z0-9_])")
-# `es` and `es.exe`, as a command word. Deliberately narrow: two letters would
-# otherwise match inside any word, and only a bare command word means the
-# Everything client.
-_ES_RE = re.compile(r"(?:^|[\s;&|(])es(?:\.exe)?(?=\s|$)", re.I)
+# `es` and `es.exe`, in COMMAND POSITION only: at the start, or straight after
+# a shell separator. Two letters would otherwise match inside any word, and a
+# plain-whitespace prefix was too loose -- it also matched `es` as an argument,
+# so `find / -name es` read as "already using the indexed tool" and suppressed
+# the very deny it should have triggered.
+_ES_RE = re.compile(r"(?:^|[\n;&|(])\s*es(?:\.exe)?(?=\s|$)", re.I)
 
 
 def command_already_uses_locate(command):

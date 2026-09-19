@@ -21,3 +21,7 @@ drive needs `es`, voidtools Everything's client, reached under its bare name
 on PATH. A file not turning up in a plocate search of `$HOME` is not evidence
 that the file does not exist; it may simply be on the other side, under
 `/mnt/<drive>`, where only `es` can find it.
+- A search that spans both sides at once needs both commands run separately:
+  plocate never indexes `/mnt/<drive>`, and Everything never indexes the Linux
+  side, so replacing a mixed search with either one alone silently drops half
+  the results.
