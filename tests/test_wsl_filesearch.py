@@ -17,7 +17,7 @@ class TestFilenameSearchSuggestionWsl(unittest.TestCase):
 
     def test_wsl_linux_home_root_gets_plocate(self):
         self.assertEqual(
-            policy.filename_search_suggestion(wsl=True, roots=["/home/grafe"]),
+            policy.filename_search_suggestion(wsl=True, roots=["/home/alice"]),
             policy.PLOCATE_SUGGESTION,
         )
 
@@ -25,7 +25,7 @@ class TestFilenameSearchSuggestionWsl(unittest.TestCase):
         # The real failing command's roots: a Linux root and a /mnt/c root.
         self.assertEqual(
             policy.filename_search_suggestion(
-                wsl=True, roots=["/home/grafe", "/mnt/c/Users"],
+                wsl=True, roots=["/home/alice", "/mnt/c/Users"],
             ),
             policy.ES_WSL_SUGGESTION,
         )
@@ -67,7 +67,7 @@ class TestRootIsWindowsHost(unittest.TestCase):
         self.assertTrue(policy.root_is_windows_host(r"C:\Users\alice"))
 
     def test_linux_paths_are_not_windows_host(self):
-        self.assertFalse(policy.root_is_windows_host("/home/grafe"))
+        self.assertFalse(policy.root_is_windows_host("/home/alice"))
         self.assertFalse(policy.root_is_windows_host("/mnt2/c/Users"))
 
     def test_none_and_empty_never_raise(self):
@@ -77,7 +77,7 @@ class TestRootIsWindowsHost(unittest.TestCase):
     def test_any_root_is_windows_host_over_none_list(self):
         self.assertFalse(policy.any_root_is_windows_host(None))
         self.assertFalse(policy.any_root_is_windows_host([]))
-        self.assertTrue(policy.any_root_is_windows_host(["/home/grafe", "/mnt/c/Users"]))
+        self.assertTrue(policy.any_root_is_windows_host(["/home/alice", "/mnt/c/Users"]))
 
 
 class TestCommandAlreadyUsesIndexedSearchWsl(unittest.TestCase):
@@ -109,7 +109,7 @@ class TestEvaluateSearchWsl(unittest.TestCase):
             command='find / -iname "*jev-kit*"',
             root_has_graphify_graph=False,
             margin=_ABOVE_BAR_MARGIN,
-            roots=["/home/grafe", "/mnt/c/Users"],
+            roots=["/home/alice", "/mnt/c/Users"],
             wsl=True,
         )
         self.assertTrue(verdict["would_deny"])
@@ -123,7 +123,7 @@ class TestEvaluateSearchWsl(unittest.TestCase):
             command='es -path "/mnt/c/Users" -n 50 "*jev-kit*"',
             root_has_graphify_graph=False,
             margin=_ABOVE_BAR_MARGIN,
-            roots=["/home/grafe", "/mnt/c/Users"],
+            roots=["/home/alice", "/mnt/c/Users"],
             wsl=True,
         )
         self.assertFalse(verdict["would_deny"])
