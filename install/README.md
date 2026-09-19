@@ -76,3 +76,33 @@ call, made once, on purpose.
 
 Nothing in these scripts assumes any particular user's home directory: `$AIRLOCK_HOME` derives from `$HOME` unless overridden, and the
 main repo is found via `git worktree list` from the script's own location.
+
+## Native Windows: `windows_install.py`, `windows_doctor.py`, `windows_uninstall.py`
+
+The three scripts above are bash and are Linux-only. Their Windows
+counterparts are Python, because a native Windows install must not require
+Git for Windows in order to install a guard whose whole purpose is to run
+without extra dependencies. Full guide:
+[docs/INSTALL-WINDOWS.md](../docs/INSTALL-WINDOWS.md).
+
+```cmd
+py -3 install\windows_install.py --check-only
+py -3 install\windows_install.py --wire
+py -3 install\windows_doctor.py
+py -3 install\windows_uninstall.py --check-only
+```
+
+Thin `.cmd` and `.ps1` launchers (`windows-install.cmd`,
+`windows-doctor.ps1`, ...) do nothing but find a Python interpreter and pass
+every argument through.
+
+`windows_install.py` does deploy.sh's job and wire.sh's job in one pass, and
+it reuses `_wire.py` for the settings.json edit (behind
+`HOOK_COMMAND_QUOTED=1`, which selects the quoted Windows hook-command
+shape). It does NOT use `deploy.sh`'s symlink: Windows does not give an
+ordinary user symlink privilege, so `current` is a directory junction when
+the volume allows one and a `current.txt` text pointer always, with
+`settings.json` pointing at a stable launcher that follows whichever is
+there. `install/windows_common.py` explains that decision in full.
+
+Rollback on Windows is one line of `current.txt`; `rollback.sh` is not used.

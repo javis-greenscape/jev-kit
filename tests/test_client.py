@@ -11,6 +11,8 @@ import os
 import socket
 import tempfile
 import unittest
+
+from tests import posix_only
 from unittest import mock
 
 from airlock import client
@@ -67,6 +69,7 @@ class TestClient(unittest.TestCase):
         self.assertNotIn("subprocess.Popen", src)
 
 
+@posix_only("the warm daemon listens on a Unix domain socket; Windows has\n            none, and airlock/client.py skips it there -- see\n            tests/test_windows_platform.py:TestUnixSockets")
 class TestAskFallback(unittest.TestCase):
     """ask() must degrade to the direct call whenever the daemon socket is
     missing, refuses, or errors -- never raise anything the daemon path

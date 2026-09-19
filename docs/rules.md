@@ -13,7 +13,7 @@ Jev request, no log row, no subprocess.
 | `R3-whole-suite-or-uncapped-build` | Bash | warn | code only | the whole test suite, or a build with uncapped parallelism |
 | `R4-long-work-bare-shell` | Bash | warn | code, Jev for the ambiguous cases | long work on a shell a dropped connection would kill |
 | `R5-sudo` | Bash | deny | code only | `sudo` outside a named package install, or anywhere under `$HOME` |
-| `R6-gui-or-browser` | Bash | deny | code only | opening a GUI or browser on a headless box |
+| `R6-gui-or-browser` | Bash | deny (`off` on native Windows) | code only | opening a GUI or browser on a headless box |
 | `R7-destructive` | Bash | warn | code only | force pushes, hard resets, wholesale deletion |
 | `R8-tier-guard` | Agent | deny two rungs over, **warn one rung over**, rewrite only if asked | Jev | a task dispatched to an agent more expensive than it needs |
 | `R8-tool-choice-guard` | Bash | deny | Jev | a disk-wide filename crawl, or a raw grep where a code graph exists |

@@ -13,6 +13,7 @@ import tempfile
 import unittest
 from unittest import mock
 
+from tests import posix_only
 from airlock import repo_path
 
 
@@ -133,6 +134,8 @@ class TestResolveRepoOrder(unittest.TestCase):
         self.assertIsNone(got)
 
 
+@posix_only("pointer trust here is a uid check and a chmod check, and Windows\n"
+            "            has neither; the Windows half is TestPointerTrustOnWindows below")
 class TestPointerTrust(unittest.TestCase):
     """Same rules as keyfile.path: the pointer is followed only when its own
     permissions say the owner wrote it, and the target is a real checkout."""
@@ -226,7 +229,73 @@ class TestPointerTrust(unittest.TestCase):
             self.assertIsNone(repo_path.pointer_target())
 
 
+class TestPointerTrustOnWindows(unittest.TestCase):
+    """The same treatment as keyfile.path, for the same reason: Windows has no
+    uid and no meaningful st_mode, so those two checks are replaced by a
+    diagnostic naming what was and was not checked, and the structural checks
+    still run."""
+
+    def setUp(self):
+        repo_path.reset_diagnostics()
+
+    def _fixture(self, home, recorded=None, target_is_repo=True):
+        config = pathlib.Path(home) / "AppData" / "Roaming" / "airlock"
+        config.mkdir(parents=True)
+        target = pathlib.Path(home) / "code" / "jev-kit"
+        if target_is_repo:
+            _make_repo(target)
+        else:
+            target.mkdir(parents=True)
+        pointer = config / "repo.path"
+        pointer.write_text((recorded if recorded is not None else str(target)) + "\n")
+        return config, target
+
+    def test_the_pointer_is_followed_and_the_gap_is_recorded(self):
+        with tempfile.TemporaryDirectory() as home:
+            config, target = self._fixture(home)
+            with mock.patch.object(repo_path.paths, "config_file",
+                                   lambda name: config / name), \
+                 mock.patch.dict(os.environ, {"USERPROFILE": home}):
+                self.assertEqual(repo_path.pointer_target(windows=True), str(target))
+            blob = " ".join(repo_path.pointer_diagnostics())
+        self.assertIn("CHECKED", blob)
+        self.assertIn("NOT CHECKED", blob)
+
+    def test_a_group_writable_pointer_is_refused_on_posix_and_followed_on_windows(self):
+        with tempfile.TemporaryDirectory() as home:
+            config, target = self._fixture(home)
+            (config / "repo.path").chmod(0o666)
+            with mock.patch.object(repo_path.paths, "config_file",
+                                   lambda name: config / name), \
+                 mock.patch.dict(os.environ, {"USERPROFILE": home}):
+                self.assertEqual(repo_path.pointer_target(windows=True), str(target))
+                self.assertIsNone(repo_path.pointer_target(windows=False))
+
+    def test_a_target_that_is_not_a_checkout_is_still_refused(self):
+        with tempfile.TemporaryDirectory() as home:
+            config, _target = self._fixture(home, target_is_repo=False)
+            with mock.patch.object(repo_path.paths, "config_file",
+                                   lambda name: config / name), \
+                 mock.patch.dict(os.environ, {"USERPROFILE": home}):
+                self.assertIsNone(repo_path.pointer_target(windows=True))
+            self.assertTrue(any("not a git checkout" in d
+                                for d in repo_path.pointer_diagnostics()))
+
+    def test_a_relative_recorded_path_is_still_refused(self):
+        with tempfile.TemporaryDirectory() as home:
+            config, _target = self._fixture(home, recorded="code/jev-kit")
+            with mock.patch.object(repo_path.paths, "config_file",
+                                   lambda name: config / name), \
+                 mock.patch.dict(os.environ, {"USERPROFILE": home}):
+                self.assertIsNone(repo_path.pointer_target(windows=True))
+            self.assertTrue(any("not absolute" in d
+                                for d in repo_path.pointer_diagnostics()))
+
+
 class TestRecordRepoPath(unittest.TestCase):
+    @posix_only("0600 is a POSIX mode; on Windows chmod only toggles the "
+                "read-only attribute and platform_compat.restrict_path "
+                "deliberately skips it")
     def test_writes_path_only_mode_600(self):
         with tempfile.TemporaryDirectory() as home:
             config = pathlib.Path(home) / ".config" / "airlock"
@@ -239,6 +308,18 @@ class TestRecordRepoPath(unittest.TestCase):
 
     def test_never_raises_on_bad_dir(self):
         self.assertFalse(repo_path.record_repo_path("/nonexistent/dir/xyz", "/repo"))
+
+    def test_the_bytes_written_are_exactly_the_path_and_one_newline(self):
+        """`newline=""` is what keeps this true on Windows, where the default
+        text mode would turn the "\n" into "\r\n" and put a stray carriage
+        return inside the path when it is read back."""
+        with tempfile.TemporaryDirectory() as home:
+            config = pathlib.Path(home) / ".config" / "airlock"
+            config.mkdir(parents=True, mode=0o700)
+            repo = pathlib.Path(home) / "repo"
+            self.assertTrue(repo_path.record_repo_path(config, repo))
+            raw = (config / "repo.path").read_bytes()
+            self.assertEqual(raw, str(repo).encode() + b"\n")
 
 
 if __name__ == "__main__":

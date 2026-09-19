@@ -56,11 +56,23 @@ step 3, exactly as if the pointer did not exist. Nothing raises, nothing
 blocks. The reason is recorded in `pointer_diagnostics()` (path names only,
 nothing sensitive) so `install/doctor.sh` can say why a pointer is not being
 honoured.
+
+The ownership and mode halves of that list are POSIX checks, and Windows has
+neither a uid nor a meaningful `st_mode`. This module gets the same treatment
+as `airlock/keyfile.py`: on Windows the two structural checks still run (a
+regular file; an absolute, existing checkout) and the two permission checks
+are replaced by `platform_compat.pointer_trust_notes()`, which records what
+was and was not checked rather than pretending the POSIX check passed. Tuning
+is not ported to Windows at all today, so nothing there calls this yet; the
+handling is here so that when something does, it does not quietly claim a
+guarantee the platform never gave.
 """
 import os
 import stat
 
 from . import paths
+from . import platform_compat
+from .platform_compat import is_windows
 
 # A one-line file holding the PATH of the tuning repo checkout, never its
 # contents.
@@ -107,7 +119,9 @@ def pointer_file_path():
 
 
 def _owned_and_unwritable(st, what, where):
-    """True iff `st` is owned by this uid and not group/world writable."""
+    """True iff `st` is owned by this uid and not group/world writable.
+
+    POSIX only; `pointer_target` calls it only where `os.getuid()` exists."""
     try:
         if st.st_uid != os.getuid():
             _note("ignoring pointer: %s %s is owned by uid %d, not %d"
@@ -131,7 +145,7 @@ def is_git_checkout(directory):
         return False
 
 
-def pointer_target(check=True):
+def pointer_target(check=True, windows=None):
     """The path recorded in the pointer file, or None.
 
     With `check` true (the default, and what resolution uses) every trust
@@ -153,15 +167,21 @@ def pointer_target(check=True):
         if not stat.S_ISREG(st.st_mode):
             _note("ignoring pointer: %s is not a regular file" % pointer)
             return None
-        if not _owned_and_unwritable(st, "pointer file", pointer):
-            return None
-        parent = os.path.dirname(pointer) or "."
-        try:
-            dir_st = os.lstat(parent)
-        except Exception:
-            return None
-        if not _owned_and_unwritable(dir_st, "pointer directory", parent):
-            return None
+        if is_windows(windows):
+            # No uid, no meaningful mode. Say what was and was not checked
+            # rather than pretending the POSIX check passed.
+            for line in platform_compat.pointer_trust_notes(pointer, windows=windows):
+                _note(line)
+        else:
+            if not _owned_and_unwritable(st, "pointer file", pointer):
+                return None
+            parent = os.path.dirname(pointer) or "."
+            try:
+                dir_st = os.lstat(parent)
+            except Exception:
+                return None
+            if not _owned_and_unwritable(dir_st, "pointer directory", parent):
+                return None
 
     try:
         with open(pointer, "r") as f:
@@ -190,7 +210,7 @@ def pointer_target(check=True):
     return target
 
 
-def resolve_repo(script_dir):
+def resolve_repo(script_dir, windows=None):
     """The repository the tuning loop should operate on, or None.
 
     `script_dir` is the directory the caller (tune.py / tune.sh / promote.sh)
@@ -208,7 +228,7 @@ def resolve_repo(script_dir):
         except Exception:
             return override
 
-    pointed = pointer_target()
+    pointed = pointer_target(windows=windows)
     if pointed:
         return pointed
 
@@ -225,16 +245,19 @@ def resolve_repo(script_dir):
 def record_repo_path(config_dir, repo_dir):
     """Write the pointer file. Path only, mode 600, called by the installer
     (which already knows the checkout it was run from). Never raises; returns
-    True on success."""
+    True on success.
+
+    `newline=""` and `platform_compat.restrict_path` are what make this safe to
+    call on Windows: the file must hold exactly the bytes written (a stray
+    `\r` would be part of the path when it is read back), and `os.chmod` there
+    would only toggle the read-only attribute, which is not privacy and would
+    make the file harder to rewrite."""
     try:
         pointer = os.path.join(str(config_dir), POINTER_FILE)
         fd = os.open(pointer, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-        try:
-            with os.fdopen(fd, "w") as f:
-                f.write(str(repo_dir) + "\n")
-        finally:
-            pass
-        os.chmod(pointer, 0o600)
+        with os.fdopen(fd, "w", newline="") as f:
+            f.write(str(repo_dir) + "\n")
+        platform_compat.restrict_path(pointer, 0o600)
         return True
     except Exception:
         return False

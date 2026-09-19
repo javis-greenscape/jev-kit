@@ -61,6 +61,15 @@ BELAY_TIMEOUT = 25
 # the file's mode bit must keep doing so after a rewire. Group 1 is
 # everything up to and including the last space before the path; group 2 is
 # the path itself, and only group 2 is replaced.
+#
+# HOOK_COMMAND_QUOTED=1 selects the Windows shape instead. There the command
+# is "<interpreter>" "<script>" -- both parts quoted, because a Windows
+# profile directory can contain a space -- and the path separator is a
+# backslash, which inside a JSON string is written as an escaped pair. The
+# two shapes are kept as separate patterns rather than one permissive
+# pattern: allowing spaces inside the path in the POSIX pattern would make
+# `/usr/bin/env python3 /x/hooks/airlock.py` split in the wrong place and
+# silently drop the `python3`.
 _HOOK_PATTERN = re.compile(
     r'"((?:(?:[^"\\]|\\.)*?\s)?)((?:[^"\\\s]|\\.)*hooks/(?:airlock|plumbline|jev_guard)\.py)"')
 
@@ -68,6 +77,47 @@ _HOOK_PATTERN = re.compile(
 # from parsed JSON -- used when walking the structure instead of the text.
 _HOOK_CMD_RE = re.compile(
     r'^((?:(?:[^\\]|\\.)*?\s)?)((?:[^\\\s]|\\.)*hooks/(?:airlock|plumbline|jev_guard)\.py)$')
+
+# The Windows pair. In the raw JSON text an inner quote is \" and a path
+# separator is \\, hence the doubled escapes; in an already-parsed command
+# string both are single characters.
+#
+# On Windows the path being matched is usually NOT `hooks\airlock.py`: the
+# stable thing settings.json points at is the launcher, `airlock-hook.py` in
+# the install root (see install/windows_common.py for why), so both spellings
+# are matched. Without the launcher spelling every re-wire would look like a
+# first install and rewrite a file that needed nothing.
+_WIN_HOOK_TAIL = r'(?:hooks\\\\(?:airlock|plumbline|jev_guard)|airlock-hook)\.py'
+_WIN_HOOK_TAIL_PARSED = r'(?:hooks[\\\\/](?:airlock|plumbline|jev_guard)|airlock-hook)\.py'
+#
+# Two details make or break these. The prefix group is GREEDY, so it ends at
+# the LAST opening quote rather than the first -- a lazy prefix stops at the
+# quote that opens the interpreter and silently drops `py.exe` from the
+# rewritten command. And the path group may contain an escaped BACKSLASH but
+# never an escaped QUOTE, so it cannot run past the end of its own quoted
+# argument into the next one.
+_WIN_PATH_CHARS = r'(?:[^"\\]|\\\\)*?'
+_WIN_HOOK_PATTERN = re.compile(
+    r'"((?:[^"\\]|\\.)*\\")(' + _WIN_PATH_CHARS + _WIN_HOOK_TAIL + r')(\\")"')
+_WIN_HOOK_CMD_RE = re.compile(
+    r'^((?:[^"]|"[^"]*")*")([^"]*?' + _WIN_HOOK_TAIL_PARSED + r')(")$')
+
+QUOTED = os.environ.get("HOOK_COMMAND_QUOTED") == "1"
+
+
+def _text_pattern():
+    return _WIN_HOOK_PATTERN if QUOTED else _HOOK_PATTERN
+
+
+def _cmd_pattern():
+    return _WIN_HOOK_CMD_RE if QUOTED else _HOOK_CMD_RE
+
+
+def _json_inner(value):
+    """`value` escaped for use INSIDE a JSON string literal. On Linux this is
+    almost always the identity; on Windows it turns each backslash into the
+    escaped pair the file actually contains."""
+    return json.dumps(value)[1:-1]
 
 
 def _backup(path):
@@ -161,9 +211,13 @@ def _repoint_text(text):
     """Pure text substitution: repoint every airlock hook command found to
     NEW_HOOK, keeping each command's own interpreter prefix. Returns the new
     text, or None if nothing needed repointing."""
-    def _replace(match):
-        return '"%s%s"' % (match.group(1), NEW_HOOK)
-    return _HOOK_PATTERN.sub(_replace, text)
+    if QUOTED:
+        def _replace(match):
+            return '"%s%s%s"' % (match.group(1), _json_inner(NEW_HOOK), match.group(3))
+    else:
+        def _replace(match):
+            return '"%s%s"' % (match.group(1), _json_inner(NEW_HOOK))
+    return _text_pattern().sub(_replace, text)
 
 
 def _structural_repoint(data):
@@ -184,9 +238,10 @@ def _structural_repoint(data):
                 cmd = h.get("command")
                 if not isinstance(cmd, str):
                     continue
-                m = _HOOK_CMD_RE.match(cmd)
+                m = _cmd_pattern().match(cmd)
                 if m and m.group(2) != NEW_HOOK:
-                    h["command"] = m.group(1) + NEW_HOOK
+                    tail = m.group(3) if QUOTED else ""
+                    h["command"] = m.group(1) + NEW_HOOK + tail
                     changed = True
     return changed
 
@@ -204,8 +259,9 @@ def process(path):
         print("%s: not valid JSON (%s), refusing to touch it" % (path, exc), file=sys.stderr)
         return False
 
-    matches = _HOOK_PATTERN.findall(text)
-    needs_repoint = bool(matches) and not all(hook_path == NEW_HOOK for _prefix, hook_path in matches)
+    matches = [(m[0], m[1]) for m in _text_pattern().findall(text)]
+    needs_repoint = bool(matches) and not all(
+        hook_path == _json_inner(NEW_HOOK) for _prefix, hook_path in matches)
     needs_add_pretooluse = not matches
 
     belay_ok = BELAY and bool(BELAY_WRAPPER) and os.path.isfile(BELAY_WRAPPER)

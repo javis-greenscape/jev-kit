@@ -28,6 +28,7 @@ not build anything load-bearing on it yet.
 | **Warm daemon** (`deploy/`) | Keeps a warm connection so a judgement costs about 0.3 s instead of about 0.9 s. | **yes** (`--daemon`) | exercised | Nothing of its own. It is the transport the guard already uses. |
 | **Compaction** (`compaction/`) | Installer for the community `fast-jev-compaction` plugin. **Read `compaction/README.md` first.** | no (`--compaction`) | never enabled here | **Up to roughly 25,000 tokens of raw, unredacted tool inputs and tool-result text per request.** By far the largest exposure here, which is why it is never installed for you. |
 | **File search** (`filesearch/`) | Per-user `plocate` index of `$HOME` and its hourly timer, so R8 can suggest an indexed search. | **yes** (`--filesearch`) | exercised | Nothing. Entirely local. |
+| **File search on Windows** (`airlock/everything.py`) | Detects [Everything](https://www.voidtools.com/) (`es.exe`) and whether its index is running, so the same R8 steer names `es.exe` instead of `plocate`. It **detects only and never installs either**: Everything is third-party software with its own installer and service, and airlock says what the human must do rather than doing it. | **yes** on native Windows, n/a elsewhere | run on one Windows 11 machine | Nothing. Entirely local. |
 
 ## Uses
 

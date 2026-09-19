@@ -17,6 +17,15 @@ install/install.sh                  # guard + daemon + monitoring + filesearch
 install/doctor.sh                   # prove each piece actually runs
 ```
 
+Three platform guides live beside this one:
+[INSTALL-WSL.md](INSTALL-WSL.md) (a Windows PC running WSL2 Ubuntu, and the
+closest thing to a step-by-step for a Linux server too),
+[INSTALL-WINDOWS.md](INSTALL-WINDOWS.md) (native Windows, no WSL: the core of
+the kit, with Everything instead of `plocate` and no daemon) and
+[INSTALL-SECOND-MACHINE.md](INSTALL-SECOND-MACHINE.md) (installing on a
+machine that belongs to somebody else, kept in shadow mode for a week before
+arming anything).
+
 `install.sh` checks its prerequisites before touching anything (Python >= 3.10,
 a reachable systemd user session, `plocate`, `node`, `uv`, `git`), runs the unit
 tests, deploys an immutable release to `$AIRLOCK_HOME/releases/<sha>/`, flips
@@ -167,6 +176,17 @@ current one. `settings.json` and the systemd units already reference
 You were probably pointed at this repository and told to install it. Do these
 in order:
 
+0. **On native Windows (no WSL), read
+   [INSTALL-WINDOWS.md](INSTALL-WINDOWS.md) instead of this list and follow
+   it.** The installer is Python, not bash
+   (`py -3 install\windows_install.py --check-only`); the hook command has two
+   shapes and the installer picks between them by detecting Git for Windows,
+   so do not hand-write it; the warm daemon does not exist there, and a doctor
+   reporting it as `skip` is correct rather than a fault; `es.exe` (voidtools
+   Everything) replaces `plocate` for file search -- **detect it, never install
+   it**, and if it is missing say so and let the human decide; and the deny you
+   prove is R1 (an attempt to print the key file), because R6 (GUI/browser) is
+   `off` by default there. Inside WSL, this list applies unchanged.
 1. Read this file and `install/README.md`. Do not start by reading the whole
    repository.
 2. Run `install/install.sh --check-only` and report the plan and any

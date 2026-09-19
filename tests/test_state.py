@@ -9,6 +9,8 @@ import tests  # noqa: F401 -- MUST be the first import. `python3 -m unittest
 import tempfile
 import time
 import unittest
+
+from tests import posix_only
 from pathlib import Path
 from unittest import mock
 
@@ -51,6 +53,9 @@ class TestLoopState(unittest.TestCase):
         with mock.patch("time.time", return_value=time.time() + 700):
             self.assertFalse(state_mod.was_recently_denied("s1", key, 600))
 
+    @posix_only("a POSIX mode; on Windows privacy comes from the\n"
+                "            %LOCALAPPDATA% ACL instead -- see\n"
+                "            tests/test_windows_platform.py:TestPermissions")
     def test_file_mode_is_owner_only(self):
         key = ("bash", "find / -name x")
         state_mod.record_denial("s1", key)

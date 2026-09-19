@@ -1,8 +1,13 @@
 #!/usr/bin/env python3
 """python3 -m airlock.health -- one-shot health check for airlock.
 
+On Windows there is no daemon at all -- no AF_UNIX, so no socket to ping --
+and the two daemon checks report `skipped` rather than `down`. In their place
+one real Jev call goes out over the direct HTTPS path the Windows client
+always uses, which is the thing actually worth proving there.
+
 Checks, inside a 5s overall budget:
-  - the daemon's Unix socket answers {"op": "ping"}
+  - the daemon's Unix socket answers {"op": "ping"}   (POSIX only)
   - one real Jev call succeeds THROUGH THE DAEMON specifically (a tiny noul
     probe question, not client.ask()'s daemon-then-fallback path, so a
     dead daemon can't be masked by a silent fallback to a direct HTTPS call)
@@ -30,8 +35,9 @@ from pathlib import Path
 from . import keyfile
 from . import paths
 from . import mode as mode_mod
-from .client import MODEL, _ask_via_daemon, _daemon_socket_path
+from .client import MODEL, _ask_via_daemon, _daemon_socket_path, ask as client_ask
 from .log import LOG_FILE
+from .platform_compat import has_unix_sockets
 
 BUDGET_S = 5.0
 FAIL_OPEN_RATE_DEGRADED = 0.20
@@ -218,42 +224,94 @@ def check_tune_state():
     return {"interval_min": interval_min, "last_run_age_s": age_s}
 
 
-def run_health_check():
+def check_direct_ask(deadline):
+    """One real Jev call over whatever transport client.ask() picks.
+
+    This is the Windows stand-in for check_daemon_ask: there is no daemon to
+    isolate there, so the honest thing to prove is that the direct HTTPS path
+    the Windows client always takes actually reaches TypeSafe. Skipped, not
+    failed, when there is no API key -- a keyless install is a supported,
+    fail-open configuration."""
+    remaining = max(0.2, deadline - _now())
+    start = time.monotonic()
+    if not check_key_loadable():
+        return {"ok": None, "skipped": "no API key; the guard fails open and judges nothing",
+                "latency_ms": None}
+    try:
+        body = {
+            "state": {"probe": "automated airlock health check, not a real judgement"},
+            "model": MODEL,
+            "questions": _PROBE_QUESTIONS,
+        }
+        _response, latency_ms = client_ask(body, timeout_s=remaining)
+    except Exception as exc:
+        return {"ok": False, "error": str(exc)[:200],
+                "latency_ms": int((time.monotonic() - start) * 1000)}
+    return {"ok": True, "latency_ms": latency_ms or int((time.monotonic() - start) * 1000)}
+
+
+def run_health_check(windows=None):
     """Run every check inside the overall budget and return (status,
     result_dict). Never raises -- every check catches its own exceptions."""
     start_wall = time.monotonic()
     deadline = start_wall + BUDGET_S
+    daemon_supported = has_unix_sockets(windows)
 
-    try:
-        ping = check_daemon_ping(deadline)
-    except Exception as exc:
-        ping = {"ok": False, "error": str(exc)[:200], "latency_ms": None}
-
-    if ping.get("ok"):
+    if daemon_supported:
         try:
-            ask = check_daemon_ask(deadline)
+            ping = check_daemon_ping(deadline)
         except Exception as exc:
-            ask = {"ok": False, "error": str(exc)[:200], "latency_ms": None}
+            ping = {"ok": False, "error": str(exc)[:200], "latency_ms": None}
+
+        if ping.get("ok"):
+            try:
+                ask = check_daemon_ask(deadline)
+            except Exception as exc:
+                ask = {"ok": False, "error": str(exc)[:200], "latency_ms": None}
+        else:
+            ask = {"ok": False, "error": "skipped: daemon ping failed", "latency_ms": None}
+        direct = None
     else:
-        ask = {"ok": False, "error": "skipped: daemon ping failed", "latency_ms": None}
+        skip = {"ok": None, "skipped": "no unix-socket daemon on this platform",
+                "latency_ms": None}
+        ping = dict(skip)
+        ask = dict(skip)
+        try:
+            direct = check_direct_ask(deadline)
+        except Exception as exc:
+            direct = {"ok": False, "error": str(exc)[:200], "latency_ms": None}
 
     key_ok = check_key_loadable()
     mode_val = check_mode()
     last_hour = summarize_last_hour()
     tune_state = check_tune_state()
 
-    if not ping.get("ok"):
-        status = "down"
-    elif not ask.get("ok") or not key_ok:
-        status = "degraded"
-    elif last_hour["fail_open_rate"] > FAIL_OPEN_RATE_DEGRADED:
-        status = "degraded"
+    if daemon_supported:
+        if not ping.get("ok"):
+            status = "down"
+        elif not ask.get("ok") or not key_ok:
+            status = "degraded"
+        elif last_hour["fail_open_rate"] > FAIL_OPEN_RATE_DEGRADED:
+            status = "degraded"
+        else:
+            status = "healthy"
     else:
-        status = "healthy"
+        # No daemon to be down: the hook itself is the service, and it is
+        # proved by the doctor's real deny, not from here. A missing key or a
+        # failed direct call is degraded, never down.
+        if direct is not None and direct.get("ok") is False:
+            status = "degraded"
+        elif not key_ok:
+            status = "degraded"
+        elif last_hour["fail_open_rate"] > FAIL_OPEN_RATE_DEGRADED:
+            status = "degraded"
+        else:
+            status = "healthy"
 
     result = {
         "ts": datetime.datetime.now(datetime.timezone.utc).isoformat(),
         "status": status,
+        "daemon_supported": daemon_supported,
         "daemon_ping": ping,
         "daemon_ask": ask,
         "key_loadable": key_ok,
@@ -262,6 +320,8 @@ def run_health_check():
         "tune_state": tune_state,
         "wall_s": round(time.monotonic() - start_wall, 3),
     }
+    if direct is not None:
+        result["direct_ask"] = direct
     return status, result
 
 

@@ -9,7 +9,7 @@ import tests  # noqa: F401 -- MUST be the first import. `python3 -m unittest
 import unittest
 from unittest import mock
 
-from airlock import guards
+from airlock import policy, guards
 
 
 def _fake_tier_response(task_kind="judgement", confidence=0.9, prior_failed=0.0):
@@ -283,7 +283,10 @@ class TestRunToolChoiceGuard(unittest.TestCase):
             entry = append.call_args[0][0]
             self.assertEqual(entry["scope"], "disk_wide")
             self.assertTrue(entry["would_deny"])
-            self.assertEqual(entry["suggestion"], "plocate -d ~/.cache/plocate/home.db -i '<pattern>'")
+            # The verdict is platform-neutral; the suggestion text is not, so it
+        # is compared against the function that produces it rather than
+        # against one platform's literal string.
+        self.assertEqual(entry["suggestion"], policy.filename_search_suggestion())
 
 
 if __name__ == "__main__":

@@ -198,6 +198,10 @@ class TestSearchPolicy(unittest.TestCase):
             margin=0.9,
             command="find / -name '*.xlsm'",
             root_has_graphify_graph=False,
+            # Pinned, because the ADVICE is per-platform (plocate on Linux,
+            # es.exe on Windows) while the VERDICT is not. The Windows half is
+            # tests/test_windows_scope.py:TestTheSuggestion.
+            windows=False,
         )
         self.assertTrue(verdict["would_deny"])
         self.assertEqual(verdict["suggestion"], policy.PLOCATE_SUGGESTION)
