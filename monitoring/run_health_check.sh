@@ -3,7 +3,11 @@
 # installed by this change -- see monitoring/README.md). Runs the health
 # check, appends its one JSON line to ~/.local/state/airlock/health.jsonl
 # (mode 600), and -- only if AIRLOCK_KUMA_PUSH_URL is configured -- pushes
-# the result to Uptime Kuma. Exits with airlock.health's own exit code
+# the result to the push monitor. AIRLOCK_KUMA_PUSH_MODE in the same key file
+# chooses between `heartbeat` (the default: a server, watched by its monitor's
+# own silence timeout) and `explicit` (a workstation: the failure is stated,
+# so silence never alerts). Both are read from the key file by the `set -a`
+# block below, so neither needs mentioning here again. Exits with airlock.health's own exit code
 # (0 healthy, 1 degraded, 2 down) so `systemctl status` reflects it.
 set -uo pipefail
 
@@ -25,7 +29,8 @@ chmod 600 "$LOG_FILE" 2>/dev/null || true
 # AIRLOCK_KUMA_PUSH_URL (or either older GS_KUMA_* name) lives in the
 # key file (AIRLOCK_KEY_FILE, default ~/.config/jev-kit/env), loaded the exact
 # same redacted way the rest of airlock loads TYPESAFE_API_KEY -- never
-# printed, never put on a command line.
+# printed, never put on a command line. AIRLOCK_KUMA_PUSH_MODE rides along
+# in the same file and the same `set -a`.
 # Key-file resolution: the ONE shell implementation, shared with every other
 # component here. The order and the pointer-file trust rules are documented in
 # airlock/keyfile.py's module docstring. Fails open if the helper is missing.

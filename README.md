@@ -10,7 +10,7 @@
 
 <p>
   <a href="LICENSE"><img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-blue"></a>
-  <img alt="tests" src="https://img.shields.io/badge/tests-888%20passing-brightgreen">
+  <img alt="tests" src="https://img.shields.io/badge/tests-986%20passing-brightgreen">
   <img alt="Python 3.10+" src="https://img.shields.io/badge/python-3.10%2B-blue">
   <img alt="Platforms" src="https://img.shields.io/badge/platforms-Linux%20%7C%20WSL2%20%7C%20Windows-lightgrey">
   <img alt="Claude Code" src="https://img.shields.io/badge/Claude%20Code-PreToolUse%20hook-8A3FFC">
@@ -47,8 +47,9 @@ that wiring, built and measured.
 ```bash
 git clone https://github.com/jonathanavis96/jev-kit.git ~/code/jev-kit
 cd ~/code/jev-kit
-install/install.sh          # guard + daemon + monitoring + filesearch
-                            # + claude-update + belay, all under $HOME
+install/install.sh          # guard + session check + daemon + monitoring
+                            # + filesearch + claude-update + belay,
+                            # all under $HOME
 ```
 
 **On native Windows without WSL**, that is not the install: the installer is
@@ -133,6 +134,7 @@ numbers and no sustained real use.
 | Airlock, the tool-call guard | Judges each `PreToolUse` call against a rules table and, for the ambiguous half, one typed Jev question | **yes** | Redacted summaries of the ambiguous fraction of tool calls | exercised |
 | Tier guard | Checks the sub-agent rung a dispatch chose against the task Jev judges it to be | **yes**, part of the guard | The dispatch's description and prompt, redacted | exercised |
 | Belay | When an agent says it is finished with no passing check behind it, sends it back to verify | **yes** | Task text, final message and check commands, redacted and capped | exercised |
+| Session check | A `SessionStart` hook that tells **you**, when you start a session, if the guard has stopped judging. Silent when healthy | **yes** | Nothing. Reads local state only, never the network | exercised |
 | **Speed and cost** | | | | |
 | Warm daemon | Holds a warm connection so a judgement costs about 0.3 s instead of about 0.9 s | **yes** | Nothing of its own | exercised |
 | Compaction | Installer for the community `fast-jev-compaction` plugin | no, opt-in | **Up to about 25,000 tokens of raw, unredacted tool inputs and results per request** | never enabled here |
@@ -146,7 +148,8 @@ numbers and no sustained real use.
 | Shim | An OpenAI-shaped HTTP shim over the `claude` CLI | no, opt-in | Whatever you send through it | **experimental** |
 | **Operations** | | | | |
 | Installer and doctor | One installer, a doctor that runs real calls, deploy, rollback, wire | n/a | Nothing | exercised |
-| Monitoring | Five-minute health check, its timer, optional push to a monitor you host | **yes** | Nothing, unless you set a push URL | exercised |
+| Monitoring | Five-minute health check and its timer | **yes** | Nothing | exercised |
+| Push monitor | Optional push to a monitor you host, in `heartbeat` or `explicit` mode | no, opt-in | A status word and, in `explicit` mode, which check failed -- redacted and capped | exercised |
 | Tuning loop | Reads the shadow log, has a judge score the verdicts, commits to its own branch | no, opt-in | Real Claude sessions on the account you nominate | exercised |
 | Auto-updater | Idle-only Claude Code updater. Updates only when no run is alive | **yes** | Nothing | exercised |
 
@@ -319,6 +322,29 @@ file and backing that file up first:
 An R6 value you have already set is never overwritten, by the installer or by
 that command. `install/doctor.sh` reports which way R6 is set on this machine
 and why.
+
+**How do I know the guard is still working?**
+It tells you. The guard fails open by design, so a dead guard would otherwise
+be silent -- no key, TypeSafe unreachable, the health timer stopped, all look
+exactly like a quiet machine. The **session check** is a `SessionStart` hook,
+installed by default, that reads local state at the start of every session and
+says one short thing when the guard is not judging: the mode is `off` or the
+kill switch is on, no key resolves, the last health row is bad (naming the
+check that failed), the health check has gone stale on a machine that has been
+up long enough for that to mean something, or tuning could not run. It prints
+**nothing at all** when everything is fine, never calls the network, has a hard
+300 ms budget, fails open like the guard, and repeats the same warning at most
+once every six hours -- immediately, though, if the problem changes.
+
+On a **server** you want the other half instead: the five-minute health timer
+plus a push monitor that alerts when the pushes stop. On a **workstation**
+silence means the machine is off, so a silence alert is useless; if you also
+want a phone alert there, set `AIRLOCK_KUMA_PUSH_MODE=explicit` and give that
+monitor a heartbeat interval measured in days. Explicit mode cannot report a
+health timer that has itself died -- the session check is what covers that.
+See [monitoring/README.md](monitoring/README.md).
+
+To see the whole picture at once: `install/doctor.sh`.
 
 **What if TypeSafe is down?**
 Everything fails open. No judgement means the tool call is allowed, and the

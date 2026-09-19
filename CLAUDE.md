@@ -22,7 +22,7 @@ installer rather than bash, no warm daemon, and `es.exe` (voidtools
 Everything) in place of `plocate` for file search.
 
 **Working on the code?** `python3 -m unittest discover -s tests` must pass
-(888 tests on Linux; the same suite on native Windows Python skips the
+(986 tests on Linux; the same suite on native Windows Python skips the
 POSIX-only ones and passes the rest, and no test requires Windows to pass).
 `python3 tools/check_docs.py` must pass too: it resolves every relative link
 in the README and `docs/`, and checks every Mermaid block. The rules table is

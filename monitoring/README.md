@@ -1,5 +1,39 @@
 # airlock health monitoring
 
+## Server or workstation?
+
+The guard fails open by design. That is right, and it has one consequence
+worth saying out loud: **a dead guard is silent.** No key, TypeSafe
+unreachable, the health timer stopped, the daemon down with a slow fallback --
+every one of those looks exactly like a quiet, well-behaved machine.
+
+How you notice depends on what kind of machine it is, and the two answers are
+genuinely different:
+
+| | Server | Workstation |
+|---|---|---|
+| Is silence a fault? | **Yes.** It is meant to be up | **No.** It usually means the machine is off |
+| What to install | the health timer, `heartbeat` push mode, and a monitor that alerts on silence | the **session check** (default, installed already) |
+| Optional extra | -- | `explicit` push mode, if you also want a phone alert |
+| Heartbeat interval on the monitor | minutes | **days** -- long enough that a closed laptop never trips it |
+
+A monitor that alerts on silence is the right design for a server and the
+wrong one for a laptop: it would cry wolf every evening and be muted inside a
+week. So the workstation answer is not a push at all. It is
+`hooks/airlock_session_check.py`, a `SessionStart` hook that tells the person
+at the one moment they are certainly there and certainly care -- when they
+start using Claude Code -- and prints **nothing at all** when everything is
+healthy. It is part of the default install set on every platform, including
+native Windows. See the README's component table.
+
+**The honest limit of `explicit` mode:** it cannot report a health timer that
+has itself died. Nothing pushes, and with a multi-day heartbeat interval
+nothing notices -- which is exactly the trade that stops a powered-off laptop
+alerting. The session check covers that case instead. The two are
+complementary and neither replaces the other.
+
+## The health check
+
 `python3 -m airlock.health` is a one-shot check, budgeted to finish inside
 5 seconds even if something hangs:
 
@@ -42,9 +76,34 @@ echo $?
    out, never printed) and, only if it's set, pushes the result to Uptime
    Kuma via `monitoring/kuma_push.py` -- a GET over IPv4 with a 5s timeout,
    `status=up|down`, `msg=<short>`, `ping=<daemon-ask latency ms>`. If the
-   variable is unset, the push is skipped silently; Kuma is optional.
+   variable is unset, the push is skipped silently; the push monitor is
+   optional. `AIRLOCK_KUMA_PUSH_MODE` chooses `heartbeat` (the default) or
+   `explicit`; see "The two push modes" below.
 4. exits with `airlock.health`'s own exit code, so `systemctl status`
    reflects the last run's health.
+
+### The two push modes
+
+`AIRLOCK_KUMA_PUSH_MODE` in the key file chooses between them. It defaults to
+`heartbeat`, so an existing server is unchanged by this and needs no action.
+
+```
+# ~/.config/jev-kit/env
+AIRLOCK_KUMA_PUSH_URL=<the push URL your monitor gives you>
+AIRLOCK_KUMA_PUSH_MODE=explicit        # omit entirely for a server
+```
+
+| Mode | Healthy | Faulty | Who it is for |
+|---|---|---|---|
+| `heartbeat` (default) | `status=up&msg=airlock: healthy` | `status=down&msg=airlock: <status>` | a server, watched by its monitor's own silence timeout |
+| `explicit` | the same `status=up` | `status=down&msg=<which check failed>` | a workstation: the failure is stated, so silence never alerts |
+
+In `explicit` mode the `msg` names the failing check from the health row
+itself -- `daemon ping failed: connection refused`, `no API key resolves`,
+`fail-open rate 37% in the last hour`. It is put through `airlock/redact.py`,
+has anything that looks like a home directory replaced with `<home>` (a home
+directory carries a username, and a username is a person), and is capped at
+200 characters. A key never reaches it.
 
 `monitoring/airlock-health.timer` runs it every 5 minutes
 (`OnBootSec=2min`, `OnUnitActiveSec=5min`, `Persistent=true`).
@@ -78,9 +137,13 @@ export XDG_RUNTIME_DIR=/run/user/$(id -u)
 systemd-analyze --user verify monitoring/*.service monitoring/*.timer
 ```
 
-### The Uptime Kuma push monitor is a manual, one-time step
+### The push monitor is a manual, one-time step
 
-This repo can push to a Kuma push-type monitor once one exists, but it
+Any service that accepts a GET carrying `status` (`up`/`down`) and `msg` works
+here; Uptime Kuma is simply the one this was built against, which is why the
+variable keeps its name.
+
+This repo can push to a push-type monitor once one exists, but it
 cannot create one -- that's an admin action in the Kuma web UI: add a "Push"
 monitor, copy its push URL, and put it in
 `~/.config/jev-kit/env` as:
@@ -89,8 +152,15 @@ monitor, copy its push URL, and put it in
 AIRLOCK_KUMA_PUSH_URL=<the push URL Kuma gives you>
 ```
 
+If the machine is a workstation, add the mode line too, and set that
+monitor's heartbeat interval to **days** rather than minutes:
+
+```
+AIRLOCK_KUMA_PUSH_MODE=explicit
+```
+
 Until a person does that, `run_health_check.sh` still logs to
-`health.jsonl` and exits with the right code -- the Kuma push is additive,
+`health.jsonl` and exits with the right code -- the push is additive,
 not required for the health check itself to work.
 
 ### Reading the log

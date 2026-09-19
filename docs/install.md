@@ -13,7 +13,8 @@ cp install/config.env.example install/config.env
 $EDITOR install/config.env          # the key file path, and which Claude
                                     # account the tuning judge spends
 
-install/install.sh                  # guard + daemon + monitoring + filesearch
+install/install.sh                  # guard + session check + daemon +
+                                    # monitoring + filesearch
 install/doctor.sh                   # prove each piece actually runs
 ```
 
@@ -41,6 +42,18 @@ Every file it edits is backed up, timestamped, in place first.
 Components are flags: `--guard --daemon --tuning --monitoring --filesearch
 --browser --review --shim --claude-update --belay --compaction`, or `--all`.
 `--check-only` prints the plan and installs nothing.
+
+The **session check** rides with the guard and is on by default on every
+platform (`--no-session-check` leaves it out). It is a `SessionStart` hook
+that reads local state and tells you, at the moment you start a session, when
+the guard has stopped judging -- and prints nothing at all when it has not.
+The guard fails open, so without it a dead guard is silent, and on a
+workstation nothing outside the machine can notice. To add it to an install
+that predates it, re-run the wire step:
+
+```bash
+install/install.sh --guard --session-check --wire ~/.claude/settings.json
+```
 
 Nothing in this repository writes outside `$HOME`, and nothing runs `sudo`. The
 one thing an installer will not do for you is install a system package
