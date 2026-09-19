@@ -285,8 +285,9 @@ class TestRunToolChoiceGuard(unittest.TestCase):
             self.assertTrue(entry["would_deny"])
             # The verdict is platform-neutral; the suggestion text is not, so it
         # is compared against the function that produces it rather than
-        # against one platform's literal string.
-        self.assertEqual(entry["suggestion"], policy.filename_search_suggestion())
+        # against one platform's literal string. roots=["/"] matches what
+        # scope.classify_command actually extracts from "find / -name ...".
+        self.assertEqual(entry["suggestion"], policy.filename_search_suggestion(roots=["/"]))
 
 
 class TestRootHasCodeGraphField(unittest.TestCase):

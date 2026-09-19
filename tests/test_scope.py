@@ -329,3 +329,43 @@ class PipelineWidestScopeTests(unittest.TestCase):
         home = os.path.expanduser("~")
         result = scope.classify_command("plocate -i foo; find %s -name foo" % home, home)
         self.assertEqual(result["program"], "find")
+
+
+class WslDriveRootScopeTests(unittest.TestCase):
+    """Codex P1 on PR #1: `find /mnt/c -name x` classified single_dir, so the
+    scope == "disk_wide" gate in policy.evaluate_search never even called the
+    WSL-aware suggestion logic -- a crawl of the whole C: drive was never
+    steered to `es`. A WSL drive-root mount is the same disk-wide ground a
+    native `C:\\` root is."""
+
+    def test_mnt_drive_root_is_disk_wide_under_wsl(self):
+        from unittest import mock
+        from airlock import scope
+        with mock.patch("airlock.headless.is_wsl", return_value=True):
+            result = scope.classify_command("find /mnt/c -name x", "/mnt/c")
+            self.assertEqual(result["scope"], "disk_wide")
+            self.assertEqual(result["roots"], ["/mnt/c"])
+
+    def test_mnt_drive_root_with_trailing_slash_is_disk_wide_under_wsl(self):
+        from unittest import mock
+        from airlock import scope
+        with mock.patch("airlock.headless.is_wsl", return_value=True):
+            result = scope.classify_command("find /mnt/c/ -name x", "/mnt/c")
+            self.assertEqual(result["scope"], "disk_wide")
+
+    def test_mnt_drive_subdirectory_is_not_disk_wide(self):
+        # /mnt/c/Users is a directory WITHIN the drive, not the drive root.
+        from unittest import mock
+        from airlock import scope
+        with mock.patch("airlock.headless.is_wsl", return_value=True):
+            result = scope.classify_command("find /mnt/c/Users -name x", "/mnt/c/Users")
+            self.assertNotEqual(result["scope"], "disk_wide")
+
+    def test_mnt_drive_root_is_not_disk_wide_off_wsl(self):
+        # A non-WSL Linux box with something manually mounted at /mnt/c has
+        # no Windows drive semantics attached to that path.
+        from unittest import mock
+        from airlock import scope
+        with mock.patch("airlock.headless.is_wsl", return_value=False):
+            result = scope.classify_command("find /mnt/c -name x", "/mnt/c")
+            self.assertNotEqual(result["scope"], "disk_wide")

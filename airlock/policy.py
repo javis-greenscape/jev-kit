@@ -488,6 +488,28 @@ def any_root_is_linux_side(roots):
     return False
 
 
+def root_is_wsl_fs_root(root):
+    """True when `root` is the WSL filesystem root itself ('/'). Unlike a
+    plain Linux root -- which root_is_windows_host correctly reads as pure
+    Linux-side ground -- a WSL '/' also traverses every mounted Windows
+    drive under /mnt, so it is both sides at once and neither
+    root_is_windows_host nor its complement alone describes it."""
+    if not root:
+        return False
+    try:
+        return os.path.normpath(str(root)) == "/"
+    except Exception:
+        return False
+
+
+def any_root_is_wsl_fs_root(roots):
+    """root_is_wsl_fs_root over a possibly-None/empty list of roots."""
+    for root in roots or []:
+        if root_is_wsl_fs_root(root):
+            return True
+    return False
+
+
 # The indexed tool this platform already has. One function so the rule text,
 # the deny reason and the doctor all say the same thing on each OS, and no
 # caller has to test sys.platform for itself.
@@ -499,7 +521,11 @@ def filename_search_suggestion(windows=None, roots=None, wsl=None):
     instead of the plocate suggestion, since plocate's index never covers
     that ground; roots on BOTH sides get ES_WSL_MIXED_SUGGESTION, which names
     both commands, since replacing a mixed search with either index alone
-    silently drops every result from the other half. Everything else gets
+    silently drops every result from the other half. A root of '/' itself
+    is both sides at once -- traversing it also traverses every mounted
+    Windows drive -- so it gets the mixed suggestion too, even alone
+    (Codex P1, PR #1: it previously fell through to PLOCATE_SUGGESTION and
+    silently dropped every Windows-host result). Everything else gets
     PLOCATE_SUGGESTION. `wsl` defaults
     lazily from airlock.headless.is_wsl() so existing zero-arg and
     windows=-only call sites keep working unchanged; a failure to detect WSL
@@ -512,10 +538,13 @@ def filename_search_suggestion(windows=None, roots=None, wsl=None):
             wsl = headless.is_wsl()
         except Exception:
             wsl = False
-    if wsl and any_root_is_windows_host(roots):
-        if any_root_is_linux_side(roots):
+    if wsl:
+        if any_root_is_wsl_fs_root(roots):
             return ES_WSL_MIXED_SUGGESTION
-        return ES_WSL_SUGGESTION
+        if any_root_is_windows_host(roots):
+            if any_root_is_linux_side(roots):
+                return ES_WSL_MIXED_SUGGESTION
+            return ES_WSL_SUGGESTION
     return PLOCATE_SUGGESTION
 
 

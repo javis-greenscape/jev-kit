@@ -181,6 +181,54 @@ class TestMixedRootsNameBothIndexes(unittest.TestCase):
         self.assertFalse(policy.any_root_is_linux_side(None))
 
 
+class TestWslFsRootSpansBothIndexes(unittest.TestCase):
+    """Codex P1 on PR #1: `find / -name x` under WSL has roots=["/"], which
+    any_root_is_windows_host answered False for (it isn't a /mnt/<drive> or
+    Windows-looking path), so it fell through to PLOCATE_SUGGESTION alone --
+    even though traversing '/' also traverses every mounted Windows drive
+    under /mnt, and Everything's ground was silently dropped."""
+
+    def test_fs_root_alone_gets_mixed_suggestion(self):
+        self.assertEqual(
+            policy.filename_search_suggestion(wsl=True, roots=["/"]),
+            policy.ES_WSL_MIXED_SUGGESTION,
+        )
+
+    def test_fs_root_with_other_roots_still_gets_mixed_suggestion(self):
+        self.assertEqual(
+            policy.filename_search_suggestion(wsl=True, roots=["/", "/mnt/c/Users"]),
+            policy.ES_WSL_MIXED_SUGGESTION,
+        )
+
+    def test_fs_root_off_wsl_gets_plocate_alone(self):
+        # No Everything to fall back to off WSL.
+        self.assertEqual(
+            policy.filename_search_suggestion(wsl=False, roots=["/"]),
+            policy.PLOCATE_SUGGESTION,
+        )
+
+    def test_root_is_wsl_fs_root(self):
+        self.assertTrue(policy.root_is_wsl_fs_root("/"))
+        self.assertFalse(policy.root_is_wsl_fs_root("/home/alice"))
+        self.assertFalse(policy.root_is_wsl_fs_root("/mnt/c"))
+        self.assertFalse(policy.root_is_wsl_fs_root(None))
+        self.assertFalse(policy.root_is_wsl_fs_root(""))
+
+    def test_evaluate_search_fs_root_wsl_denies_with_mixed_suggestion(self):
+        verdict = policy.evaluate_search(
+            scope="disk_wide",
+            search_intent="filename_search",
+            confidence=_ABOVE_BAR_CONFIDENCE,
+            command='find / -iname "*jev-kit*"',
+            root_has_graphify_graph=False,
+            margin=_ABOVE_BAR_MARGIN,
+            roots=["/"],
+            wsl=True,
+        )
+        self.assertTrue(verdict["would_deny"])
+        self.assertEqual(verdict["suggestion"], policy.ES_WSL_MIXED_SUGGESTION)
+
+
 class TestEsOnlyInCommandPosition(unittest.TestCase):
     """Codex P2 on PR #1: _ES_RE accepted `es` in any whitespace-delimited
     argument, so `find / -name es` read as already-indexed and suppressed the

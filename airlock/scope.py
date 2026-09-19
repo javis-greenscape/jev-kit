@@ -29,11 +29,24 @@ byte what it was. Every Windows test in this repository injects
 `windows=True` instead of needing a Windows machine.
 """
 import os
+import re
 import shlex
 from pathlib import Path
 
 from . import winpath
 from .platform_compat import is_windows
+
+# A WSL drive-root mount (`/mnt/c`, `/mnt/d/`), the counterpart of a native
+# Windows drive root (`C:\`): the whole volume, not a directory within it.
+_WSL_DRIVE_ROOT_RE = re.compile(r"^/mnt/[A-Za-z]$")
+
+
+def _is_wsl():
+    try:
+        from . import headless
+        return headless.is_wsl()
+    except Exception:
+        return False
 
 # Programs this module knows how to extract a root from.
 SEARCH_PROGRAMS = {
@@ -323,9 +336,16 @@ def _scope_for_roots(roots, windows=False):
     if windows:
         return _scope_for_roots_windows(roots)
     home = os.path.normpath(os.environ.get("HOME") or str(Path.home()))
+    wsl = _is_wsl()
     for r in roots:
         rp = os.path.normpath(r)
         if rp == "/" or rp == home:
+            return "disk_wide"
+        # Under WSL a drive-root mount (`/mnt/c`) IS the whole Windows C:
+        # drive, the same disk-wide ground a native `C:\` root covers --
+        # without this, `find /mnt/c -name x` classified single_dir and the
+        # WSL-aware suggestion below it was never reached (Codex P1, PR #1).
+        if wsl and _WSL_DRIVE_ROOT_RE.match(rp):
             return "disk_wide"
     for r in roots:
         if _contains_multiple_repos(r):
