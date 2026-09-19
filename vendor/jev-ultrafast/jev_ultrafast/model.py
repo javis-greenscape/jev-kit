@@ -148,6 +148,23 @@ def choose(state, goal, history):
     }
 
 
+def decide(page, goal, history):
+    """Dispatch to the decision-maker selected by DECISION_PROVIDER (default: jev, unchanged).
+
+    jev_ultrafast.agent.Agent calls this instead of choose() directly, so the Jev/TypeSafe path
+    (choose(), above) is untouched: DECISION_PROVIDER unset or "jev" is exactly the old
+    behaviour. "claude-haiku"/"claude-sonnet" route to jev_ultrafast.decision_claude instead,
+    a standing `claude -p` child asked for the same operation+target decision in strict JSON,
+    given the same element table. See SPIKE-NOTES.md, "Jev versus Claude as decision-maker".
+    """
+    provider = os.environ.get("DECISION_PROVIDER", "jev")
+    if provider == "jev":
+        return choose(state=page, goal=goal, history=history)
+    from .decision_claude import decide as claude_decide
+
+    return claude_decide(page, goal, history, provider)
+
+
 def field_context(goal, action, page, history):
     """TYPE_TEXT context for the text helper. TEXT_MODEL_CONTEXT selects the shape:
 

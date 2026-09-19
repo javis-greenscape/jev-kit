@@ -662,3 +662,135 @@ on as the practical floor. `TEXT_MODEL_PROVIDER=claude-standing` is still not th
 CLI-based adapters as spike-only, OAuth-backed alternatives) but it is now the fastest opt-in
 path on this box, and both new switches (`MAX_THINKING_TOKENS`, `TEXT_MODEL_CONTEXT`) are cheap,
 reversible env-var choices rather than a rewrite.
+
+## Jev versus Claude as decision-maker (2026-09-19)
+
+**Question:** with everything else held identical (same loop, same element table, same
+validation-before-acting chain, same standing text model for TYPE_TEXT), how does the browser
+agent perform with Jev (TypeSafe `systemone`) as the decision-maker versus Claude Haiku or Claude
+Sonnet as the decision-maker, on this box?
+
+### What was built
+
+- `jev_ultrafast/decision_claude.py`: a new, self-contained module, not a change to the Jev path.
+  A standing `claude -p --input-format stream-json --output-format stream-json --safe-mode
+  --tools "" --effort low` child per model (`MAX_THINKING_TOKENS=0`, mirroring the standing text
+  model's measured-fastest shape), asked for strict JSON `{"operation": ..., "target": <element
+  index or null>}` given the goal, a 10-step action history, and the same element table
+  `jev_ultrafast.model.action_space()` builds for Jev. Validated in code against the operations
+  and targets actually on offer for the current page; one retry on invalid/unusable JSON; a
+  second failure (or a dead/timed-out child) resolves to `BLOCKED`, which is already a normal,
+  supported outcome in `agent.py`'s loop, not a crash.
+- `jev_ultrafast/model.py:decide()`: a 12-line dispatcher selected by `DECISION_PROVIDER=jev|
+  claude-haiku|claude-sonnet` (`jev`, the default, calls the original `choose()` unchanged — the
+  Jev/TypeSafe request/response/validation code was not touched). `agent.py` now calls `decide()`
+  instead of `choose()` directly; that is the only change to the existing loop.
+- `bench/run_one.py` + `bench/run_bench.py`: each trial runs in its own subprocess (its own
+  process group) so a 120s-per-run `SIGALRM` budget, plus a 125s hard subprocess timeout that
+  kills the whole process group, can never leave an orphaned `claude -p` child or hang the
+  sequential sweep. Success is verified independently from the final URL/title in code
+  (`bench/run_one.py:verify()`), never from the agent's own `DONE` claim.
+- Arm M (a headless `claude -p --model sonnet` session driving Playwright MCP tools directly, no
+  element-table loop) was **checked, not assumed**: `claude mcp list` under
+  `CLAUDE_CONFIG_DIR=$HOME/.claude` shows only `claude.ai Claude Docs`, `Microsoft 365`,
+  `HubSpot`, and `Google Drive` — no Playwright MCP server is registered for this account. **Arm M
+  was skipped**, reported here rather than faked or simulated.
+
+### Setup
+
+One headless Chromium (`scripts/launch_chromium.js`, `BU_CDP_URL=http://127.0.0.1:9333`), one
+`browser_harness` daemon, both shared across all 27 runs; each run opens its own CDP tab via
+`Agent(url, goal)` and closes it on exit. `free -h` immediately before starting: `2.6Gi` used,
+`227Mi` free, `5.0Gi` available (buff/cache-backed), swap `2.7Gi`/`8.0Gi` used — tight but not
+thrashing; no run showed swap-related slowdown. Runs: 3 reps x 3 goals x 3 arms (J=jev,
+H=claude-haiku, S=claude-sonnet) = 27, strictly sequential, arms interleaved
+(`goal -> rep -> arm`, not grouped by arm). `TEXT_MODEL_PROVIDER=claude-standing` throughout, so
+the only variable between arms is the decision-maker.
+
+### Results (n=3 per cell — do not read these as statistically significant)
+
+| Goal | Arm | Success | Wall median (s) | Wall range (s) | Decision latency median (ms) | Decision latency range (ms) |
+|---|---|---|---|---|---|---|
+| G1 (TYPE_TEXT: find Gödel's incompleteness theorems) | J (jev) | 3/3 | 5.6 | 5.5-6.3 | 486 | 275-1123 |
+| G1 | H (claude-haiku) | **0/3** | 6.5 | 6.5-6.7 | 2838 | 2166-3793 |
+| G1 | S (claude-sonnet) | 3/3 | 10.5 | 8.3-12.9 | 1455 | 1073-2886 |
+| G2 (click-only: Create account) | J (jev) | 3/3 | 4.0 | 3.4-4.3 | 314 | 278-1088 |
+| G2 | H (claude-haiku) | 3/3 | 5.0 | 4.0-6.3 | 760 | 703-914 |
+| G2 | S (claude-sonnet) | 3/3 | 5.8 | 5.3-6.1 | 1114 | 1090-1452 |
+| G3 (multi-step: search, article, Talk page) | J (jev) | 3/3 | 7.5 | 7.1-9.6 | 378 | 273-1228 |
+| G3 | H (claude-haiku) | **1/3** | 5.5 | 5.4-21.2 | 2327 | 862-2858 |
+| G3 | S (claude-sonnet) | 3/3 | 12.2 | 11.7-12.7 | 1124 | 1045-1263 |
+
+Jev token usage (from the `systemone` response's own `usage` field, real numbers, not derived):
+per-decision `input_tokens` ran 3.6k-9.1k and `output_tokens` 284-742 across the 27 Jev decisions
+recorded, rising within a run as `recent_actions` history grows (e.g. one G3/jev run: 5953 ->
+5975 -> 6036 -> 6431 -> 9144 input tokens across its 5 executed-action decisions). Claude-arm
+usage is per Claude Code's own `usage` block on the CLI `result` event (cache-aware: several
+`claude-sonnet` decisions on G1/G3 showed `cache_read_input_tokens` in the thousands once the
+child had served a few requests, since the standing session accumulates prior turns).
+
+### Reading it honestly
+
+- **Jev is faster on every goal, decisively.** Median per-decision latency: 486ms (G1), 314ms
+  (G2), 378ms (G3) for Jev, versus 1114-2838ms for Haiku and 1073-1455ms for Sonnet — roughly a
+  2-9x gap, consistent with SPIKE-NOTES' earlier finding that TypeSafe's round trip alone is
+  "genuinely fast." Standing-child Claude, even with `MAX_THINKING_TOKENS=0` and low effort, pays
+  a heavier per-call cost than a `systemone` request — expected, since it is a general-purpose
+  coding-agent CLI answering a constrained decision question, not a model built for exactly this
+  shape of call.
+- **Jev is also more accurate on this small sample.** Jev went 9/9 across all three goals. Sonnet
+  also went 9/9. **Haiku failed 5 of 9 runs**: 0/3 on G1 (every attempt returned unparseable
+  non-JSON output from the standing child against the Wikipedia Main Page's full element table,
+  exhausting the one retry and resolving to `BLOCKED` before any action executed — see the raw
+  `decisions` rows in `bench/results-*.jsonl`, `output_tokens` 32-55, i.e. it did answer, just not
+  in the required shape) and 2/3 failures on G3 (the multi-step goal), both stopping back on the
+  Main Page. Haiku succeeded reliably only on G2, the single click-only goal with the smallest
+  element table. Read as: Haiku's instruction-following for a **strict-JSON, constrained-target**
+  format degrades as the element table and/or step count grows, which is exactly the case Jev's
+  purpose-built request/response contract (typed choice questions, validated probability
+  distributions) is designed to make impossible by construction rather than by prompting.
+- **Sonnet is accurate but not fast, and it is the expensive arm even before counting arm M.**
+  3/3 on every goal, but decision latency (1.0-1.5s median) and wall time (10.5-12.2s median on
+  G1/G3) are 2-3x Jev's. If Claude is used as the decision-maker at all on this box, these numbers
+  say Sonnet, not Haiku, for anything beyond the simplest single-click goal — and even then it
+  trades Jev's whole "ultrafast" premise away.
+- **Where it makes no difference:** G2 (click-only, one visible target, no ambiguity) — all three
+  arms went 3/3, and while Jev is still fastest, the gap (4.0s vs 5.0s vs 5.8s median wall) is far
+  smaller than on G1/G3. A simple, unambiguous, small-page decision is where a general-purpose
+  LLM decision-maker is closest to viable; anything with more elements or more steps is where the
+  purpose-built contract earns its keep.
+- **n=3 per cell.** These are directional findings from one small sweep on one box, not a
+  statistically significant result — most visibly for Haiku's G3 outcome (1/3), where a
+  differently-seeded run could plausibly land 0/3 or 2/3. The consistent pattern across three
+  independent goals (Jev fastest and most reliable; Sonnet reliable but slow; Haiku unreliable
+  once the element table or step count grows) is the finding, not any single cell's exact number.
+
+### Arm M
+
+**Skipped, not run.** `claude mcp list` under this account (`CLAUDE_CONFIG_DIR=$HOME/.claude`)
+shows no Playwright MCP server connected — only `claude.ai Claude Docs`, `Microsoft 365`,
+`HubSpot`, and `Google Drive`. A headless Claude Code session on this account currently has no
+browser tool surface at all, so the "ordinary way" comparison (Claude Code driving Playwright MCP
+tools directly, no element-table loop) could not be attempted here. This would need a Playwright
+MCP server registered for this account (`claude mcp add ...`) before it could run — not attempted,
+since adding an MCP server is a config change beyond this task's scope.
+
+### Orphan checks
+
+`pgrep -af 'claude -p'` before the sweep: two pre-existing `workerS`/Sonnet background-agent
+processes (unrelated, not started by this task, never touched) plus two pre-existing standing
+`claude -p --model haiku --input-format stream-json ...` children left over from earlier spike
+work in this repo (also pre-existing, also untouched). After the full sweep and cleanup: the same
+two `workerS` processes only — every `claude -p` child this task spawned (27 runs' worth of
+standing decision/text-model children, one per run, each terminated by `bench/run_one.py`'s own
+`finally` block) is gone. `pgrep -af 'chrom|browser_harness'` after closing the Chromium instance
+and running `uv run browser-harness --reload`: empty (only the grep's own shell wrapper, not a
+browser process).
+
+### Files
+
+- `jev_ultrafast/decision_claude.py` (new)
+- `jev_ultrafast/model.py`: added `decide()` dispatcher; `choose()` untouched
+- `jev_ultrafast/agent.py`: one-line change, `choose` -> `decide` import and call site
+- `bench/run_one.py`, `bench/run_bench.py` (new)
+- `bench/results-20260919T112849Z.jsonl` (27 rows, one per run; arm M has no rows, it was skipped)
