@@ -132,11 +132,15 @@ directional, not statistically significant.**
 On cost, "Claude cost" is the CLI's own `total_cost_usd`, never tokens
 multiplied by a price. Per-run medians, n=3, from the same sweep:
 
-| Goal | Jev arm | Sonnet-decides arm |
-|---|---|---|
-| G1, find and open an article | 3/3, 4.87 s, **0.0008 USD** | 3/3, 9.32 s, 0.1868 USD |
-| G2, click-only navigation | 2/3, 5.24 s, **no Claude call** | 3/3, 7.70 s, 0.0364 USD |
-| G3, multi-step search and Talk page | 3/3, 8.27 s, **0.0007 USD** | 3/3, 14.68 s, 0.3727 USD |
+| Goal | Jev arm | Sonnet-decides arm | Haiku-decides arm |
+|---|---|---|---|
+| G1, find and open an article | 3/3, 4.87 s, **0.0008 USD** | 3/3, 9.32 s, 0.1868 USD | 1/3, 7.30 s, 0.0344 USD |
+| G2, click-only navigation | 2/3, 5.24 s, **no Claude call** | 3/3, 7.70 s, 0.0364 USD | 3/3, 6.26 s, 0.0773 USD |
+| G3, multi-step search and Talk page | 3/3, 8.27 s, **0.0007 USD** | 3/3, 14.68 s, 0.3727 USD | 1/3, 9.49 s, 0.1245 USD |
+
+On goal 1, the cleanest of the three, Jev's Claude spend is 233 times smaller
+than Sonnet's (0.1868 against 0.0008, rounded down). That ratio is the headline
+figure in the README.
 
 With Jev, the Claude bill for the decision loop is close to zero, because the
 only Claude calls left are the cheap `TYPE_TEXT` fills. Without Jev, every
