@@ -10,6 +10,8 @@ import os
 import pathlib
 import tempfile
 import unittest
+
+from tests import posix_only
 from unittest import mock
 
 from airlock import keyfile
@@ -61,6 +63,7 @@ class TestKeyfile(unittest.TestCase):
             os.remove(path)
 
 
+@posix_only("the ~/.config default; the Windows default is\n            %APPDATA%\\airlock\\env -- see\n            tests/test_windows_platform.py:TestWindowsKeyFile")
 class TestDefaultEnvFile(unittest.TestCase):
     """The default key file is generic so a fresh machine needs no config at
     all. No other path is baked into the code: a machine that keeps its key

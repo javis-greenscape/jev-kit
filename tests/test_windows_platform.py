@@ -21,6 +21,7 @@ import tempfile
 import unittest
 from unittest import mock
 
+from tests import posix_only
 from airlock import client, keyfile, paths, platform_compat, winpath
 
 
@@ -98,12 +99,14 @@ class TestLocking(unittest.TestCase):
         except Exception:
             pass
 
+    @posix_only("flock; the Windows path is asserted separately below")
     def test_posix_lock_and_unlock_round_trip(self):
         fd = self._open()
         self.assertTrue(platform_compat.lock_file(fd, platform_compat.LOCK_EXCLUSIVE,
                                                   windows=False))
         self.assertTrue(platform_compat.unlock_file(fd, windows=False))
 
+    @posix_only("fcntl does not exist on Windows")
     def test_shared_lock_is_a_real_shared_lock_on_posix(self):
         import fcntl
         fd = self._open()
@@ -150,6 +153,8 @@ class TestLocking(unittest.TestCase):
             platform_compat.lock_file(fd, platform_compat.LOCK_SHARED, windows=True)
         self.assertEqual(modes, [1])
 
+    @posix_only("patches fcntl.flock, which does not exist on Windows; the "
+                "Windows\n            failure path is the same blanket except")
     def test_a_lock_that_cannot_be_taken_is_false_never_an_exception(self):
         """Every caller treats False as "carry on unlocked": a log write is
         never allowed to fail because a lock could not be acquired."""
@@ -166,11 +171,14 @@ class TestPermissions(unittest.TestCase):
         os.close(fd)
         self.addCleanup(lambda: os.path.exists(self.path) and os.remove(self.path))
 
+    @posix_only("asserts a real POSIX mode")
     def test_posix_applies_the_mode(self):
         os.chmod(self.path, 0o644)
         self.assertTrue(platform_compat.restrict_path(self.path, 0o600, windows=False))
         self.assertEqual(os.stat(self.path).st_mode & 0o777, 0o600)
 
+    @posix_only("the assertion is that a mode was NOT changed, which needs a\n"
+                "            filesystem that has modes to change")
     def test_windows_never_chmods(self):
         """os.chmod on Windows only toggles the read-only attribute. Applying
         it would make the file harder to rewrite and give no privacy at all,
@@ -181,6 +189,7 @@ class TestPermissions(unittest.TestCase):
             chmod.assert_not_called()
         self.assertEqual(os.stat(self.path).st_mode & 0o777, 0o644)
 
+    @posix_only("asserts a real POSIX mode")
     def test_posix_description_reports_a_real_mode(self):
         os.chmod(self.path, 0o600)
         ok, text = platform_compat.describe_permissions(self.path, windows=False)
@@ -210,8 +219,14 @@ class TestUnixSockets(unittest.TestCase):
     def test_windows_has_none(self):
         self.assertFalse(platform_compat.has_unix_sockets(windows=True))
 
-    def test_linux_has_them(self):
-        self.assertTrue(platform_compat.has_unix_sockets(windows=False))
+    def test_the_posix_answer_is_the_capability_itself(self):
+        """With windows=False the answer is whatever the interpreter actually
+        has, never a hard True: a Windows CPython running this branch reports
+        no AF_UNIX, and saying otherwise would be a lie the daemon path would
+        then act on."""
+        import socket
+        self.assertEqual(platform_compat.has_unix_sockets(windows=False),
+                         hasattr(socket, "AF_UNIX"))
 
     def test_client_skips_the_daemon_on_windows_without_touching_a_socket(self):
         with mock.patch("socket.socket") as sock:
@@ -289,6 +304,9 @@ class TestWindowsPaths(unittest.TestCase):
             self.assertNotIn("/tmp", value)
             self.assertNotIn("\\tmp", value.lower())
 
+    @posix_only("pathlib builds a POSIX path only on a POSIX host; on Windows\n"
+                "            the same call correctly produces backslashes and the\n"
+                "            comparison would be about pathlib, not about airlock")
     def test_linux_paths_are_completely_unchanged(self):
         with mock.patch.dict(os.environ, {"HOME": "/home/alice"}, clear=True), \
              mock.patch("os.path.expanduser", return_value="/home/alice"), \

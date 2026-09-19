@@ -11,6 +11,7 @@ import os
 import unittest
 from unittest import mock
 
+from tests import posix_only
 from airlock import policy, rules, scope
 
 HOME = "C:\\Users\\alice"
@@ -284,6 +285,9 @@ class TestPowerShellTool(unittest.TestCase):
         self.assertEqual(ctx["command"], "")
 
 
+@posix_only("the POSIX branch of scope._expand goes through os.path.normpath,\n"
+            "            which turns / into \\ on a Windows host: the result would be\n"
+            "            about the host's os.path, not about airlock")
 class TestLinuxIsUnchanged(unittest.TestCase):
     """The Windows work must not be visible on Linux at all. These are the
     same assertions tests/test_scope.py makes, re-stated here as a guard

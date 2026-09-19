@@ -18,12 +18,15 @@ import tests  # noqa: F401 -- MUST be the first import. `python3 -m unittest
 import os
 import tempfile
 import unittest
+
+from tests import posix_only
 from pathlib import Path
 from unittest import mock
 
 from airlock import paths
 
 
+@posix_only("the XDG directory layout and the Unix runtime socket;\n            the Windows layout is tested in\n            tests/test_windows_platform.py:TestWindowsPaths")
 class PathsTestBase(unittest.TestCase):
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
@@ -40,6 +43,7 @@ class PathsTestBase(unittest.TestCase):
             os.environ.pop(var, None)
 
 
+@posix_only("the XDG directory layout and the Unix runtime socket;\n            the Windows layout is tested in\n            tests/test_windows_platform.py:TestWindowsPaths")
 class TestEnvPreference(unittest.TestCase):
     def test_new_name_wins_over_old(self):
         with mock.patch.dict(os.environ, {"AIRLOCK_MODE": "enforce", "JEV_GUARD_MODE": "off"}):

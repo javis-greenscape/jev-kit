@@ -43,7 +43,8 @@ class TestEverythingDetection(unittest.TestCase):
     """Detection only. This module must never install anything."""
 
     def test_the_module_never_shells_out_to_an_installer(self):
-        source = open(os.path.join(REPO_ROOT, "airlock", "everything.py")).read()
+        with open(os.path.join(REPO_ROOT, "airlock", "everything.py")) as f:
+            source = f.read()
         for forbidden in ("winget", "choco", "msiexec", "Invoke-WebRequest",
                           "urlretrieve", "curl "):
             self.assertNotIn(forbidden, source)
@@ -223,15 +224,22 @@ class TestInstallerEndToEnd(unittest.TestCase):
         self.assertTrue(os.path.isfile(os.path.join(release, "hooks", "airlock.py")))
         self.assertTrue(os.path.isfile(os.path.join(home, "airlock-hook.py")))
 
-    def test_the_text_pointer_carries_the_install_when_a_junction_cannot_be_made(self):
-        """This is the whole reason there are two mechanisms. On Linux
-        `mklink` does not exist, which is the same outcome as a non-NTFS
-        volume on Windows, and the install must still be complete."""
+    def test_the_pointer_resolves_whether_or_not_a_junction_was_made(self):
+        """This is the whole reason there are two mechanisms.
+
+        On Linux `mklink` does not exist, which is the same outcome as a
+        non-NTFS or network volume on Windows: no junction, and the text
+        pointer has to carry the install on its own. On Windows the junction
+        normally succeeds. Either way `current` must resolve and `current.txt`
+        must be written, so that is what is asserted rather than which of the
+        two happened to be available."""
         self._install()
         home = os.path.join(self.tmp, "home")
-        self.assertFalse(os.path.isdir(os.path.join(home, "current")))
+        self.assertTrue(os.path.isfile(os.path.join(home, "current.txt")))
         with mock.patch.dict(os.environ, self.env, clear=False):
-            self.assertIsNotNone(wc.resolve_current())
+            resolved = wc.resolve_current()
+        self.assertIsNotNone(resolved)
+        self.assertTrue(os.path.isfile(os.path.join(resolved, "hooks", "airlock.py")))
 
     def test_the_release_copy_leaves_the_repository_noise_behind(self):
         self._install()

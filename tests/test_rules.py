@@ -677,5 +677,9 @@ class TestExtraSecretPaths(unittest.TestCase):
         self.assertTrue(res[1].search("cat ~/.config/b/env"))
 
     def test_a_broken_value_never_raises(self):
-        with mock.patch.dict(os.environ, {"AIRLOCK_EXTRA_SECRET_PATHS": ":::"}):
+        # os.pathsep, not a literal ":": the variable is split on the
+        # platform's own PATH separator, which is ";" on Windows, where ":::"
+        # is one perfectly ordinary token rather than three empty ones.
+        with mock.patch.dict(os.environ,
+                             {"AIRLOCK_EXTRA_SECRET_PATHS": os.pathsep * 3}):
             self.assertEqual(rules._extra_secret_path_res(), [])

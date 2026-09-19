@@ -55,3 +55,26 @@ for _var in (
 os.environ["AIRLOCK_CONFIG_DIR"] = os.path.join(_TMP_HOME, ".config", "airlock")
 os.environ["AIRLOCK_STATE_DIR"] = os.path.join(_TMP_HOME, ".local", "state", "airlock")
 os.environ["AIRLOCK_HOME"] = os.path.join(_TMP_HOME, ".local", "share", "airlock")
+
+# --- platform gates ----------------------------------------------------------
+#
+# The suite runs on Linux and on native Windows. Most of it is platform-neutral
+# and must pass on both; a handful of tests assert something only POSIX has --
+# a Unix domain socket, a `chmod` mode, the XDG directory layout, a bash
+# installer script -- and those are skipped on Windows with the reason stated,
+# never quietly deleted. Where a Windows equivalent exists it is named in the
+# skip reason.
+#
+# The rule that matters and is enforced by the reverse of this gate: NO test
+# may REQUIRE Windows to pass. Everything Windows-specific is exercised on
+# Linux by injecting the platform (see airlock/platform_compat.py), so
+# install/deploy.sh's Linux test run still gates the Windows code.
+import sys
+import unittest
+
+WINDOWS = sys.platform == "win32"
+
+
+def posix_only(reason):
+    """Skip on Windows, with the reason printed rather than implied."""
+    return unittest.skipIf(WINDOWS, "POSIX only: %s" % reason)
