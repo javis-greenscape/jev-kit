@@ -341,16 +341,19 @@ def decide(page, goal, history, provider):
     child = store._get_child()
     started = time.perf_counter()
     usage = {}
+    total_cost_usd = None
     operation, target, choice = "BLOCKED", None, "BLOCKED"
     try:
         event = child.request(prompt, timeout=REQUEST_TIMEOUT)
         usage = event.get("usage", {}) or {}
+        total_cost_usd = event.get("total_cost_usd")
         try:
             operation, target, choice = _parse_reply(event.get("result"), targets, controls)
         except (ValueError, json.JSONDecodeError):
             # One retry on invalid/unusable JSON, same child.
             event = child.request(prompt, timeout=REQUEST_TIMEOUT)
             usage = event.get("usage", {}) or usage
+            total_cost_usd = event.get("total_cost_usd", total_cost_usd)
             operation, target, choice = _parse_reply(event.get("result"), targets, controls)
     except (TimeoutError, RuntimeError) as exc:
         logger.warning("standing decision child (%s) failed: %s; resolving BLOCKED for this decision", model, exc)
@@ -373,6 +376,7 @@ def decide(page, goal, history, provider):
         "raw_answers": {},
         "model": f"claude-decision:{model}",
         "usage": usage,
+        "total_cost_usd": total_cost_usd,
         "latency_ms": latency_ms,
         "request": payload,
     }

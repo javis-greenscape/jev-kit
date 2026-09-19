@@ -794,3 +794,162 @@ browser process).
 - `jev_ultrafast/agent.py`: one-line change, `choose` -> `decide` import and call site
 - `bench/run_one.py`, `bench/run_bench.py` (new)
 - `bench/results-20260919T112849Z.jsonl` (27 rows, one per run; arm M has no rows, it was skipped)
+
+## Token cost with Jev versus without (2026-09-19, later same day)
+
+**Question:** what is the Claude token cost with Jev versus without Jev — i.e. how many Claude
+tokens does a Jev-decided run spend versus a Claude-decided run, and where does a plain
+Playwright-tools session (no element-table loop at all) land?
+
+### What changed to answer this
+
+- The Playwright MCP plugin (`playwright@claude-plugins-official`) was checked, not assumed:
+  `claude mcp list` under `CLAUDE_CONFIG_DIR=$HOME/.claude` now shows it registered and
+  connected. A trivial probe (`claude -p --model sonnet --effort low ... "List the Playwright
+  browser tool names ... navigate to https://example.com"`) first listed 24
+  `mcp__plugin_playwright_playwright__*` tools, confirming the tool surface exists, but failed to
+  navigate: `chrome-for-testing` was missing at `~/.cache/ms-playwright/chromium-1246/` — the
+  version this `@playwright/mcp@latest` build wants was never installed on this box. Also found:
+  the plugin's `.mcp.json` (`~/.claude/plugins/cache/claude-plugins-official/playwright/
+  c447c3207a42/.mcp.json` and the marketplace source copy under `external_plugins/playwright/
+  .mcp.json`) launched `npx @playwright/mcp@latest` with **no `--headless`/`--browser` flags** —
+  `@playwright/mcp`'s own `--help` confirms the default is **headed**, using the `chrome` channel,
+  not Chromium. **Changed:** both `.mcp.json` files now read `"args": ["@playwright/mcp@latest",
+  "--headless", "--browser", "chromium"]`; ran the package's own `install-browser` command to fetch
+  the missing `chromium-1246` build (it also fetched Firefox and WebKit as a side effect of that
+  command's default behaviour — both were deleted immediately after, since this box keeps Chromium
+  only). Re-probing after both fixes: tool list works, `https://example.com` navigates, and
+  `claude mcp list` echoes back `... --headless --browser chromium - ✔ Connected`. `pgrep -af
+  'chrom'` confirmed no leftover browser process after each probe.
+- `jev_ultrafast/decision_claude.py:decide()` now also captures `total_cost_usd` off the standing
+  child's `result` event (the existing code kept `usage` but discarded this field); same one-line
+  addition in `jev_ultrafast/text_model_claude_standing.py`'s field-text path. `bench/run_one.py`
+  passes both through into `decisions[]` and `text_calls[]` rows. This was the one number the
+  2026-09-19 11:28 results file (`bench/results-20260919T112849Z.jsonl`) did not already hold —
+  per-decision Claude input/output/cache-read tokens were already there for arms H and S (see that
+  file's `decisions[].usage`), so only `total_cost_usd` needed instrumenting, not a rerun to get
+  fresh token counts.
+- `bench/run_bench.py`'s arm M block now runs `ARM_M_REPS = 3` per goal (was 1), verifies success
+  in code from **both** the final URL the session's own report states (`extract_final_url()`,
+  regex over the `result` text — the same "never trust the agent's own DONE claim" principle as
+  `run_one.py:verify()`) **and** the actual page fetched fresh via `urllib` after the session ends
+  (`fetch_title()` reads the real `<title>`), never from the agent's stated success alone. It also
+  now stops the shared harness Chromium and `browser_harness` daemon **before** arm M starts (moved
+  out of `main()`'s tail into `stop_shared_browser()`, called right after the J/H/S sweep) so arm
+  M's own Playwright-MCP-launched Chromium is never running alongside another browser.
+- Arms J, H and S were re-run in full (3 reps x 3 goals x 3 arms = 27 runs) alongside arm M's 9
+  runs, all in one sweep, so every arm's token numbers come from the same day and the same
+  Chromium/box state: `bench/results-20260919T123421Z.jsonl` (36 rows total).
+
+### Results (n=3 per cell — do not read these as statistically significant)
+
+Claude figures are summed per run across every Claude call that run made (arms H/S: the decision
+calls plus the shared standing text model's `TYPE_TEXT` calls; arm J: the standing text model calls
+only, since Jev makes the decisions; arm M: the single `claude -p` session's own `usage` block),
+then the median is taken across the 3 reps. "Claude cost" is the CLI's own `total_cost_usd`,
+summed the same way — never tokens x a price.
+
+**G1 — find and open the Gödel's incompleteness theorems article**
+
+| Arm | Success | Wall median (s) | Claude input tok | Claude output tok | Claude cache-read tok | Claude cost USD (CLI) | Jev input tok | Jev output tok |
+|---|---|---|---|---|---|---|---|---|
+| J (jev) | 3/3 | 4.87 | 687 | 13 | 0 | 0.0008 | 38,254 | 2,896 |
+| H (claude-haiku, decision) | 1/3 | 7.30 | 3,821 | 90 | 5,458 | 0.0344 | 0 | 0 |
+| S (claude-sonnet, decision) | 3/3 | 9.32 | 699 | 133 | 35,974 | 0.1868 | 0 | 0 |
+| M (plain Playwright MCP, sonnet) | 3/3 | 12.85 | 6 | 295 | 136,211 | 0.0376 | 0 | 0 |
+
+**G2 — open the 'Create account' page (click-only)**
+
+| Arm | Success | Wall median (s) | Claude input tok | Claude output tok | Claude cache-read tok | Claude cost USD (CLI) | Jev input tok | Jev output tok |
+|---|---|---|---|---|---|---|---|---|
+| J (jev) | 2/3 | 5.24 | 0 | 0 | 0 | n/a (no Claude call this goal makes) | 19,138 | 1,490 |
+| H (claude-haiku, decision) | 3/3 | 6.26 | 5,901 | 87 | 11,817 | 0.0773 | 0 | 0 |
+| S (claude-sonnet, decision) | 3/3 | 7.70 | 8 | 72 | 19,417 | 0.0364 | 0 | 0 |
+| M (plain Playwright MCP, sonnet) | 0/3 | 6.06 | 2 | 160 | 44,956 | 0.0276 | 0 | 0 |
+
+**G3 — search, open article, open its Talk page (multi-step)**
+
+| Arm | Success | Wall median (s) | Claude input tok | Claude output tok | Claude cache-read tok | Claude cost USD (CLI) | Jev input tok | Jev output tok |
+|---|---|---|---|---|---|---|---|---|
+| J (jev) | 3/3 | 8.27 | 686 | 5 | 0 | 0.0007 | 53,701 | 4,182 |
+| H (claude-haiku, decision) | 1/3 | 9.49 | 6,624 | 127 | 23,048 | 0.1245 | 0 | 0 |
+| S (claude-sonnet, decision) | 3/3 | 14.68 | 700 | 139 | 63,247 | 0.3727 | 0 | 0 |
+| M (plain Playwright MCP, sonnet) | 3/3 | 10.95 | 8 | 459 | 184,193 | 0.0556 | 0 | 0 |
+
+TypeSafe's published price, quoted as-is from <https://docs.typesafe.ai/models.md> next to the Jev
+figures above, arithmetic left to the reader: **"Price (per Btok / per Mtok) | \$42 / \$0.042"**,
+with "Charged per input token. Output tokens are free."
+
+### Reading it honestly
+
+- **With Jev, the Claude bill for the decision loop itself is close to zero.** Jev arm's Claude
+  usage is only the shared standing text model's `TYPE_TEXT` calls (Haiku, cheap: a few hundred
+  input tokens, a handful of output tokens, cost under a tenth of a cent per run) — the decisions
+  themselves cost TypeSafe tokens, not Claude tokens. **Without Jev**, every decision in the loop is
+  itself a Claude call: Sonnet-as-decision-maker's Claude input/output/cache-read tokens are
+  1,000-9,000x Jev's Claude-side footprint on G1/G3, and its CLI-reported cost ($0.19-$0.37 per run
+  median) is Jev's Claude-side cost ($0.0007-$0.0008) times roughly 250-500. Haiku-as-decision-maker
+  sits in between on tokens but is also the least reliable arm (1/3 success on G1 and G3), so its
+  lower per-run cost buys materially worse outcomes.
+- **The plain Playwright-tools session (arm M, no element-table loop) is the most Claude-token-hungry
+  arm of all**, by cache-read tokens specifically: 136k-184k cache-read tokens per run median on
+  G1/G3, versus 0 for Jev, 5k-63k for the decision arms. This is the standing coding-agent CLI
+  reading its own accumulating tool definitions, system prompt, and MCP tool-call history back on
+  every turn of a multi-turn session — cache reads are billed at a fraction of a fresh input token,
+  which is exactly why arm M's CLI-reported `total_cost_usd` ($0.03-$0.06 median) is *lower* than
+  Sonnet-as-decision-maker's ($0.19-$0.37) despite far higher raw cache-read token counts: cache
+  reads are cheap per token, but they are still real Claude tokens flowing through the account, and
+  a token count is not the same measurement as a cost.
+- **Where Jev's absence is cheapest to cover:** G2, the click-only goal with the smallest element
+  table — Sonnet-as-decision-maker's Claude cost there ($0.0364) is close to Jev's Claude-side cost
+  on the goals where Jev does make a Claude call at all, though Jev itself makes no Claude decision
+  call on G2 (no `TYPE_TEXT` field on a click-only goal). **Where it is most expensive:** G3, the
+  multi-step goal — Sonnet's Claude cost is over 500x Jev's Claude-side spend, and Haiku's is over
+  150x, for a decision loop doing exactly the same work Jev does for a TypeSafe-only bill instead.
+- **Arm M's G2 result (0/3) is a real finding, not noise, but it says something different from
+  "the model failed to click a button."** Arm M's prompt was exactly the template specified: `<goal
+  text>. Use the Playwright browser tools. Stop when done and state the final URL.` — with no
+  starting URL and no mention of Wikipedia (G2's goal text is just "Open the 'Create account'
+  page."). J/H/S all start on `en.wikipedia.org/wiki/Main_Page` by construction (`run_one.py`'s
+  `WIKI_MAIN_PAGE` default), so "Create account" is unambiguous for them; arm M's session has no
+  browser context at all and, in all 3 reps, correctly asked which site's "Create account" page was
+  meant rather than guessing — see the `final_text` field for `arm M / G2` in
+  `bench/results-20260919T123421Z.jsonl`. That is a fair result of running the literal specified
+  prompt, but it means the G2 row compares "Jev/Claude deciding within a Wikipedia-scoped loop"
+  against "Claude given an ambiguous goal with no starting page," not the same task under two
+  decision-makers — worth flagging before anyone reads "0/3" as a capability gap.
+- **Where this reading is weak:**
+  - **n=3 per cell**, same caveat as the latency/success table above — a differently-seeded run
+    could land a cell differently, especially Haiku's 1/3 results.
+  - **Cache effects compound across a run and across the sweep.** The standing decision/text-model
+    children are long-lived processes reused across many requests within a run (and, per
+    `DECISION_MODEL_RECYCLE_AFTER`, across some runs), so `cache_read_input_tokens` on a later
+    decision in a run reflects the growing history of a session that started colder — the same
+    effect the original latency table already noted for `claude-sonnet` cache reads. Comparing
+    arm M's single-session cache growth against the decision arms' multi-process cache growth is
+    not an apples-to-apples cache regime.
+  - **Arm M's standing child is a full coding-agent session** (system prompt, tool schemas for 24
+    Playwright tools, thinking budget at `--effort low` rather than `MAX_THINKING_TOKENS=0`), not
+    the stripped-down `--tools ""` standing child the decision arms use — so its token footprint is
+    not solely "the cost of driving a browser via tool calls," it also includes the general-purpose
+    agent overhead the decision arms were specifically built to avoid.
+  - **Jev's own token cost is denominated in TypeSafe tokens, not Claude's**, so "Claude cost" for
+    the Jev arm undercounts the arm's true operating cost — the honest comparison is Claude spend
+    with Jev (near zero) plus Jev/TypeSafe spend (the input/output token counts and published price
+    quoted above), against Claude spend without Jev (the H/S/M columns), not "Jev costs nothing."
+
+### Files (this section)
+
+- `jev_ultrafast/decision_claude.py`, `jev_ultrafast/text_model_claude_standing.py`: capture
+  `total_cost_usd` from the standing child's `result` event
+- `bench/run_one.py`: pass `total_cost_usd` through into `decisions[]`/`text_calls[]` rows
+- `bench/run_bench.py`: arm M now runs 3 reps/goal, verifies success from the reported final URL
+  and a freshly fetched copy of that page, and stops the shared Chromium/`browser_harness` daemon
+  before arm M starts its own browser
+- `bench/results-20260919T123421Z.jsonl` (36 rows: 27 J/H/S + 9 M)
+- `~/.claude/plugins/cache/claude-plugins-official/playwright/c447c3207a42/.mcp.json` and
+  `~/.claude/plugins/marketplaces/claude-plugins-official/external_plugins/playwright/
+  .mcp.json` (outside this repo): added `--headless --browser chromium` to the Playwright MCP
+  server's launch args
+- `~/.cache/ms-playwright/chromium-1246/` (outside this repo): installed, since this account's
+  `@playwright/mcp@latest` needed it and it was missing

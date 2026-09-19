@@ -107,6 +107,7 @@ def main():
                 "confidence": d.get("confidence"),
                 "latency_ms": d.get("latency_ms"),
                 "usage": d.get("usage", {}),
+                "total_cost_usd": d.get("total_cost_usd"),
                 "model": d.get("model"),
             }
             for d in state["decisions"]
@@ -118,6 +119,7 @@ def main():
                 "model": t.get("model"),
                 "latency_ms": t.get("latency_ms"),
                 "usage": t.get("usage", {}),
+                "total_cost_usd": t.get("total_cost_usd"),
             }
             for t in state["text_calls"]
         ]

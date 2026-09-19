@@ -272,6 +272,7 @@ class StandingTextModel:
             "latency_ms": event.get("duration_ms"),
             "requests_served": child.requests_served,
             "usage": event.get("usage", {}),
+            "total_cost_usd": event.get("total_cost_usd"),
         }
 
     def close(self):

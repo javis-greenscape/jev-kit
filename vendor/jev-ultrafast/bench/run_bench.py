@@ -19,6 +19,7 @@ reported, never faked.
 
 import json
 import os
+import re
 import signal
 import subprocess
 import sys
@@ -29,6 +30,11 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 RUN_ONE = Path(__file__).resolve().parent / "run_one.py"
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from run_one import verify as verify_goal  # noqa: E402 - needs sys.path set first
+
+ARM_M_REPS = 3
 CDP_URL = os.environ.get("BU_CDP_URL", "http://127.0.0.1:9333")
 CLAUDE_CONFIG_DIR = os.environ.get("CLAUDE_CONFIG_DIR", os.path.expanduser("~/.claude"))
 NODE_PATH = os.environ.get("NODE_PATH", os.path.expanduser("~/.npm-global/lib/node_modules"))
@@ -80,6 +86,49 @@ def launch_chromium():
         time.sleep(0.2)
     proc.kill()
     raise RuntimeError("Chromium did not expose a CDP endpoint within 15s")
+
+
+def extract_final_url(text):
+    """Pull the last URL the arm-M session's own report text mentions."""
+    if not text:
+        return None
+    urls = re.findall(r"https?://[^\s\)\]\"'>]+", text)
+    if not urls:
+        return None
+    return urls[-1].rstrip(".,;:")
+
+
+def fetch_title(url):
+    """Independent check against the actual page, not just the agent's stated claim."""
+    if not url:
+        return None
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            html = resp.read(300000).decode("utf-8", errors="replace")
+        m = re.search(r"<title>(.*?)</title>", html, re.IGNORECASE | re.DOTALL)
+        return m.group(1).strip() if m else None
+    except OSError:
+        return None
+
+
+def stop_shared_browser(chromium_proc, repo_root):
+    """Stop the shared harness Chromium + browser_harness daemon before arm M starts its own
+    browser, so arm M never runs alongside another browser process."""
+    if chromium_proc is not None:
+        print(f"Stopping the Chromium process this script launched (pid {chromium_proc.pid}) ...")
+        try:
+            os.killpg(os.getpgid(chromium_proc.pid), signal.SIGTERM)
+            chromium_proc.wait(timeout=5)
+        except (ProcessLookupError, subprocess.TimeoutExpired):
+            try:
+                os.killpg(os.getpgid(chromium_proc.pid), signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+    print("Stopping the browser_harness daemon (uv run browser-harness --reload) ...")
+    subprocess.run(["uv", "run", "browser-harness", "--reload"], cwd=repo_root)
+    print("pgrep -af 'chrom|browser_harness' after stopping the shared browser:")
+    subprocess.run("pgrep -af 'chrom|browser_harness' || echo '(none)'", shell=True)
 
 
 def playwright_mcp_available():
@@ -203,72 +252,98 @@ def main():
                         f"status={row.get('status')} reason={row.get('failure_reason')}"
                     )
 
+    stop_shared_browser(chromium_proc, REPO_ROOT)
+    chromium_proc = None  # already stopped; the end-of-main cleanup below must not double-stop it
+
     if playwright_mcp_available():
-        print("Arm M: Playwright MCP tools are available; running one M trial per goal.")
+        print(f"Arm M: Playwright MCP tools are available; running {ARM_M_REPS} M trials per goal.")
         for goal_id, goal_text in GOALS.items():
-            prompt = f"{goal_text} Use the Playwright browser tools. Stop when done and state the final URL."
-            cmd = [
-                "claude",
-                "-p",
-                "--model",
-                "sonnet",
-                "--effort",
-                "low",
-                "--output-format",
-                "json",
-                "--permission-mode",
-                "bypassPermissions",
-                prompt,
-            ]
-            started = time.perf_counter()
-            proc = subprocess.run(
-                cmd, cwd=REPO_ROOT, env={**env, "CLAUDE_CONFIG_DIR": CLAUDE_CONFIG_DIR}, capture_output=True, text=True
-            )
-            wall_s = round(time.perf_counter() - started, 3)
-            try:
-                payload = json.loads(proc.stdout)
-            except json.JSONDecodeError:
-                payload = {}
-            row = {
-                "arm": "M",
-                "provider": "claude-code-mcp-sonnet",
-                "goal_id": goal_id,
-                "goal": goal_text,
-                "rep": 1,
-                "success": None,  # verified separately below, not from the agent's own claim
-                "wall_s": wall_s,
-                "duration_ms": payload.get("duration_ms"),
-                "num_turns": payload.get("num_turns"),
-                "total_cost_usd": payload.get("total_cost_usd"),
-                "usage": payload.get("usage", {}),
-                "final_text": payload.get("result"),
-                "returncode": proc.returncode,
-            }
-            rows.append(row)
-            with open(results_path, "a") as fh:
-                fh.write(json.dumps(row) + "\n")
-            print(f"    arm M {goal_id}: wall_s={wall_s} cost=${row['total_cost_usd']}")
+            for rep in range(1, ARM_M_REPS + 1):
+                prompt = (
+                    f"{goal_text} Use the Playwright browser tools. Stop when done and state the final URL."
+                )
+                cmd = [
+                    "claude",
+                    "-p",
+                    "--model",
+                    "sonnet",
+                    "--effort",
+                    "low",
+                    "--output-format",
+                    "json",
+                    "--permission-mode",
+                    "bypassPermissions",
+                    prompt,
+                ]
+                started = time.perf_counter()
+                try:
+                    proc = subprocess.run(
+                        cmd,
+                        cwd=REPO_ROOT,
+                        env={**env, "CLAUDE_CONFIG_DIR": CLAUDE_CONFIG_DIR},
+                        capture_output=True,
+                        text=True,
+                        timeout=300,
+                        stdin=subprocess.DEVNULL,
+                    )
+                    wall_s = round(time.perf_counter() - started, 3)
+                    returncode = proc.returncode
+                    stdout = proc.stdout
+                except subprocess.TimeoutExpired:
+                    wall_s = round(time.perf_counter() - started, 3)
+                    returncode = None
+                    stdout = ""
+                try:
+                    payload = json.loads(stdout)
+                except json.JSONDecodeError:
+                    payload = {}
+                final_text = payload.get("result")
+                final_url = extract_final_url(final_text)
+                fetched_title = fetch_title(final_url)
+                ok_from_text = False
+                reason = "no URL found in the session's own report"
+                if final_url:
+                    ok_from_text, reason = verify_goal(goal_id, final_url, final_text)
+                ok_from_page = False
+                page_reason = None
+                if final_url:
+                    ok_from_page, page_reason = verify_goal(goal_id, final_url, fetched_title)
+                row = {
+                    "arm": "M",
+                    "provider": "claude-code-mcp-sonnet",
+                    "goal_id": goal_id,
+                    "goal": goal_text,
+                    "rep": rep,
+                    "final_url": final_url,
+                    "fetched_title": fetched_title,
+                    # verified in code, never from the agent's own DONE claim
+                    "success": bool(ok_from_text and ok_from_page) if final_url else False,
+                    "success_from_reported_text": ok_from_text,
+                    "success_from_fetched_page": ok_from_page,
+                    "failure_reason": None if (ok_from_text and ok_from_page) else (page_reason or reason),
+                    "wall_s": wall_s,
+                    "duration_ms": payload.get("duration_ms"),
+                    "num_turns": payload.get("num_turns"),
+                    "total_cost_usd": payload.get("total_cost_usd"),
+                    "usage": payload.get("usage", {}),
+                    "modelUsage": payload.get("modelUsage", {}),
+                    "final_text": final_text,
+                    "returncode": returncode,
+                }
+                rows.append(row)
+                with open(results_path, "a") as fh:
+                    fh.write(json.dumps(row) + "\n")
+                print(
+                    f"    arm M {goal_id} rep{rep}: success={row['success']} wall_s={wall_s} "
+                    f"cost=${row['total_cost_usd']} final_url={final_url}"
+                )
     else:
         print(
             "Arm M SKIPPED: this account's `claude mcp list` does not show a connected Playwright "
             "MCP server. Not faked, not simulated. See SPIKE-NOTES.md."
         )
 
-    if chromium_proc is not None:
-        print(f"Stopping the Chromium process this script launched (pid {chromium_proc.pid}) ...")
-        try:
-            os.killpg(os.getpgid(chromium_proc.pid), signal.SIGTERM)
-            chromium_proc.wait(timeout=5)
-        except (ProcessLookupError, subprocess.TimeoutExpired):
-            try:
-                os.killpg(os.getpgid(chromium_proc.pid), signal.SIGKILL)
-            except ProcessLookupError:
-                pass
-
-    print("Stopping the browser_harness daemon (uv run browser-harness --reload) ...")
-    subprocess.run(["uv", "run", "browser-harness", "--reload"], cwd=REPO_ROOT)
-
-    print("pgrep -af 'chrom|browser_harness' after cleanup:")
+    print("pgrep -af 'chrom|browser_harness' after cleanup (arm M spawns/closes its own browser per run):")
     subprocess.run("pgrep -af 'chrom|browser_harness' || echo '(none)'", shell=True)
     print("pgrep -af 'claude -p' after:")
     subprocess.run("pgrep -af 'claude -p' || true", shell=True)
