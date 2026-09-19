@@ -13,3 +13,11 @@ the last hour may be missing: run
 `systemctl --user start airlock-filesearch.service` (about 16 s on a
 150 GB disk) and ask again. Inside one repository use `fd`, which walks the
 tree live and needs no index.
+
+Under WSL, `$HOME` and `/mnt/<drive>` are two different filesystems with two
+different indexes. `plocate` still covers `$HOME` on the Linux side. It never
+covers the Windows host, so a search under `/mnt/c/...` or any other mounted
+drive needs `es`, voidtools Everything's client, reached under its bare name
+on PATH. A file not turning up in a plocate search of `$HOME` is not evidence
+that the file does not exist; it may simply be on the other side, under
+`/mnt/<drive>`, where only `es` can find it.

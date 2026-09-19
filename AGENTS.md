@@ -10,8 +10,11 @@ kill switch and rollback. The three-command version is the
 **On native Windows (no WSL)**, follow
 [docs/INSTALL-WINDOWS.md](docs/INSTALL-WINDOWS.md) instead: the installer is
 Python rather than bash, the warm daemon does not exist there, and `es.exe`
-(voidtools Everything) replaces `plocate` for file search -- detect it, never
-install it.
+(voidtools Everything) replaces `plocate` for file search throughout --
+detect it, never install it. **Under WSL**, both indexes are in play at
+once: `plocate` still covers `$HOME` on the Linux side, but a root under
+`/mnt/<drive>` is on the Windows host and needs `es` (the same Everything
+client, reached under its bare name on PATH there) instead.
 
 **Do not** turn on compaction, or arm `enforce` on a machine that is not
 yours, without asking first. `docs/install.md` lists the rest.

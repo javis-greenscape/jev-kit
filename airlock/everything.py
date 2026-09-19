@@ -21,6 +21,11 @@ maintains the index) and the ES command-line client (a single `es.exe`, a
 separate download). A machine can perfectly well have the first and not the
 second, which is exactly what the machine this was tested on had.
 
+A WSL session on the same physical machine needs Everything too: `plocate`
+only ever indexes `$HOME` on the Linux side, so a root under `/mnt/<drive>`
+has no Linux index answering for it at all, and `es` (the same client,
+reached under its bare name on PATH in WSL) is the only thing that can.
+
 Every function takes injectable `env` and `runner` arguments, so the whole
 module is unit tested on Linux with no Windows machine involved.
 """

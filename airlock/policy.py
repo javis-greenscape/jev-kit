@@ -11,6 +11,7 @@ from pathlib import Path
 
 from . import tiers
 from .platform_compat import is_windows
+from . import winpath
 
 CONFIDENCE_THRESHOLD = 0.8
 MARGIN_THRESHOLD = 0.4
@@ -418,14 +419,76 @@ ES_SUGGESTION = (
     '    (Everything\'s index answers instantly; add -r for a regex pattern, '
     '-i to make the match case-sensitive)'
 )
+
+# Under WSL, plocate only indexes $HOME on the Linux side -- it structurally
+# cannot answer for a root that lives on the Windows host. voidtools
+# Everything can, and its client is on PATH there too, just reached under its
+# bare name (`es`, not `es.exe` -- WSL isn't running the Windows executable
+# search rules Windows itself uses to resolve a bare `es.exe`).
+ES_WSL_SUGGESTION = (
+    'es -path "<folder>" -n 50 "<pattern>"\n'
+    "    (that root is on the Windows host; the plocate index covers $HOME on the\n"
+    "     Linux side only. Everything's index answers instantly. Add -r for a regex\n"
+    "     pattern, -i to make the match case-sensitive)"
+)
 GRAPHIFY_SUGGESTION = "graphify query"
+
+# A WSL mount point for a Windows drive: "/mnt/c", "/mnt/c/Users/...".
+_WSL_MOUNT_RE = re.compile(r"^/mnt/([A-Za-z])(?=/|$)")
+
+
+def root_is_windows_host(root):
+    """True when `root` names a path that lives on the Windows host as seen
+    from WSL -- either the WSL drive-mount shape (/mnt/c/...) or one of the
+    Windows/MSYS/Cygwin spellings winpath already recognises. Pure string
+    work: never touches the filesystem, never raises on a None or empty
+    root."""
+    if not root:
+        return False
+    try:
+        s = str(root)
+    except Exception:
+        return False
+    if _WSL_MOUNT_RE.match(s):
+        return True
+    try:
+        return bool(winpath.looks_windows_path(s))
+    except Exception:
+        return False
+
+
+def any_root_is_windows_host(roots):
+    """root_is_windows_host over a possibly-None/empty list of roots."""
+    for root in roots or []:
+        if root_is_windows_host(root):
+            return True
+    return False
+
 
 # The indexed tool this platform already has. One function so the rule text,
 # the deny reason and the doctor all say the same thing on each OS, and no
 # caller has to test sys.platform for itself.
-def filename_search_suggestion(windows=None):
-    """The command to run INSTEAD of a disk-wide filename crawl."""
-    return ES_SUGGESTION if is_windows(windows) else PLOCATE_SUGGESTION
+def filename_search_suggestion(windows=None, roots=None, wsl=None):
+    """The command to run INSTEAD of a disk-wide filename crawl.
+
+    Native Windows always gets ES_SUGGESTION. Otherwise, under WSL, a root
+    that lives on the Windows host (/mnt/<drive>/...) gets ES_WSL_SUGGESTION
+    instead of the plocate suggestion, since plocate's index never covers
+    that ground. Everything else gets PLOCATE_SUGGESTION. `wsl` defaults
+    lazily from airlock.headless.is_wsl() so existing zero-arg and
+    windows=-only call sites keep working unchanged; a failure to detect WSL
+    is treated as False, never raised."""
+    if is_windows(windows):
+        return ES_SUGGESTION
+    if wsl is None:
+        try:
+            from . import headless
+            wsl = headless.is_wsl()
+        except Exception:
+            wsl = False
+    if wsl and any_root_is_windows_host(roots):
+        return ES_WSL_SUGGESTION
+    return PLOCATE_SUGGESTION
 
 
 _LOCATE_RE = re.compile(r"(?<![A-Za-z0-9_])(plocate|locate)(?![A-Za-z0-9_])")
@@ -445,11 +508,21 @@ def command_already_uses_locate(command):
     return command_already_uses_indexed_search(command)
 
 
-def command_already_uses_indexed_search(command, windows=None):
+def command_already_uses_indexed_search(command, windows=None, wsl=None):
     command = command or ""
     if _LOCATE_RE.search(command):
         return True
-    if is_windows(windows) and _ES_RE.search(command):
+    if is_windows(windows):
+        if _ES_RE.search(command):
+            return True
+        return False
+    if wsl is None:
+        try:
+            from . import headless
+            wsl = headless.is_wsl()
+        except Exception:
+            wsl = False
+    if wsl and _ES_RE.search(command):
         return True
     return False
 
@@ -464,14 +537,16 @@ def command_already_uses_indexed_search(command, windows=None):
 
 
 def evaluate_search(scope, search_intent, confidence, command, root_has_graphify_graph,
-                    margin=None, windows=None):
+                    margin=None, windows=None, roots=None, wsl=None):
     """Return the tool-choice-guard verdict for one Bash search command.
 
     would_deny (indexed-search suggestion): scope == disk_wide AND
     search_intent == filename_search AND the command doesn't already use the
-    indexed tool (plocate/locate on Linux, es.exe on Windows), gated on the
-    shared confidence+margin deny bar. The suggestion string itself comes
-    from filename_search_suggestion(), so the advice is right on each OS.
+    indexed tool (plocate/locate on Linux, es/es.exe on Windows or WSL),
+    gated on the shared confidence+margin deny bar. The suggestion string
+    itself comes from filename_search_suggestion(), so the advice is right
+    for the OS and, under WSL, for which side of the filesystem `roots`
+    actually lands on.
 
     would_deny (graphify suggestion): search_intent == code_structure_search
     AND the root already has a graphify graph, gated the same way.
@@ -486,10 +561,10 @@ def evaluate_search(scope, search_intent, confidence, command, root_has_graphify
         if (
             scope == "disk_wide"
             and search_intent == "filename_search"
-            and not command_already_uses_indexed_search(command, windows)
+            and not command_already_uses_indexed_search(command, windows, wsl)
         ):
             would_deny = True
-            suggestion = filename_search_suggestion(windows)
+            suggestion = filename_search_suggestion(windows, roots, wsl)
         elif search_intent == "code_structure_search" and root_has_graphify_graph:
             would_deny = True
             suggestion = GRAPHIFY_SUGGESTION

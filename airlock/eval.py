@@ -159,6 +159,7 @@ def _judge_bash(payload):
         command=command,
         root_has_graphify_graph=has_graph,
         margin=margin,
+        roots=scope_result.get("roots"),
     )
     usage = response.get("usage") or {}
     tokens = (usage.get("input_tokens") or 0) + (usage.get("output_tokens") or 0)

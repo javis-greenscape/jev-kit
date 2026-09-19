@@ -48,6 +48,13 @@ Rebuild it on demand when a file made in the last hour is missing:
 systemctl --user start airlock-filesearch.service
 ```
 
+### Under WSL: this index only covers `$HOME`
+
+`/mnt/<drive>` is a different filesystem, on the Windows host, and this
+index never reaches it. A root under `/mnt/c/...` needs `es`, voidtools
+Everything's client, on PATH under its bare name in WSL. A miss from
+`plocate` on a `/mnt/<drive>` path means nothing; try `es` there instead.
+
 ## Tell the agent
 
 An index nothing knows about is used by nothing. `CLAUDE.md.snippet` is the

@@ -223,6 +223,7 @@ def compute_search_entry(data, timeout_s=None):
         command=command_r,
         root_has_graphify_graph=has_graph,
         margin=margin,
+        roots=scope_result.get("roots"),
     )
     entry["would_deny"] = verdict["would_deny"] and not sampled
     entry["suggestion"] = verdict.get("suggestion")
