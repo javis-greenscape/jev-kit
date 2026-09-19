@@ -25,26 +25,28 @@ on its own.
    or a deployed release with no pointer recorded -- the run exits 0 with one
    log line and touches no state. Tuning is optional; it must never fail the
    timer noisily.
-4. Take up to the newest 20 new shadow rows, drop any that still carry
-   secret-shaped text (see "The redaction sanity check" below -- a dropped row
-   is counted, never a reason to abandon the run), and send the rest to a
-   headless judge, whose binary was resolved before any of the above (see
-   "Finding the judge binary"):
+4. **Sample up to 20 rows to judge** (`tuning/sampling.py`), drop any that
+   still carry secret-shaped text (see "The redaction sanity check" below --
+   a dropped row is counted, never a reason to abandon the run), and send the
+   rest to a headless judge whose binary was resolved before any of the above
+   (see "Finding the judge binary"):
    `CLAUDE_CONFIG_DIR=$AIRLOCK_TUNE_CLAUDE_CONFIG_DIR claude -p <prompt> --model
    $AIRLOCK_TUNE_JUDGE_MODEL --effort $AIRLOCK_TUNE_JUDGE_EFFORT --safe-mode --tools
-   ""` with stdin closed (default model `opus`, effort `high`). Each
-   tool_choice_guard row already carries its own code-computed `scope` field;
-   the prompt tells the judge to treat that as ground truth and judge
-   `search_intent` only, never re-deriving scope. The prompt carries the
-   rubric and the rows and demands a strict JSON array back. On anything that
-   doesn't parse as expected, the run stops and logs why -- nothing
-   downstream happens. The row cap was halved from 40 when the judge moved to
-   Opus at high effort, a materially more expensive call per row, to keep a
-   single run's cost in check.
-5. Rows the judge marks wrong become new `source: "shadow"` cases, deduped by
-   a hash of the command (or subagent_type+prompt) and appended to
-   `eval/cases.jsonl`, capped at 400 total (oldest shadow cases drop first;
-   seed cases are never dropped).
+   ""` with stdin closed (default model `opus`, effort `high`). The row cap was
+   halved from 40 when the judge moved to Opus at high effort. See
+   "How rows are sampled" and "What the judge is told" below -- both sections
+   exist because the first real unattended run got both wrong.
+5. Rows whose **label** the judge marks wrong become new `source: "shadow"`
+   cases, deduped by a hash of the command (or subagent_type+prompt) and
+   appended to `eval/cases.jsonl`, capped at 400 total (oldest shadow cases
+   drop first; seed cases are never dropped). A row whose label was right and
+   whose *action* was wrong produces no case: there is no label expectation to
+   record, and inventing one teaches the eval the opposite of the finding. The
+   case's deny expectation is re-derived from the live policy given the
+   corrected label, and omitted (`deny_expectation: "unverified"`) when the row
+   does not carry what the policy needs. It is never copied off the row -- a
+   row the judge has just called wrong is the last place to read the right
+   answer from.
 6. A **baseline eval runs before any code changes**, on the full case set
    (existing + new), using the *old* `questions.py`. This is the number
    everything else is measured against.
@@ -72,6 +74,101 @@ on its own.
     regardless of outcome, carrying a `category` that says which of the five
     possible outcomes it was (see "Every run records a category" below).
     `python3 -m airlock.report --tuning` summarizes the log.
+
+## How rows are sampled
+
+`tuning/sampling.py`. Two rules, both named in every log line that quotes a
+rate, because a rate without its sampling rule is not a measurement.
+
+**Only judgeable rows are sampled.** A row is judgeable when it carries a Jev
+answer for a question the judge's rubric still has (`task_kind`,
+`search_intent`) and an input summary to judge it against. Everything else is
+skipped and counted by reason:
+
+| reason | what it is |
+|---|---|
+| `no_jev_answer` | Jev was never called. Usually `skipped: "no_deny_possible"` -- the code already knew from scope/program/rung that no answer could reach a deny, so the call was skipped to save ~300ms. There is no answer to be right or wrong about. |
+| `legacy_question` | written by an older release under a question id since renamed (`search_kind` predates `search_intent`). Not scorable against today's rubric. |
+| `no_rubric_for_question` | a guard whose question the judge has no rubric for (`risk`, `prints_a_secret`, ...). |
+| `no_input_summary` | an answer with nothing to judge it against, e.g. an override row. |
+
+**The budget is split in half.** Half goes to the newest judgeable rows (the
+recency slice: what the guard is doing right now, which is what a tuning loop
+should react to). Half is a uniformly random draw over every judgeable row the
+run can see. Each half reports its own rate, and **only the random half is an
+estimate of overall accuracy.** The run log carries `sample`,
+`rates_by_sample_rule` and a `rate_sentence` that never states a bare number:
+
+```
+40% wrong of the 5 rows sampled by the newest judgeable rows since the last run
+(recency-biased: NOT an estimate of overall accuracy); 0% wrong of the 6 rows
+sampled by a uniformly random draw ... ; skipped as not judgeable:
+no_jev_answer=773, legacy_question=34, no_rubric_for_question=68
+```
+
+`AIRLOCK_TUNE_SAMPLE_SEED` pins the random half for a reproducible run; the
+seed used is recorded either way.
+
+### Why this section exists
+
+The first real unattended run (2026-09-19T17:13:03Z, judge = Opus at high
+effort) took "the newest 20 new rows" and reported `error_rate 0.85` -- 17 of
+20 wrong, against a guard that scores 95-98% on its labelled eval. Replaying
+that exact window through `sampling.select` gives: **20 considered, 1
+judgeable, 17 `no_jev_answer`, 2 `no_rubric_for_question`.** The 17 is not a
+measurement of the guard. It is the count of rows in which Jev never spoke.
+
+## What the judge is told
+
+`tuning/policy_text.py` generates the policy block by **running the real
+policy functions** in `airlock/policy.py` over the real ladder in
+`airlock/tiers.py` and the real option lists in `airlock/questions.py`, and
+printing what they return: the three live tier outcomes (block at two rungs or
+more or fable without a stated prior failure, warn at exactly one rung, silent
+otherwise), the shared confidence/margin bar, the full task_kind x rung grid,
+and the exact scope/intent combinations the search guard denies on. Nothing in
+it is hand-kept, so it cannot drift from the code.
+
+`tests/test_tune_judge_policy.py` pins a fingerprint over those constants.
+Change a threshold, a rung, an option or an outcome and that test fails,
+which forces whoever changed it to re-read the prompt before re-pinning:
+
+```bash
+python3 -c 'from tuning import policy_text as p; print(p.policy_fingerprint())'
+```
+
+The prompt asks for **two verdicts per row, never one**:
+
+- `label_correct` -- was the option Jev chose the right one?
+- `action_correct` -- given the policy, did the guard do the right thing?
+
+They are independent. A below-bar answer that the guard stayed silent about is
+a *wrong label with a correct action*, and the old single `jev_correct` flag
+had no way to say so. The prompt also states plainly that fail-open is the
+design, that below-bar silence is correct, that under-tiering is never a deny,
+and that the row's `action` field is the *rule's configured action*, not what
+happened to this call -- 18 of the 20 rows in the bad run read `action: "deny"`
+with `would_deny: false`, meaning they were allowed.
+
+The judge may answer `cannot_tell`. A `cannot_tell` is counted, reported, and
+put in **neither** half of the ratio.
+
+## Per-run verdicts: `tune_verdicts/`
+
+Every run writes one JSONL file per run to
+`~/.local/state/airlock/tune_verdicts/<ts>.jsonl`, mode 600, newest 20 runs
+kept. The first line is a `_meta` record (judge model and effort, the sampling
+report, the rate table, the policy fingerprint); one line per row follows with
+the row id, guard, sample rule, the label Jev chose, the label the judge chose,
+both verdicts, `cannot_tell`, and the judge's one-line reason.
+
+No command text, no cwd and no prompt is copied in: the shadow log already
+holds those under the same protection, and a second copy is a second thing to
+leak.
+
+The run that produced `error_rate 0.85` kept none of this, so answering "why
+17?" afterwards meant reconstructing the batch from timestamps. A run that
+cannot be questioned after the fact cannot be trusted before it.
 
 ## Which repository does tuning use?
 

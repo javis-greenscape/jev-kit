@@ -39,6 +39,17 @@ try:
     from airlock.redact import redact as _redact
 except Exception:  # pragma: no cover - only if the tree is broken
     _redact = None
+try:
+    from airlock import policy as _policy
+except Exception:  # pragma: no cover - only if the tree is broken
+    _policy = None
+
+from tuning import sampling, verdicts as verdict_store
+
+try:
+    from tuning import policy_text as _policy_text
+except Exception:  # pragma: no cover - only if the tree is broken
+    _policy_text = None
 
 HOME = Path(os.environ.get("HOME") or os.path.expanduser("~"))
 
@@ -235,6 +246,24 @@ CATEGORY_BLURB = {
 
 def log(msg):
     print("[tune] %s" % msg, file=sys.stderr)
+
+
+# Facts a run learns as it goes that EVERY later log entry should carry --
+# how it sampled, how many rows the judge declined, where the verdicts went.
+# Held here so the dozen `_finish` call sites do not each have to remember.
+_RUN_EXTRA = {}
+
+
+def _int_env(name):
+    """An optional integer from the environment. A bad value is None, never a
+    crash: a sampling seed is a debugging aid, not a reason to lose a run."""
+    raw = os.environ.get(name)
+    if not raw:
+        return None
+    try:
+        return int(raw)
+    except Exception:
+        return None
 
 
 # --- state -------------------------------------------------------------
@@ -502,28 +531,209 @@ unclear = not enough information.
 Scope (disk_wide/single_repo/single_dir/stdin/unknown) is decided in CODE, not
 by the model -- every tool_choice_guard row below already carries its own
 code-computed "scope" field as ground truth. Treat it as given and judge
-search_intent only; do not re-derive or second-guess scope, and it plays no
-part in whether Jev's search_intent answer was correct. It only affects the
-would_deny policy downstream, which is out of scope for this judgement.
+search_intent only; do not re-derive or second-guess scope.
+""".strip()
+
+
+# Keys stripped from a row before it is shown to the judge: internal
+# bookkeeping this module added, never part of the evidence.
+INTERNAL_ROW_KEYS = ("_sample_rule",)
+
+
+def _judge_row(row, index):
+    """One row as the judge sees it: the log entry, minus our bookkeeping,
+    plus a stable id so verdicts can be matched back even if the model
+    reorders them."""
+    out = {k: v for k, v in row.items() if k not in INTERNAL_ROW_KEYS}
+    out["id"] = row.get("id") or "row-%d" % index
+    return out
+
+
+def guard_policy_text():
+    """The real, code-generated policy block. Falls back to a loud marker
+    rather than silently shipping a prompt with no policy in it at all --
+    which is the failure this whole module exists to stop."""
+    if _policy_text is None:  # pragma: no cover - only if the tree is broken
+        return ("POLICY TEXT UNAVAILABLE: airlock could not be imported. Judge "
+                "the LABEL only and answer cannot_tell for every question about "
+                "the action taken.")
+    try:
+        return _policy_text.policy_text()
+    except Exception as exc:  # pragma: no cover
+        return ("POLICY TEXT UNAVAILABLE (%s). Judge the LABEL only and answer "
+                "cannot_tell for every question about the action taken." % exc)
+
+
+JUDGE_TASK = """
+You are auditing a shadow-mode AI guard for correctness. Each row below is one
+already-redacted log entry: a guard name, the input it judged, what Jev (a
+small classifier) answered, and what the guard then did.
+
+Judge TWO separate things per row, and never let one decide the other:
+
+  A. THE LABEL. Given the rubric, was the option Jev chose the right one for
+     this input? This is about classification only.
+
+  B. THE ACTION TAKEN. Given the policy above and the fields on the row, did
+     the guard do the right thing? An action can be right while the label is
+     wrong (the policy may not have reached that answer at all), and the label
+     can be right while the action is wrong. Silence is an action, and below
+     the bar it is the CORRECT one.
+
+You may -- and should -- answer "cannot tell" rather than guess. Set
+"cannot_tell": true when the row does not carry what the question needs: no
+Jev answer, no input summary, a question your rubric does not cover, or a
+field you would have to invent. A cannot_tell is not counted against the
+guard and is not counted against you. Guessing is.
+
+Respond with ONLY a JSON array, no prose before or after, one object per row
+in the same order, each shaped exactly like:
+{"id": "<the row's id>", "guard": "<guard>", "correct_label": "<option name or null>",
+ "label_correct": true|false|null, "action_correct": true|false|null,
+ "cannot_tell": true|false, "reason": "<one line>"}
 """.strip()
 
 
 def build_judge_prompt(rows):
-    rows_json = json.dumps(rows, indent=2, default=str)
-    return (
-        "You are auditing a shadow-mode AI guard's judgements for correctness. "
-        "Each row below is one already-redacted log entry: a guard name, the "
-        "input it judged, and what it (Jev) answered.\n\n"
-        + RUBRIC_SUMMARY
-        + "\n\nRows (JSON array):\n" + rows_json + "\n\n"
-        "For EACH row, decide the correct label per the rubric above, and "
-        "whether Jev's answer for that row was right. Respond with ONLY a "
-        "JSON array, no prose before or after, one object per row in the same "
-        "order, each shaped exactly like:\n"
-        '{"id": "<row id or index>", "guard": "<guard>", '
-        '"correct_label": "<option name>", "jev_correct": true|false, '
-        '"reason": "<one line>"}\n'
+    rows_json = json.dumps(
+        [_judge_row(r, i) for i, r in enumerate(rows)], indent=2, default=str
     )
+    return (
+        guard_policy_text()
+        + "\n\n"
+        + RUBRIC_SUMMARY
+        + "\n\n"
+        + JUDGE_TASK
+        + "\n\nRows (JSON array):\n"
+        + rows_json
+        + "\n"
+    )
+
+
+def normalise_verdict(verdict, row, index):
+    """One judge answer, reduced to the fields this run acts on.
+
+    `wrong` is deliberately the union of "the label was wrong" and "the action
+    was wrong", with cannot_tell winning over both: the previous run counted a
+    row as wrong whenever the judge did not say true, which turned every
+    unanswerable row into a guard error."""
+    if not isinstance(verdict, dict):
+        verdict = {}
+    cannot_tell = bool(verdict.get("cannot_tell"))
+    label_correct = verdict.get("label_correct")
+    action_correct = verdict.get("action_correct")
+    if label_correct is None and action_correct is None and not cannot_tell:
+        # A judge that answered neither has told us nothing. That is a
+        # cannot_tell, not a guard error.
+        cannot_tell = True
+    answers = row.get("answers") or {}
+    question = next((q for q in sampling.RUBRIC_QUESTIONS if q in answers), None)
+    jev_label = None
+    if question:
+        jev_label = (answers.get(question) or {}).get("choice")
+    wrong = (not cannot_tell) and (label_correct is False or action_correct is False)
+    return {
+        "id": row.get("id") or "row-%d" % index,
+        "ts": row.get("ts"),
+        "guard": row.get("guard"),
+        "sample_rule": row.get("_sample_rule"),
+        "question": question,
+        "jev_label": jev_label,
+        "correct_label": verdict.get("correct_label"),
+        "label_correct": None if cannot_tell else label_correct,
+        "action_taken": describe_action(row),
+        "action_correct": None if cannot_tell else action_correct,
+        "cannot_tell": cannot_tell,
+        "wrong": wrong,
+        "reason": str(verdict.get("reason", ""))[:300],
+    }
+
+
+def _row_confidence(row, question):
+    """Jev's confidence for one question. Older rows put it only inside
+    `answers`; newer ones also mirror it at the top level. Read both."""
+    answer = (row.get("answers") or {}).get(question) or {}
+    if answer.get("confidence") is not None:
+        return answer.get("confidence")
+    if question == "task_kind":
+        return row.get("task_kind_confidence")
+    return row.get("confidence")
+
+
+def expected_case_fields(row, guard, correct_label):
+    """The `expected` block for a new eval case built from a shadow row.
+
+    The old version copied `would_deny` straight off the row, which recorded
+    what the guard DID as what it SHOULD have done -- on a row the judge had
+    just called wrong. The deny expectation is now re-derived from the live
+    policy given the corrected label, and when the row does not carry what
+    the policy needs, it is left out entirely rather than guessed. Returns
+    None when even the label cannot be stated.
+    """
+    if not correct_label:
+        return None
+    if guard == "tier_guard":
+        expected = {"task_kind": correct_label}
+        chosen = row.get("chosen_type") or row.get("chosen")
+        if _policy is not None and chosen:
+            try:
+                verdict = _policy.evaluate_tier(
+                    correct_label,
+                    _row_confidence(row, "task_kind"),
+                    row.get("prior_failed"),
+                    chosen,
+                    task_kind_margin=row.get("margin"),
+                )
+                entry = _policy.tier_entry_fields(
+                    verdict, correct_label, _row_confidence(row, "task_kind"),
+                    row.get("margin"), row.get("prior_failed"), chosen,
+                )
+                expected["expect_block"] = bool(_policy.enforce_deny_tier(entry))
+                expected["would_deny"] = bool(verdict.get("would_deny"))
+            except Exception:
+                expected["deny_expectation"] = "unverified"
+        else:
+            expected["deny_expectation"] = "unverified"
+        return expected
+
+    expected = {"search_intent": correct_label}
+    scope = row.get("scope")
+    command = (row.get("input_summary") or {}).get("command")
+    if _policy is None or scope is None or command is None:
+        expected["deny_expectation"] = "unverified"
+        return expected
+    if correct_label == "code_structure_search" and row.get("search_intent") != correct_label:
+        # Denying here turns on whether the search root has a graphify graph,
+        # which this row does not record. Say so instead of picking one.
+        expected["deny_expectation"] = "unverified"
+        return expected
+    try:
+        graph_present = bool(row.get("would_deny")) and \
+            (row.get("answers") or {}).get("search_intent", {}).get("choice") == "code_structure_search"
+        verdict = _policy.evaluate_search(
+            scope, correct_label, _row_confidence(row, "search_intent"), command,
+            graph_present,
+            margin=row.get("margin"),
+        )
+        expected["would_deny"] = bool(verdict.get("would_deny"))
+    except Exception:
+        expected["deny_expectation"] = "unverified"
+    return expected
+
+
+def describe_action(row):
+    """What the guard ACTUALLY did, from the row's own outcome fields -- not
+    from `action`, which is the rule's configured action and says nothing
+    about this call."""
+    if row.get("skipped"):
+        return "skipped:%s" % row.get("skipped")
+    if row.get("enforced"):
+        return "blocked"
+    if row.get("warned"):
+        return "warned"
+    if row.get("would_deny"):
+        return "flagged_would_deny_not_enforced"
+    return "allowed_silently"
 
 
 QUESTION_FN_NAMES = {"task_kind": "tier_questions", "search_intent": "bash_questions"}
@@ -893,9 +1103,28 @@ def main():
         )
         return 0
 
-    # newest first, capped
+    # newest first (the cursor is advanced from this, independently of what
+    # the sample picks)
     new_rows_sorted = sorted(new_rows, key=lambda r: str(r.get("ts", "")), reverse=True)
-    candidate_rows = new_rows_sorted[:MAX_JUDGE_ROWS]
+
+    # Sample: half newest-judgeable, half uniformly random over every
+    # judgeable row, with every non-judgeable row counted by reason. See
+    # tuning/sampling.py for why "the newest 20 rows" was not a measurement
+    # of anything.
+    candidate_rows, sample_report = sampling.select(
+        new_rows_sorted, MAX_JUDGE_ROWS,
+        seed=_int_env("AIRLOCK_TUNE_SAMPLE_SEED"),
+    )
+    log("sampling: %d of %d new row(s) judgeable; sampled %d (%d recent, %d random, seed=%s)"
+        % (sample_report["judgeable"], sample_report["considered"],
+           sample_report["sampled"], sample_report["sampled_recent"],
+           sample_report["sampled_random"], sample_report["seed"]))
+    for reason, count in sorted((sample_report["skipped_by_reason"] or {}).items()):
+        log("sampling: skipped %d row(s) as %s" % (count, reason))
+    _RUN_EXTRA["sample"] = {
+        k: v for k, v in sample_report.items() if k != "rules"
+    }
+    _RUN_EXTRA["sample_rules"] = sample_report["rules"]
 
     # A row that still carries secret-shaped text is dropped from THIS batch,
     # counted, and the run carries on with the rest. One suspect row must not
@@ -956,16 +1185,50 @@ def main():
                 category=CATEGORY_RAN_REJECTED, redaction_skipped=redaction_skipped)
         return 0
 
+    run_verdicts = []
     wrong = []
-    for row, verdict in zip(judge_rows, judgements):
-        if not isinstance(verdict, dict):
-            continue
-        if verdict.get("jev_correct") is False:
-            wrong.append({"row": row, "verdict": verdict})
+    for index, (row, verdict) in enumerate(zip(judge_rows, judgements)):
+        normalised = normalise_verdict(verdict, row, index)
+        run_verdicts.append(normalised)
+        if normalised["wrong"]:
+            wrong.append({"row": row, "verdict": normalised})
 
-    judged_count = len(judge_rows)
+    # Persist the per-row verdicts BEFORE anything else can discard the run.
+    # A run whose only surviving output is "wrong: 17" cannot be questioned,
+    # which is how the 0.85 stood for as long as it did.
+    rate_table = sampling.rates(run_verdicts)
+    verdict_path = verdict_store.write_run(
+        STATE_DIR, run_verdicts,
+        meta={
+            "run_ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            "judge_model": judge_model(),
+            "judge_effort": judge_effort(),
+            "sample": sample_report,
+            "rates": rate_table,
+            "policy_fingerprint": (
+                _policy_text.policy_fingerprint() if _policy_text is not None else None
+            ),
+        },
+    )
+    if verdict_path is None:
+        log("could not persist per-row verdicts (continuing; the run is still valid)")
+    else:
+        log("per-row verdicts: %s" % verdict_path)
+    log("rates: %s" % sampling.rate_sentence(sample_report, rate_table))
+    _RUN_EXTRA["rates_by_sample_rule"] = rate_table
+    _RUN_EXTRA["cannot_tell"] = rate_table["_all_sampled"]["cannot_tell"]
+    _RUN_EXTRA["verdicts_file"] = str(verdict_path) if verdict_path else None
+    _RUN_EXTRA["rate_sentence"] = sampling.rate_sentence(sample_report, rate_table)
+
+    judged_count = rate_table["_all_sampled"]["judged"]
+    cannot_tell_count = rate_table["_all_sampled"]["cannot_tell"]
     wrong_count = len(wrong)
+    # Denominator is the rows the judge could actually decide. A cannot_tell
+    # is neither right nor wrong and belongs in neither half of the ratio.
     error_rate = (wrong_count / judged_count) if judged_count else 0.0
+    if cannot_tell_count:
+        log("judge answered cannot_tell on %d of %d sampled row(s)"
+            % (cannot_tell_count, len(run_verdicts)))
 
     if not wrong:
         log("judge found no wrong rows; nothing to tune")
@@ -986,10 +1249,14 @@ def main():
         row = item["row"]
         verdict = item["verdict"]
         guard = row.get("guard")
-        if guard == "tier_guard":
-            expected = {"task_kind": verdict.get("correct_label"), "would_deny": bool(row.get("would_deny"))}
-        else:
-            expected = {"search_intent": verdict.get("correct_label"), "would_deny": bool(row.get("would_deny"))}
+        if verdict.get("label_correct") is not False:
+            # The action was wrong but the label was right (or undecided).
+            # There is no label expectation to add, and inventing one teaches
+            # the eval the opposite of what the judge found.
+            continue
+        expected = expected_case_fields(row, guard, verdict.get("correct_label"))
+        if expected is None:
+            continue
         cid = "shadow-%s" % hashlib.sha256(json.dumps(row, default=str).encode("utf-8")).hexdigest()[:16]
         if cid in existing_ids:
             continue
@@ -1005,6 +1272,7 @@ def main():
             "expected": expected,
             "source": "shadow",
             "note": verdict.get("reason", ""),
+            "sample_rule": verdict.get("sample_rule"),
         })
 
     if not new_cases:
@@ -1199,6 +1467,9 @@ def _finish(state, next_interval_min, committed, new_rows, judged, wrong, error_
         "new_rows": new_rows,
         "judged": judged,
         "wrong": wrong,
+        # NOT "the error rate". It is the rate over the rows this run
+        # sampled, and `sample` below names the rule that drew them.
+        "error_rate_of_sampled": error_rate,
         "error_rate": error_rate,
         "accuracy_before": accuracy_before,
         "accuracy_after": accuracy_after,
@@ -1209,6 +1480,7 @@ def _finish(state, next_interval_min, committed, new_rows, judged, wrong, error_
         "redaction_skipped": redaction_skipped,
         "reason": reason,
     }
+    entry.update(_RUN_EXTRA)
     append_tune_log(entry)
     log(summary_line(entry))
     log("run finished: %s" % json.dumps(entry, default=str))

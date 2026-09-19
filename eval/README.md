@@ -17,6 +17,22 @@ python3 -m airlock.eval --json
 
 **A rule with any false deny on its eval cases ships as `warn`, not `deny`.**
 
+## Cases the tuning loop adds (`source: "shadow"`)
+
+A shadow case is only created when the judge found the **label** wrong. Its
+`expected` label is the judge's corrected option; its deny expectation is
+re-derived from the live policy given that corrected label, and is left out
+with `deny_expectation: "unverified"` when the row does not carry what the
+policy needs (a tier row with no `chosen_type`, or a `code_structure_search`
+row, because whether the search root had a graphify graph is not recorded).
+
+It is never copied off the shadow row. Copying `would_deny` off a row the
+judge has just called wrong records what the guard *did* as what it *should
+have done*, which is the one thing an eval case must not say. Each case also
+carries the `sample_rule` that drew its row, so a corpus skewed by recency
+sampling is visible rather than silent. See
+[../tuning/README.md](../tuning/README.md).
+
 `fixtures/` holds the tiny transcript files a case needs when its question
 reads the user's own recent words (`user_requested`). A case's
 `transcript_path` may be relative; it is resolved against the repository root,

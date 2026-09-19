@@ -286,9 +286,29 @@ class TestRunCategories(unittest.TestCase):
                 "cwd": "/tmp/project",
                 "session_id": "synthetic-%d" % i,
                 "would_deny": False,
+                "scope": "disk_wide",
+                "margin": 1.0,
+                # A row with no `answers` block carries no Jev answer and is
+                # not judgeable (see tuning/sampling.py). Every fixture row
+                # here is one Jev really answered, because that is the only
+                # kind a run is allowed to sample.
+                "answers": {"search_intent": {
+                    "type": "choice", "choice": "filename_search", "confidence": 1.0,
+                    "probabilities": {"filename_search": 1.0, "not_a_search": 0.0},
+                }},
                 "input_summary": {"command": command},
             })
         return rows
+
+    def _verdicts(self, n, label_correct=True, correct_label="filename_search"):
+        """Judge output in the CURRENT schema: a label verdict and an action
+        verdict, separately, with an explicit cannot_tell."""
+        return json.dumps([
+            {"id": "row-%d" % i, "guard": "tool_choice_guard",
+             "correct_label": correct_label, "label_correct": label_correct,
+             "action_correct": True, "cannot_tell": False, "reason": "fine"}
+            for i in range(n)
+        ])
 
     def _last_entry(self):
         path = self.state / "tune_log.jsonl"
@@ -363,10 +383,7 @@ class TestRunCategories(unittest.TestCase):
     def test_ran_nothing_when_judge_finds_no_wrong_rows(self):
         rows = self._synthetic_rows(12)
         self._write_rows(rows)
-        verdicts = json.dumps([
-            {"id": r["session_id"], "guard": r["guard"], "correct_label": "filename_search",
-             "jev_correct": True, "reason": "fine"} for r in rows
-        ])
+        verdicts = self._verdicts(len(rows))
         with mock.patch.object(tune, "resolve_judge_bin", return_value=("/bin/true", [])), \
              mock.patch.object(tune, "resolve_main_repo", return_value=Path("/tmp")), \
              mock.patch.object(tune, "ensure_tune_worktree"), \
@@ -398,10 +415,7 @@ class TestRunCategories(unittest.TestCase):
             r["ts"] = "2026-01-01T00:%02d:00Z" % i
             r["session_id"] = "synthetic-%d" % i
         self._write_rows(rows)
-        verdicts = json.dumps([
-            {"id": "x", "guard": "tool_choice_guard", "correct_label": "filename_search",
-             "jev_correct": True, "reason": "fine"} for _ in range(11)
-        ])
+        verdicts = self._verdicts(11)
         with mock.patch.object(tune, "resolve_judge_bin", return_value=("/bin/true", [])), \
              mock.patch.object(tune, "resolve_main_repo", return_value=Path("/tmp")), \
              mock.patch.object(tune, "ensure_tune_worktree"), \
