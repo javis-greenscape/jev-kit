@@ -77,15 +77,22 @@ def _exists(path):
         return False
 
 
-def candidate_paths(env=None):
-    """Every place es.exe is looked for, in order. Pure: touches no disk."""
+def candidate_paths(env=None, pathsep=None):
+    """Every place es.exe is looked for, in order. Pure: touches no disk.
+
+    `pathsep` defaults to os.pathsep, which is ";" on Windows where this runs
+    for real. It is a parameter because the unit tests run on Linux, where
+    os.pathsep is ":" and a Windows PATH entry such as `C:\bin` would be
+    split down the middle at the drive letter.
+    """
     env = _env(env)
+    pathsep = os.pathsep if pathsep is None else pathsep
     out = []
     for var in ES_PATH_ENV:
         value = env.get(var)
         if value:
             out.append(value)
-    for entry in (env.get("PATH") or "").split(os.pathsep):
+    for entry in (env.get("PATH") or "").split(pathsep):
         entry = entry.strip().strip('"')
         if entry:
             out.append(os.path.join(entry, ES_EXE))
@@ -96,10 +103,10 @@ def candidate_paths(env=None):
     return out
 
 
-def find_es(env=None, exists=None):
+def find_es(env=None, exists=None, pathsep=None):
     """Full path to es.exe, or None. `exists` is injectable for tests."""
     exists = exists or _exists
-    for candidate in candidate_paths(env):
+    for candidate in candidate_paths(env, pathsep):
         if exists(candidate):
             return candidate
     return None
@@ -139,13 +146,13 @@ def service_running(runner=None, env=None):
     return None
 
 
-def status(env=None, runner=None, exists=None):
+def status(env=None, runner=None, exists=None, pathsep=None):
     """One dict the doctor and the installer both print.
 
     {"es_path": str|None, "service": True|False|None, "ok": bool,
      "advice": str|None}
     """
-    es_path = find_es(env=env, exists=exists)
+    es_path = find_es(env=env, exists=exists, pathsep=pathsep)
     service = service_running(runner=runner, env=env)
     advice = None
     if es_path is None:
