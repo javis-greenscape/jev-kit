@@ -17,14 +17,28 @@ compaction installer). Change the order here and there, together, or not at
 all.
 
   1. `TYPESAFE_API_KEY` in the environment. No file is read at all.
-  2. `AIRLOCK_KEY_FILE` (then the legacy `PLUMBLINE_KEY_FILE`,
-     `JEV_GUARD_KEY_FILE`) -- an explicit override, honoured as given.
-  3. the generic default `~/.config/airlock/env`, if it exists.
-  4. the path recorded in the POINTER FILE `$AIRLOCK_CONFIG_DIR/keyfile.path`,
+  2. `AIRLOCK_KEY_FILE`, then `JEVKIT_KEY_FILE` (then the legacy
+     `PLUMBLINE_KEY_FILE`, `JEV_GUARD_KEY_FILE`) -- an explicit override,
+     honoured as given.
+  3. the KIT default `~/.config/jev-kit/env`, if it exists.
+  4. the GUARD-ERA default `~/.config/airlock/env`, if it exists. Still fully
+     honoured: an existing install keeps working with no action at all.
+  5. the path recorded in the POINTER FILE `$AIRLOCK_CONFIG_DIR/keyfile.path`,
      if the pointer passes the checks below.
-  5. each path in `AIRLOCK_LEGACY_KEY_FILES` (colon-separated), in order.
-  6. otherwise the generic default, whether or not it exists. If it does not,
+  6. each path in `AIRLOCK_LEGACY_KEY_FILES` (colon-separated), in order.
+  7. otherwise the kit default, whether or not it exists. If it does not,
      there is no key, and every guard fails open and judges nothing.
+
+Why the kit default is not under the guard's directory
+------------------------------------------------------
+
+One `TYPESAFE_API_KEY` is read by every component in the kit -- the guard, the
+belay wrapper, compaction, the document classifier, log triage, the browser
+agent and the review wrapper. A key that every component reads does not belong
+in any single component's config directory, so the kit-level default is
+`~/.config/jev-kit/env`. Everything that is genuinely the guard's own -- the
+mode file, `rules.json`, `tiers.json`, the kill switch, the state and release
+directories -- stays under `~/.config/airlock/`.
 
 Why a pointer file at all
 -------------------------
@@ -33,7 +47,7 @@ A hook runs with a bare environment and never sources `install/config.env`, so
 a machine that keeps its key somewhere other than the default has no way to
 tell the hook where. `install/install.sh` writes the PATH of the key file (only
 ever the path, never the value) into `$AIRLOCK_CONFIG_DIR/keyfile.path`, and
-step 4 reads it.
+step 5 reads it.
 
 That makes the pointer a security-relevant file: whoever can write it chooses
 which file this process parses for a secret, and R1 in `airlock/rules.py`
@@ -48,7 +62,7 @@ protects whatever it names. So it is trusted only when:
   * the recorded path is an existing regular file.
 
 Any check failing means the pointer is ignored and resolution carries on at
-step 5, exactly as if the pointer did not exist. Nothing raises, nothing
+step 6, exactly as if the pointer did not exist. Nothing raises, nothing
 blocks. The reason is recorded in `pointer_diagnostics()` (path names and
 permission bits only, never file contents) so `install/doctor.sh` can say why
 a pointer is not being honoured; with `AIRLOCK_DEBUG=1` it also goes to stderr.
@@ -64,9 +78,18 @@ from . import paths
 
 ENV_VAR = "TYPESAFE_API_KEY"
 
-# The generic default is deliberately machine-neutral, so a fresh machine needs
-# no config at all. No other path is baked into this file.
-DEFAULT_ENV_FILE = "~/.config/airlock/env"
+# The kit-level default is deliberately machine-neutral, so a fresh machine
+# needs no config at all. Every component in the kit reads the same key, so it
+# does not live under the guard's own directory.
+DEFAULT_ENV_FILE = "~/.config/jev-kit/env"
+
+# The default from when the kit was only the guard. Still honoured, in full and
+# for good: an install that already has its key here keeps working with no
+# action. Never remove it, and never stop R1 protecting it.
+GUARD_ENV_FILE = "~/.config/airlock/env"
+
+# Every default the resolution order consults, newest first.
+DEFAULT_ENV_FILES = (DEFAULT_ENV_FILE, GUARD_ENV_FILE)
 
 # A one-line file holding the PATH of the key file, never its contents.
 POINTER_FILE = "keyfile.path"
@@ -214,12 +237,14 @@ def legacy_env_files():
 
 
 def default_env_file():
-    """Steps 3 to 6: the key file to read when no *_KEY_FILE override is set.
+    """Steps 3 to 7: the key file to read when no *_KEY_FILE override is set.
     Never raises."""
     generic = os.path.expanduser(DEFAULT_ENV_FILE)
     try:
-        if os.path.isfile(generic):
-            return generic
+        for candidate in DEFAULT_ENV_FILES:
+            expanded = os.path.expanduser(candidate)
+            if os.path.isfile(expanded):
+                return expanded
         recorded = pointer_target()
         if recorded:
             return recorded
@@ -233,14 +258,15 @@ def default_env_file():
 
 
 def key_file():
-    """Steps 2 to 6, resolved NOW rather than at import time.
+    """Steps 2 to 7, resolved NOW rather than at import time.
 
     Resolving per call is what makes a pointer written after a release was
     deployed take effect: the daemon is long-lived, and `ENV_FILE` below froze
     the answer at import. It is one or two stat calls, on a path that already
     does file I/O.
     """
-    override = paths.env("AIRLOCK_KEY_FILE", "PLUMBLINE_KEY_FILE", "JEV_GUARD_KEY_FILE")
+    override = paths.env("AIRLOCK_KEY_FILE", "JEVKIT_KEY_FILE",
+                         "PLUMBLINE_KEY_FILE", "JEV_GUARD_KEY_FILE")
     if override:
         try:
             return os.path.expanduser(override)

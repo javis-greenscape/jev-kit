@@ -64,7 +64,10 @@ class TestKeyfile(unittest.TestCase):
 
 class TestDefaultEnvFile(unittest.TestCase):
     """The default key file is generic so a fresh machine needs no config at
-    all. No other path is baked into the code: a machine that keeps its key
+    all, and it is KIT-level (~/.config/jev-kit/env) because every component in
+    the kit reads the same key. The guard-era ~/.config/airlock/env is resolved
+    straight after it, for good, so an existing install keeps working with no
+    action. No other path is baked into the code: a machine that keeps its key
     elsewhere names that path in install/config.env, which reaches the code as
     AIRLOCK_LEGACY_KEY_FILES or as the pointer file the installer writes."""
 
@@ -72,23 +75,44 @@ class TestDefaultEnvFile(unittest.TestCase):
         return mock.patch.object(os.path, "expanduser",
                                  lambda p: p.replace("~", home, 1))
 
-    def test_generic_path_when_neither_exists(self):
+    def test_kit_path_when_nothing_exists(self):
         with tempfile.TemporaryDirectory() as home:
             with self._with_home(home):
                 self.assertEqual(keyfile.default_env_file(),
+                                 os.path.join(home, ".config/jev-kit/env"))
+
+    def test_kit_path_wins_when_both_defaults_exist(self):
+        with tempfile.TemporaryDirectory() as home:
+            for rel in (".config/jev-kit", ".config/airlock"):
+                os.makedirs(os.path.join(home, rel))
+                open(os.path.join(home, rel, "env"), "w").close()
+            with self._with_home(home):
+                self.assertEqual(keyfile.default_env_file(),
+                                 os.path.join(home, ".config/jev-kit/env"))
+
+    def test_guard_era_path_is_still_honoured_on_its_own(self):
+        """An install that never moved its key keeps working with no action."""
+        with tempfile.TemporaryDirectory() as home:
+            os.makedirs(os.path.join(home, ".config/airlock"))
+            open(os.path.join(home, ".config/airlock/env"), "w").close()
+            env = {k: v for k, v in os.environ.items()
+                   if k != "AIRLOCK_LEGACY_KEY_FILES"}
+            with self._with_home(home), \
+                    mock.patch.dict(os.environ, env, clear=True):
+                self.assertEqual(keyfile.default_env_file(),
                                  os.path.join(home, ".config/airlock/env"))
 
-    def test_generic_path_wins_when_both_exist(self):
+    def test_kit_path_wins_when_a_legacy_path_also_exists(self):
         with tempfile.TemporaryDirectory() as home:
             legacy = os.path.join(home, ".config/elsewhere/env")
-            for rel in (".config/airlock", ".config/elsewhere"):
+            for rel in (".config/jev-kit", ".config/elsewhere"):
                 os.makedirs(os.path.join(home, rel))
                 open(os.path.join(home, rel, "env"), "w").close()
             with self._with_home(home), \
                     mock.patch.dict(os.environ,
                                     {"AIRLOCK_LEGACY_KEY_FILES": legacy}):
                 self.assertEqual(keyfile.default_env_file(),
-                                 os.path.join(home, ".config/airlock/env"))
+                                 os.path.join(home, ".config/jev-kit/env"))
 
     def test_configured_legacy_path_is_honoured_when_it_is_the_only_one(self):
         with tempfile.TemporaryDirectory() as home:
@@ -111,7 +135,7 @@ class TestDefaultEnvFile(unittest.TestCase):
             with self._with_home(home), \
                     mock.patch.dict(os.environ, env, clear=True):
                 self.assertEqual(keyfile.default_env_file(),
-                                 os.path.join(home, ".config/airlock/env"))
+                                 os.path.join(home, ".config/jev-kit/env"))
 
     def test_pointer_file_is_used_when_the_default_is_absent(self):
         """The hook runs with a minimal environment, so the installer records
@@ -284,8 +308,9 @@ class TestPointerTrust(unittest.TestCase):
             config, target = self._fixture(home)
             expanduser, config_file = self._patched(home, config)
             env = {k: v for k, v in os.environ.items()
-                   if k not in ("AIRLOCK_KEY_FILE", "PLUMBLINE_KEY_FILE",
-                                "JEV_GUARD_KEY_FILE", "AIRLOCK_LEGACY_KEY_FILES")}
+                   if k not in ("AIRLOCK_KEY_FILE", "JEVKIT_KEY_FILE",
+                                "PLUMBLINE_KEY_FILE", "JEV_GUARD_KEY_FILE",
+                                "AIRLOCK_LEGACY_KEY_FILES")}
             with expanduser, config_file, \
                     mock.patch.dict(os.environ, env, clear=True):
                 self.assertEqual(keyfile.key_file(), target)
@@ -297,6 +322,32 @@ class TestPointerTrust(unittest.TestCase):
             with expanduser, config_file, \
                     mock.patch.dict(os.environ,
                                     {"AIRLOCK_KEY_FILE": "/explicit/env"}):
+                self.assertEqual(keyfile.key_file(), "/explicit/env")
+
+    def test_jevkit_override_beats_the_pointer(self):
+        """The kit-level name for the same override, for anything that thinks
+        in kit terms rather than guard terms."""
+        with tempfile.TemporaryDirectory() as home:
+            config, _target = self._fixture(home)
+            expanduser, config_file = self._patched(home, config)
+            env = {k: v for k, v in os.environ.items()
+                   if k not in ("AIRLOCK_KEY_FILE", "PLUMBLINE_KEY_FILE",
+                                "JEV_GUARD_KEY_FILE")}
+            env["JEVKIT_KEY_FILE"] = "/kit/env"
+            with expanduser, config_file, \
+                    mock.patch.dict(os.environ, env, clear=True):
+                self.assertEqual(keyfile.key_file(), "/kit/env")
+
+    def test_airlock_override_beats_jevkit_override(self):
+        """Both are accepted; the documented order puts AIRLOCK_KEY_FILE first
+        so a machine mid-cutover that sets both gets one predictable answer."""
+        with tempfile.TemporaryDirectory() as home:
+            config, _target = self._fixture(home)
+            expanduser, config_file = self._patched(home, config)
+            with expanduser, config_file, \
+                    mock.patch.dict(os.environ,
+                                    {"AIRLOCK_KEY_FILE": "/explicit/env",
+                                     "JEVKIT_KEY_FILE": "/kit/env"}):
                 self.assertEqual(keyfile.key_file(), "/explicit/env")
 
 

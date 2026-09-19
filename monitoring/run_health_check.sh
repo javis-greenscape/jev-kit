@@ -23,7 +23,7 @@ echo "$LINE" >> "$LOG_FILE"
 chmod 600 "$LOG_FILE" 2>/dev/null || true
 
 # AIRLOCK_KUMA_PUSH_URL (or either older GS_KUMA_* name) lives in the
-# key file (AIRLOCK_KEY_FILE, default ~/.config/airlock/env), loaded the exact
+# key file (AIRLOCK_KEY_FILE, default ~/.config/jev-kit/env), loaded the exact
 # same redacted way the rest of airlock loads TYPESAFE_API_KEY -- never
 # printed, never put on a command line.
 # Key-file resolution: the ONE shell implementation, shared with every other
@@ -32,7 +32,13 @@ chmod 600 "$LOG_FILE" 2>/dev/null || true
 if [ -r "$SCRIPT_DIR/../install/keyfile.sh" ]; then
   . "$SCRIPT_DIR/../install/keyfile.sh"
 else
-  airlock_key_file() { printf '%s\n' "${AIRLOCK_KEY_FILE:-$HOME/.config/airlock/env}"; }
+  airlock_key_file() {
+    local f="${AIRLOCK_KEY_FILE:-${JEVKIT_KEY_FILE:-}}"
+    if [ -n "$f" ]; then printf '%s\n' "$f"; return 0; fi
+    [ -r "$HOME/.config/jev-kit/env" ] && { printf '%s\n' "$HOME/.config/jev-kit/env"; return 0; }
+    [ -r "$HOME/.config/airlock/env" ] && { printf '%s\n' "$HOME/.config/airlock/env"; return 0; }
+    printf '%s\n' "$HOME/.config/jev-kit/env"
+  }
 fi
 set -a
 . "$(airlock_key_file)" 2>/dev/null || true

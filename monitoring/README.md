@@ -38,7 +38,7 @@ echo $?
    mode 700, file mode 600),
 3. loads `AIRLOCK_KUMA_PUSH_URL` (falling back to the older
    `GS_KUMA_*` names) the same redacted way `airlock/keyfile.py`
-   loads `TYPESAFE_API_KEY` (from `~/.config/airlock/env`, never shelled
+   loads `TYPESAFE_API_KEY` (from `~/.config/jev-kit/env`, never shelled
    out, never printed) and, only if it's set, pushes the result to Uptime
    Kuma via `monitoring/kuma_push.py` -- a GET over IPv4 with a 5s timeout,
    `status=up|down`, `msg=<short>`, `ping=<daemon-ask latency ms>`. If the
@@ -83,7 +83,7 @@ systemd-analyze --user verify monitoring/*.service monitoring/*.timer
 This repo can push to a Kuma push-type monitor once one exists, but it
 cannot create one -- that's an admin action in the Kuma web UI: add a "Push"
 monitor, copy its push URL, and put it in
-`~/.config/airlock/env` as:
+`~/.config/jev-kit/env` as:
 
 ```
 AIRLOCK_KUMA_PUSH_URL=<the push URL Kuma gives you>

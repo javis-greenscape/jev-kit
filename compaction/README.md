@@ -43,7 +43,7 @@ never turns it on without `--compaction`, and nothing here ever will.
 ## Install
 
 ```bash
-set -a; . ~/.config/airlock/env 2>/dev/null; set +a   # loads the key into this shell only
+set -a; . ~/.config/jev-kit/env 2>/dev/null; set +a   # loads the key into this shell only
 compaction/install.sh
 ```
 

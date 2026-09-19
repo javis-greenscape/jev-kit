@@ -68,7 +68,7 @@ you install, because `install/install.sh --check-only` reports a missing key
 and then still installs happily:
 
 ```
-warn  no TYPESAFE_API_KEY found (env, or /home/<you>/.config/airlock/env).
+warn  no TYPESAFE_API_KEY found (env, or /home/<you>/.config/jev-kit/env).
 warn    the guard still installs and still fails open; it just judges nothing.
 ```
 
@@ -79,19 +79,25 @@ secret, the two legacy R8 guards) still hard-deny. Arming `enforce` in that
 state blocks ordinary workstation actions while doing nothing at all about
 secrets. Get the key in place first, or stay in `shadow`.
 
-Create it mode 600 at the default path:
+Create it mode 600 at the default path. One key serves every component in
+the kit, so it is kit-level and not under the guard's own directory:
 
 ```bash
-mkdir -p ~/.config/airlock
-touch ~/.config/airlock/env
-chmod 600 ~/.config/airlock/env
+mkdir -p ~/.config/jev-kit
+chmod 700 ~/.config/jev-kit
+touch ~/.config/jev-kit/env
+chmod 600 ~/.config/jev-kit/env
 ```
+
+If you installed an earlier version and your key is already at
+`~/.config/airlock/env`, leave it there. That path is still resolved, for
+good, and nothing needs moving.
 
 If your machine already keeps keys somewhere else, put it there instead and
 set `AIRLOCK_KEY_FILE` in `install/config.env` to that path. The installer
 records the path (never the value) so the hook can find it.
 
-**Type the key into the file with an editor** (`nano ~/.config/airlock/env`,
+**Type the key into the file with an editor** (`nano ~/.config/jev-kit/env`,
 or `$EDITOR`) as a line reading `TYPESAFE_API_KEY=...`. Do not paste it into
 a Claude session, an issue, a chat message or a command line -- anything a
 transcript or shell history retains is a place a key can leak from. Never
@@ -99,7 +105,7 @@ transcript or shell history retains is a place a key can leak from. Never
 check for the line without printing its value:
 
 ```bash
-grep -q '^TYPESAFE_API_KEY=' ~/.config/airlock/env && echo "line present"
+grep -q '^TYPESAFE_API_KEY=' ~/.config/jev-kit/env && echo "line present"
 ```
 
 ## 4. Configure and install

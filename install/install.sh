@@ -244,7 +244,19 @@ fi
 if [ -r "$SCRIPT_DIR/keyfile.sh" ]; then
   . "$SCRIPT_DIR/keyfile.sh"
 else
-  airlock_key_file() { printf '%s\n' "${AIRLOCK_KEY_FILE:-$HOME/.config/airlock/env}"; }
+  airlock_key_file() {
+    local f="${AIRLOCK_KEY_FILE:-${JEVKIT_KEY_FILE:-}}"
+    if [ -n "$f" ]; then printf '%s\n' "$f"; return 0; fi
+    [ -r "$HOME/.config/jev-kit/env" ] && { printf '%s\n' "$HOME/.config/jev-kit/env"; return 0; }
+    [ -r "$HOME/.config/airlock/env" ] && { printf '%s\n' "$HOME/.config/airlock/env"; return 0; }
+    printf '%s\n' "$HOME/.config/jev-kit/env"
+  }
+  airlock_keyfile_is_default() {
+    case "$1" in
+      "$HOME/.config/jev-kit/env"|"$HOME/.config/airlock/env") return 0 ;;
+      *) return 1 ;;
+    esac
+  }
 fi
 KEY_FILE_EXPANDED="$(airlock_key_file)"
 KEY_FILE="$KEY_FILE_EXPANDED"
@@ -254,6 +266,10 @@ elif [ -r "$KEY_FILE_EXPANDED" ] && grep -q '^ *\(export \)\?TYPESAFE_API_KEY=' 
   ok "key file $KEY_FILE_EXPANDED contains a TYPESAFE_API_KEY line"
 else
   warn "no TYPESAFE_API_KEY found (env, or $KEY_FILE_EXPANDED)."
+  warn "  every component in the kit reads this one key. Create it with:"
+  warn "    mkdir -p ~/.config/jev-kit && touch ~/.config/jev-kit/env"
+  warn "    chmod 700 ~/.config/jev-kit && chmod 600 ~/.config/jev-kit/env"
+  warn "  then put one TYPESAFE_API_KEY= line in it. Never print the value."
   warn "  the guard still installs and still fails open; it just judges nothing."
 fi
 
@@ -339,15 +355,18 @@ if [ "$WANT_GUARD" = "1" ]; then
   # The pointer is only ever followed when it names an ABSOLUTE path, so refuse
   # to write anything else rather than leave a pointer that silently does
   # nothing (see airlock/keyfile.py for the full list of trust checks).
+  # Both defaults -- the kit's ~/.config/jev-kit/env and the guard-era
+  # ~/.config/airlock/env -- are found by resolution on their own, so neither
+  # needs a pointer.
   POINTER_TARGET="$KEY_FILE_EXPANDED"
-  if [ "$POINTER_TARGET" != "$HOME/.config/airlock/env" ]; then
+  if ! airlock_keyfile_is_default "$POINTER_TARGET"; then
     case "$POINTER_TARGET" in
       /*) ;;
       *) fail "key-file path '$POINTER_TARGET' is not absolute; not recording a pointer"
-         POINTER_TARGET="$HOME/.config/airlock/env" ;;
+         POINTER_TARGET="$HOME/.config/jev-kit/env" ;;
     esac
   fi
-  if [ "$POINTER_TARGET" != "$HOME/.config/airlock/env" ]; then
+  if ! airlock_keyfile_is_default "$POINTER_TARGET"; then
     ( umask 077; printf '%s\n' "$POINTER_TARGET" > "$CONFIG_DIR/keyfile.path" )
     chmod 600 "$CONFIG_DIR/keyfile.path" 2>/dev/null || true
     ok "recorded key-file path in $CONFIG_DIR/keyfile.path (path only, no value)"
@@ -357,7 +376,7 @@ if [ "$WANT_GUARD" = "1" ]; then
     fi
   elif [ -f "$CONFIG_DIR/keyfile.path" ]; then
     rm -f "$CONFIG_DIR/keyfile.path"
-    ok "removed $CONFIG_DIR/keyfile.path (the default path is in use)"
+    ok "removed $CONFIG_DIR/keyfile.path (a default path is in use)"
   fi
 
   if [ ! -f "$CONFIG_DIR/mode" ]; then

@@ -12,7 +12,7 @@ answers, would_deny verdicts and latency for four representative payloads:
   4. Agent: a scoped feature dispatched to `workerS` -> correctly tiered
 
 Usage:
-    set -a; . ~/.config/airlock/env; set +a
+    set -a; . ~/.config/jev-kit/env; set +a
     python3 tests/live_smoke.py
 """
 import json
@@ -112,7 +112,7 @@ def _run_agent(label, subagent_type, description, prompt):
 
 def main():
     if not keyfile.get_api_key():
-        print("TYPESAFE_API_KEY not found in env or ~/.config/airlock/env; aborting live smoke test.")
+        print("TYPESAFE_API_KEY not found in env or ~/.config/jev-kit/env; aborting live smoke test.")
         sys.exit(1)
 
     _run_bash(

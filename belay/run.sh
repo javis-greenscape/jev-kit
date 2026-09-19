@@ -16,7 +16,13 @@ here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 if [ -r "$here/../install/keyfile.sh" ]; then
   . "$here/../install/keyfile.sh"
 else
-  airlock_key_file() { printf '%s\n' "${AIRLOCK_KEY_FILE:-$HOME/.config/airlock/env}"; }
+  airlock_key_file() {
+    local f="${AIRLOCK_KEY_FILE:-${JEVKIT_KEY_FILE:-}}"
+    if [ -n "$f" ]; then printf '%s\n' "$f"; return 0; fi
+    [ -r "$HOME/.config/jev-kit/env" ] && { printf '%s\n' "$HOME/.config/jev-kit/env"; return 0; }
+    [ -r "$HOME/.config/airlock/env" ] && { printf '%s\n' "$HOME/.config/airlock/env"; return 0; }
+    printf '%s\n' "$HOME/.config/jev-kit/env"
+  }
 fi
 envfile="$(airlock_key_file)"
 if [ -z "${TYPESAFE_API_KEY:-}" ] && [ -r "$envfile" ]; then

@@ -145,12 +145,17 @@ if (cd "$LIVE" && "$PY" -c '
 import os
 from airlock import keyfile
 print("in use:  %s" % keyfile.key_file())
+for label, path in (("kit  ", keyfile.DEFAULT_ENV_FILE),
+                    ("guard", keyfile.GUARD_ENV_FILE)):
+    expanded = os.path.expanduser(path)
+    print("%s default: %s (%s)"
+          % (label, expanded, "present" if os.path.isfile(expanded) else "absent"))
 pointer = keyfile.pointer_file_path()
 if pointer and os.path.exists(pointer):
     target = keyfile.pointer_target()
     print("pointer: %s -> %s" % (pointer, target or "(not honoured)"))
 else:
-    print("pointer: %s (absent; the default path is in use)" % pointer)
+    print("pointer: %s (absent; a default path is in use)" % pointer)
 for note in keyfile.pointer_diagnostics():
     print("note:    %s" % note)
 ' 2>/dev/null | sed "s/^/        /"); then

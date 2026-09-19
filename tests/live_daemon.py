@@ -9,7 +9,7 @@ and shows that a 6th call still succeeds -- falling back to the direct HTTPS
 path.
 
 Usage:
-    set -a; . ~/.config/airlock/env; set +a
+    set -a; . ~/.config/jev-kit/env; set +a
     python3 tests/live_daemon.py
 """
 import os
@@ -26,7 +26,7 @@ from airlock import client, keyfile, questions  # noqa: E402
 def main():
     api_key = keyfile.get_api_key()
     if not api_key:
-        print("No TYPESAFE_API_KEY found (load ~/.config/airlock/env first). Aborting.")
+        print("No TYPESAFE_API_KEY found (load ~/.config/jev-kit/env first). Aborting.")
         return 1
 
     tmpdir = tempfile.mkdtemp(prefix="airlock-live-daemon-")

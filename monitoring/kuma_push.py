@@ -4,7 +4,7 @@
 Invoked by monitoring/run_health_check.sh with the health JSON line on
 stdin and AIRLOCK_KUMA_PUSH_URL already loaded into the environment (the
 same redacted way airlock/keyfile.py loads TYPESAFE_API_KEY -- from
-~/.config/airlock/env, never shelled out, never put on a command line).
+~/.config/jev-kit/env, never shelled out, never put on a command line).
 
 Silently does nothing if the env var isn't set -- Kuma is optional and the
 monitor itself has to be created by a person (see monitoring/README.md).

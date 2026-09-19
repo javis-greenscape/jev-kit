@@ -8,7 +8,7 @@ to reconnect after each idle window.
 NOT part of any test suite -- prints output, exits. Takes ~3.5 minutes.
 
 Usage:
-    set -a; . ~/.config/airlock/env; set +a
+    set -a; . ~/.config/jev-kit/env; set +a
     python3 tests/live_daemon_idle.py
 """
 import os

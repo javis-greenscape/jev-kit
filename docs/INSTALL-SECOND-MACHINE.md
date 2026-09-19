@@ -70,7 +70,7 @@ has no OS-specific content.
 
 Same rule everywhere: **type the key into the file with an editor, never
 paste it into a Claude session.** On native Windows there is no
-`~/.config/airlock/env` convention to lean on automatically -- pick a
+`~/.config/jev-kit/env` convention to lean on automatically -- pick a
 path outside any repository, mode-restricted as far as Windows permissions
 allow, and set `AIRLOCK_KEY_FILE` in `install/config.env` to point at it.
 On the WSL route, follow INSTALL-WSL.md's key-file step exactly.

@@ -61,6 +61,8 @@ class TestR1Secret(unittest.TestCase):
 
     def test_secret_store_readers_deny(self):
         for c in (
+            "cat ~/.config/jev-kit/env",
+            "head -3 /home/user/.config/jev-kit/env",
             "cat ~/.config/airlock/env",
             "head -3 /home/user/.config/airlock/env",
             "less ~/.claude/.credentials.json",
@@ -90,8 +92,10 @@ class TestR1Secret(unittest.TestCase):
             "grep TOKEN_NAME src/config.py",
             '[ -n "$JIRA_API_TOKEN" ] && echo set',
             "cat .env.example",
+            "set -a; . ~/.config/jev-kit/env; set +a",
             "set -a; . ~/.config/airlock/env; set +a",
             "printenv PATH",
+            "grep -c TYPESAFE ~/.config/jev-kit/env",
             "grep -c TYPESAFE ~/.config/airlock/env",
             "cat ~/.ssh/id_ed25519.pub",
             "ls -la ~/.config/airlock/",
@@ -99,11 +103,15 @@ class TestR1Secret(unittest.TestCase):
             self.assertEqual(fired(ctx_bash(c), self.RID), [], c)
 
     def test_read_tool_on_secret_store_denies(self):
-        c = rules.build_ctx(
-            {"tool_name": "Read", "tool_input": {"file_path": "%s/.config/airlock/env" % HOME}}, "Read"
-        )
-        rows = fired(c, self.RID)
-        self.assertTrue(rows and rows[0]["fires"] is True)
+        """Both defaults are protected: the kit-level key file and the
+        guard-era one an existing install may still be using."""
+        for path in ("%s/.config/jev-kit/env" % HOME,
+                     "%s/.config/airlock/env" % HOME):
+            c = rules.build_ctx(
+                {"tool_name": "Read", "tool_input": {"file_path": path}}, "Read"
+            )
+            rows = fired(c, self.RID)
+            self.assertTrue(rows and rows[0]["fires"] is True, path)
 
     def test_read_tool_on_ordinary_file_does_not_match(self):
         c = rules.build_ctx({"tool_name": "Read", "tool_input": {"file_path": "/tmp/README.md"}}, "Read")

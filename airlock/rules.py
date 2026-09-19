@@ -231,12 +231,15 @@ READERS = {
 
 # Hard-known secret stores, plus the generic shapes CLAUDE.md names ("`.env`
 # files, private keys, `credentials*`, `*.key`, API tokens"). The key file is
-# whichever path airlock/keyfile.py resolves to -- the generic
-# ~/.config/airlock/env, or an AIRLOCK_KEY_FILE override. A machine that keeps
-# its key somewhere else adds that path to AIRLOCK_EXTRA_SECRET_PATHS in
-# install/config.env and it is matched here too, so R1 protects it without
-# this file naming anybody's directory layout.
+# whichever path airlock/keyfile.py resolves to -- the kit default
+# ~/.config/jev-kit/env, the guard-era default ~/.config/airlock/env, or an
+# AIRLOCK_KEY_FILE / JEVKIT_KEY_FILE override. BOTH defaults are matched here,
+# for good: an install whose key never moved is protected exactly as well as a
+# fresh one. A machine that keeps its key somewhere else adds that path to
+# AIRLOCK_EXTRA_SECRET_PATHS in install/config.env and it is matched here too,
+# so R1 protects it without this file naming anybody's directory layout.
 SECRET_PATH_RES = [
+    re.compile(r"\.config/jev-kit/env\b"),
     re.compile(r"\.config/airlock/env\b"),
     re.compile(r"\.credentials\.json\b"),
     re.compile(r"\bcredentials(\.json|\.yml|\.yaml|\.ini)?\b(?!\.example)"),
@@ -364,7 +367,7 @@ SECRET_VAR_NAME_RE = re.compile(r"(SECRET|TOKEN|PASSWORD|PASSWD|API_?KEY|PRIVATE
 R1_SUGGESTION = (
     "Do not print a secret. Load it into the environment instead, in the same "
     "shell as the command that needs it:\n"
-    "    set -a; . ~/.config/airlock/env; set +a\n"
+    "    set -a; . ~/.config/jev-kit/env; set +a\n"
     "and confirm it is present WITHOUT revealing it:\n"
     "    [ -n \"$TYPESAFE_API_KEY\" ] && echo 'key loaded'\n"
     "If output might contain a key, pipe it through:\n"
@@ -523,7 +526,7 @@ def questions_secret(ctx, match):
                     "what": "The output of this call would contain the secret value itself.",
                     "not_for": "A call that only names a variable, counts matches, or tests emptiness.",
                     "examples": [
-                        "cat ~/.config/airlock/env",
+                        "cat ~/.config/jev-kit/env",
                         "echo $TYPESAFE_API_KEY",
                         "grep -n API ~/secrets/prod.env",
                     ],

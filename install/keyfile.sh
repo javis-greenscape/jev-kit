@@ -14,8 +14,10 @@
 # does.
 #
 # Prints a PATH on stdout. Never the key, never the file's contents. Fails
-# open: any error anywhere prints the generic default, which is what an
-# un-configured machine uses anyway.
+# open: any error anywhere prints the kit default ~/.config/jev-kit/env,
+# which is what an un-configured machine uses anyway. The guard-era default
+# ~/.config/airlock/env is still honoured ahead of the pointer file, so an
+# existing install keeps working with no action.
 
 # Is $1 a regular file (not a symlink), owned by us, and not group- or
 # world-writable? Silent; the caller decides what to say.
@@ -84,16 +86,32 @@ airlock_keyfile_pointer_target() {
   printf '%s\n' "$recorded"
 }
 
+# The two paths airlock/keyfile.py finds on its own: the kit default and the
+# guard-era default. install/install.sh uses this to decide whether a pointer
+# file is needed at all -- pointing at a path resolution already finds would be
+# noise, and one more security-relevant file to keep correct.
+airlock_keyfile_is_default() {
+  case "$1" in
+    "$HOME/.config/jev-kit/env"|"$HOME/.config/airlock/env") return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
 airlock_key_file() {
-  local f="${AIRLOCK_KEY_FILE:-${PLUMBLINE_KEY_FILE:-${JEV_GUARD_KEY_FILE:-}}}"
+  local f="${AIRLOCK_KEY_FILE:-${JEVKIT_KEY_FILE:-${PLUMBLINE_KEY_FILE:-${JEV_GUARD_KEY_FILE:-}}}}"
   if [ -n "$f" ]; then
     printf '%s\n' "${f/#\~/$HOME}"
     return 0
   fi
-  if [ -r "$HOME/.config/airlock/env" ]; then
-    printf '%s\n' "$HOME/.config/airlock/env"
-    return 0
-  fi
+  # The kit-level default first, then the guard-era default, which stays
+  # honoured for good so an existing install keeps working with no action.
+  local d
+  for d in "$HOME/.config/jev-kit/env" "$HOME/.config/airlock/env"; do
+    if [ -r "$d" ]; then
+      printf '%s\n' "$d"
+      return 0
+    fi
+  done
   local recorded
   if recorded="$(airlock_keyfile_pointer_target)"; then
     printf '%s\n' "$recorded"
@@ -111,5 +129,5 @@ airlock_key_file() {
       return 0
     fi
   done
-  printf '%s\n' "$HOME/.config/airlock/env"
+  printf '%s\n' "$HOME/.config/jev-kit/env"
 }

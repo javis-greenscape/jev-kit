@@ -63,6 +63,7 @@ Environment=AIRLOCK_DAEMON_POOL=3
 ## The key
 
 The daemon reads `TYPESAFE_API_KEY` the same way `airlock/keyfile.py`
-does: the environment first, then `~/.config/airlock/env`. Nothing needs
+does: the environment first, then `~/.config/jev-kit/env` (and, for an
+install that never moved it, `~/.config/airlock/env`). Nothing needs
 to be added to the unit file for this -- the file is mode 600 and owned by
 this user, and the daemon runs as this user under systemd `--user`.
