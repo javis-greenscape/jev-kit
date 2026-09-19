@@ -172,7 +172,7 @@ def compute_search_entry(data, timeout_s=None):
         "ts": _now_iso(),
         "session_id": data.get("session_id"),
         "cwd": cwd,
-        "tool_name": "Bash",
+        "tool_name": data.get("tool_name") or "Bash",
         "guard": "tool_choice_guard",
         "scope": command_scope,
         "input_summary": {

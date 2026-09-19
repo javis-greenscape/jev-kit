@@ -11,23 +11,37 @@ RESOLUTION ORDER -- the one place it is written down
 
 Everything that needs the key resolves it in exactly this order. There is one
 implementation per language and no third copy: `airlock/keyfile.py` for Python
-(the guard, the daemon, the health check, the eval) and `install/keyfile.sh`
-for the shell (the installer, the belay wrapper, the health-check wrapper, the
-compaction installer). Change the order here and there, together, or not at
-all.
+(the guard, the daemon, the health check, the eval, and the native-Windows
+installer and doctor) and `install/keyfile.sh` for the shell (the installer,
+the belay wrapper, the health-check wrapper, the compaction installer). Change
+the order here and there, together, or not at all.
 
   1. `TYPESAFE_API_KEY` in the environment. No file is read at all.
   2. `AIRLOCK_KEY_FILE`, then `JEVKIT_KEY_FILE` (then the legacy
      `PLUMBLINE_KEY_FILE`, `JEV_GUARD_KEY_FILE`) -- an explicit override,
      honoured as given.
-  3. the KIT default `~/.config/jev-kit/env`, if it exists.
-  4. the GUARD-ERA default `~/.config/airlock/env`, if it exists. Still fully
-     honoured: an existing install keeps working with no action at all.
+  3. the KIT default, if it exists.
+  4. the GUARD-ERA default, if it exists. Still fully honoured: an existing
+     install keeps working with no action at all.
   5. the path recorded in the POINTER FILE `$AIRLOCK_CONFIG_DIR/keyfile.path`,
      if the pointer passes the checks below.
   6. each path in `AIRLOCK_LEGACY_KEY_FILES` (colon-separated), in order.
   7. otherwise the kit default, whether or not it exists. If it does not,
      there is no key, and every guard fails open and judges nothing.
+
+Steps 3 and 4 are per-platform, and only the spelling differs:
+
+                 kit default (3)          guard-era default (4)
+  POSIX          ~/.config/jev-kit/env    ~/.config/airlock/env
+  Windows        %APPDATA%\\jev-kit\\env    %APPDATA%\\airlock\\env
+
+The Windows pair goes through `paths.kit_config_dir()` and
+`paths.config_dir()`, so `JEVKIT_CONFIG_DIR`, `AIRLOCK_CONFIG_DIR` and the
+guard's legacy-name fallback all still apply there. The POSIX pair is
+deliberately kept as the two literal paths below rather than being derived
+from `config_dir()`: deriving it would make a machine that still has only a
+`~/.config/plumbline` directory resolve its key somewhere the old code never
+looked.
 
 Why the kit default is not under the guard's directory
 ------------------------------------------------------
@@ -36,18 +50,18 @@ One `TYPESAFE_API_KEY` is read by every component in the kit -- the guard, the
 belay wrapper, compaction, the document classifier, log triage, the browser
 agent and the review wrapper. A key that every component reads does not belong
 in any single component's config directory, so the kit-level default is
-`~/.config/jev-kit/env`. Everything that is genuinely the guard's own -- the
-mode file, `rules.json`, `tiers.json`, the kill switch, the state and release
-directories -- stays under `~/.config/airlock/`.
+`~/.config/jev-kit/env` (`%APPDATA%\\jev-kit\\env` on Windows). Everything that
+is genuinely the guard's own -- the mode file, `rules.json`, `tiers.json`, the
+kill switch, the state and release directories -- stays under `airlock/`.
 
 Why a pointer file at all
 -------------------------
 
 A hook runs with a bare environment and never sources `install/config.env`, so
 a machine that keeps its key somewhere other than the default has no way to
-tell the hook where. `install/install.sh` writes the PATH of the key file (only
-ever the path, never the value) into `$AIRLOCK_CONFIG_DIR/keyfile.path`, and
-step 5 reads it.
+tell the hook where. `install/install.sh` (and `install/windows_install.py`)
+writes the PATH of the key file (only ever the path, never the value) into
+`$AIRLOCK_CONFIG_DIR/keyfile.path`, and step 5 reads it.
 
 That makes the pointer a security-relevant file: whoever can write it chooses
 which file this process parses for a secret, and R1 in `airlock/rules.py`
@@ -70,11 +84,23 @@ a pointer is not being honoured; with `AIRLOCK_DEBUG=1` it also goes to stderr.
 A world-READABLE target is a warning, not a rejection: the key is still the
 one the machine intends to use, and refusing it would take the guard offline
 over a permission the human can fix in one command.
+
+The ownership and mode halves of that list are POSIX checks, and Windows has
+neither a uid nor a meaningful `st_mode`. There, the two structural checks
+still run (regular file; absolute, existing target) and the two permission
+checks are replaced by `platform_compat.pointer_trust_notes()`, which records
+what was checked and what was not instead of pretending the check passed. The
+pointer is then followed: refusing every pointer on Windows would take the
+guard offline over a question the stdlib cannot answer there, and claiming the
+ownership check passed would be a lie. The diagnostics say which of the two
+happened, and `install/windows_doctor.py` prints them.
 """
 import os
 import stat
 
 from . import paths
+from . import platform_compat
+from .platform_compat import is_windows
 
 ENV_VAR = "TYPESAFE_API_KEY"
 
@@ -88,7 +114,8 @@ DEFAULT_ENV_FILE = "~/.config/jev-kit/env"
 # action. Never remove it, and never stop R1 protecting it.
 GUARD_ENV_FILE = "~/.config/airlock/env"
 
-# Every default the resolution order consults, newest first.
+# Every default the POSIX resolution order consults, newest first. Use
+# default_env_files(), which answers for the running platform.
 DEFAULT_ENV_FILES = (DEFAULT_ENV_FILE, GUARD_ENV_FILE)
 
 # A one-line file holding the PATH of the key file, never its contents.
@@ -132,6 +159,26 @@ def reset_diagnostics():
     del _DIAGNOSTICS[:]
 
 
+def default_env_files(windows=None):
+    """Steps 3 and 4 for this platform: the kit default, then the guard-era
+    default. Never raises.
+
+    POSIX returns the two literal paths above, unchanged. Windows returns
+    %APPDATA%\\jev-kit\\env and the guard's own config directory + `env`, so an
+    AIRLOCK_CONFIG_DIR override and the legacy-name fallback still apply to
+    the second one.
+    """
+    if not is_windows(windows):
+        return DEFAULT_ENV_FILES
+    out = []
+    for resolver in (paths.kit_config_dir, paths.config_dir):
+        try:
+            out.append(str(resolver(windows=windows) / "env"))
+        except Exception:
+            continue
+    return tuple(out)
+
+
 def pointer_file_path():
     """Absolute path of the pointer file, whether or not it exists, or None if
     even the config directory cannot be resolved. Never raises."""
@@ -142,7 +189,10 @@ def pointer_file_path():
 
 
 def _owned_and_unwritable(st, what, where):
-    """True iff `st` is owned by this uid and not group/world writable."""
+    """True iff `st` is owned by this uid and not group/world writable.
+
+    POSIX only; `pointer_target` calls it only where `os.getuid()` exists.
+    """
     try:
         if st.st_uid != os.getuid():
             _note("ignoring pointer: %s %s is owned by uid %d, not %d"
@@ -157,7 +207,7 @@ def _owned_and_unwritable(st, what, where):
     return True
 
 
-def pointer_target(check=True):
+def pointer_target(check=True, windows=None):
     """The path recorded in the pointer file, or None.
 
     With `check` true (the default, and what resolution uses) every trust check
@@ -177,19 +227,27 @@ def pointer_target(check=True):
     except Exception:
         return None
 
+    win = is_windows(windows)
+
     if check:
         if not stat.S_ISREG(st.st_mode):
             _note("ignoring pointer: %s is not a regular file" % pointer)
             return None
-        if not _owned_and_unwritable(st, "pointer file", pointer):
-            return None
-        parent = os.path.dirname(pointer) or "."
-        try:
-            dir_st = os.lstat(parent)
-        except Exception:
-            return None
-        if not _owned_and_unwritable(dir_st, "pointer directory", parent):
-            return None
+        if win:
+            # No uid, no meaningful mode. Say what was and was not checked
+            # rather than pretending the POSIX check passed.
+            for line in platform_compat.pointer_trust_notes(pointer, windows=windows):
+                _note(line)
+        else:
+            if not _owned_and_unwritable(st, "pointer file", pointer):
+                return None
+            parent = os.path.dirname(pointer) or "."
+            try:
+                dir_st = os.lstat(parent)
+            except Exception:
+                return None
+            if not _owned_and_unwritable(dir_st, "pointer directory", parent):
+                return None
 
     try:
         with open(pointer, "r") as f:
@@ -221,7 +279,17 @@ def pointer_target(check=True):
         if not stat.S_ISREG(target_st.st_mode):
             _note("ignoring pointer: %s is not a regular file" % target)
             return None
-        if target_st.st_mode & stat.S_IROTH:
+        if win:
+            # st_mode on Windows is synthesised and S_IROTH is always set on
+            # a readable file, so testing it would emit a warning about every
+            # key file on every machine. Ask the platform instead.
+            try:
+                ok, text = platform_compat.describe_permissions(target, windows=windows)
+                if not ok:
+                    _note("key file %s: %s" % (target, text))
+            except Exception:
+                pass
+        elif target_st.st_mode & stat.S_IROTH:
             # Warn only: it is still the key file this machine means to use.
             _note("key file %s is world-readable (mode %o); chmod 600 it"
                   % (target, stat.S_IMODE(target_st.st_mode)))
@@ -236,16 +304,17 @@ def legacy_env_files():
     return tuple(part for part in raw.split(os.pathsep) if part.strip())
 
 
-def default_env_file():
+def default_env_file(windows=None):
     """Steps 3 to 7: the key file to read when no *_KEY_FILE override is set.
     Never raises."""
-    generic = os.path.expanduser(DEFAULT_ENV_FILE)
+    candidates = default_env_files(windows=windows)
+    generic = os.path.expanduser(candidates[0]) if candidates else os.path.expanduser(DEFAULT_ENV_FILE)
     try:
-        for candidate in DEFAULT_ENV_FILES:
+        for candidate in candidates:
             expanded = os.path.expanduser(candidate)
             if os.path.isfile(expanded):
                 return expanded
-        recorded = pointer_target()
+        recorded = pointer_target(windows=windows)
         if recorded:
             return recorded
         for legacy in legacy_env_files():
@@ -257,7 +326,7 @@ def default_env_file():
     return generic
 
 
-def key_file():
+def key_file(windows=None):
     """Steps 2 to 7, resolved NOW rather than at import time.
 
     Resolving per call is what makes a pointer written after a release was
@@ -272,7 +341,7 @@ def key_file():
             return os.path.expanduser(override)
         except Exception:
             return override
-    return default_env_file()
+    return default_env_file(windows=windows)
 
 
 # Kept for anything that imports the constant. Prefer key_file().

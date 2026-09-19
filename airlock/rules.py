@@ -48,8 +48,17 @@ import os
 import re
 
 from . import keyfile, paths
+from .platform_compat import is_windows
 
 HOME = os.path.expanduser("~")
+
+# Every tool that carries a shell command string in tool_input.command.
+# Claude Code's hooks reference is explicit: "Match `Bash|PowerShell` in hooks
+# that inspect shell commands, so they cover both tools", because on Windows
+# without Git Bash "the tool is enabled automatically and Claude Code doesn't
+# register the Bash tool at all" -- a hook matching only Bash never fires
+# there. On Linux nothing changes: a Bash payload is still a Bash payload.
+SHELL_TOOLS = ("Bash", "PowerShell")
 CONFIG_FILE = str(paths.config_file("rules.json"))
 # "ask" sits between allow and deny: the human is asked rather than the call
 # being blocked outright. It is a config-only action -- no rule ships with it
@@ -75,14 +84,21 @@ class Match(object):
 
 
 class Rule(object):
-    __slots__ = ("id", "tools", "action", "prefilter", "questions", "deny_when",
-                 "legacy", "fallback", "why")
+    __slots__ = ("id", "tools", "action", "windows_action", "prefilter", "questions",
+                 "deny_when", "legacy", "fallback", "why")
 
     def __init__(self, id, tools, action, prefilter=None, questions=None, deny_when=None,
-                 legacy=None, fallback=False, why=""):
+                 legacy=None, fallback=False, why="", windows_action=None):
         self.id = id
         self.tools = tuple(tools)
         self.action = action
+        # A different DEFAULT action on native Windows, or None for "the same
+        # everywhere". Only R6 uses it: the policy it enforces is "this box has
+        # no desktop", which is a fact about a headless Linux server and not
+        # about a Windows workstation, where opening a browser is ordinary. A
+        # rules.json entry still overrides it on either platform -- the
+        # per-platform value is a DEFAULT, never a ceiling.
+        self.windows_action = windows_action
         self.prefilter = prefilter
         self.questions = questions
         self.deny_when = deny_when
@@ -229,6 +245,30 @@ READERS = {
     "grep", "egrep", "rg", "ag", "awk", "sed", "cut", "tac", "jq", "yq", "tee",
 }
 
+# The same job on Windows, in either shell: `type` in cmd, `Get-Content` and
+# its aliases in PowerShell, `findstr` in both. Kept SEPARATE from READERS
+# above, and matched on a normalised name, because PowerShell is
+# case-insensitive, a command may be written with a `.exe` suffix, and a path
+# there is `\`-separated -- none of which is true of the POSIX set, whose
+# matching is deliberately left exactly as it was.
+WINDOWS_READERS = {
+    "type", "get-content", "gc", "select-string", "sls", "findstr",
+}
+
+
+def _windows_reader(prog):
+    """True iff `prog` names a Windows or PowerShell command that would print
+    a file's contents. Never raises."""
+    try:
+        base = prog.rsplit("\\", 1)[-1].rsplit("/", 1)[-1].lower()
+    except Exception:
+        return False
+    for suffix in (".exe", ".com", ".cmd", ".bat", ".ps1"):
+        if base.endswith(suffix):
+            base = base[:-len(suffix)]
+            break
+    return base in WINDOWS_READERS
+
 # Hard-known secret stores, plus the generic shapes CLAUDE.md names ("`.env`
 # files, private keys, `credentials*`, `*.key`, API tokens"). The key file is
 # whichever path airlock/keyfile.py resolves to -- the kit default
@@ -239,8 +279,15 @@ READERS = {
 # AIRLOCK_EXTRA_SECRET_PATHS in install/config.env and it is matched here too,
 # so R1 protects it without this file naming anybody's directory layout.
 SECRET_PATH_RES = [
-    re.compile(r"\.config/jev-kit/env\b"),
-    re.compile(r"\.config/airlock/env\b"),
+    # Both defaults, on both platforms and in either spelling. On POSIX the
+    # pair is ~/.config/jev-kit/env and ~/.config/airlock/env; on Windows it
+    # is %APPDATA%\jev-kit\env and %APPDATA%\airlock\env, which a command may
+    # write with backslashes (cmd, PowerShell) or forward slashes (Git Bash).
+    # One separator-tolerant, case-insensitive pattern each covers all four,
+    # so `type %APPDATA%\airlock\env` and `Get-Content ...\jev-kit\env` are
+    # protected exactly as well as `cat ~/.config/airlock/env`.
+    re.compile(r"[\\/]jev-kit[\\/]env\b", re.I),
+    re.compile(r"[\\/]airlock[\\/]env\b", re.I),
     re.compile(r"\.credentials\.json\b"),
     re.compile(r"\bcredentials(\.json|\.yml|\.yaml|\.ini)?\b(?!\.example)"),
     re.compile(r"(^|/)\.env(\.[A-Za-z0-9_-]+)?$"),
@@ -299,16 +346,21 @@ SECRET_PATH_RES.extend(_extra_secret_path_res())
 _POINTER_CACHE = {"stamp": None, "res": ()}
 
 
-def _literal_path_re(path):
+def _literal_path_re(path, windows=None):
     """A regex matching `path` as it could appear in a command: the absolute
     form, and the home-relative tail (`_expand` has already turned `~` and
-    `$HOME` into HOME, so the tail alone covers both)."""
+    `$HOME` into HOME, so the tail alone covers both).
+
+    Case-insensitive on Windows, where `%APPDATA%\\Airlock\\env` and
+    `%appdata%\\airlock\\env` are the same file and R1 must not be fooled by
+    which one a command happened to type."""
+    flags = re.I if is_windows(windows) else 0
     out = []
     for form in (path, path[len(HOME) + 1:] if path.startswith(HOME + "/") else None):
         if not form:
             continue
         try:
-            out.append(re.compile(re.escape(form) + r"(\b|$)"))
+            out.append(re.compile(re.escape(form) + r"(\b|$)", flags))
         except Exception:
             continue
     return out
@@ -364,7 +416,7 @@ AMBIGUOUS_SECRET_TOKENS = (
 SECRET_VAR_RE = re.compile(r"\$\{?([A-Za-z_][A-Za-z_0-9]*)\}?")
 SECRET_VAR_NAME_RE = re.compile(r"(SECRET|TOKEN|PASSWORD|PASSWD|API_?KEY|PRIVATE_KEY|CREDENTIAL)", re.I)
 
-R1_SUGGESTION = (
+R1_SUGGESTION_POSIX = (
     "Do not print a secret. Load it into the environment instead, in the same "
     "shell as the command that needs it:\n"
     "    set -a; . ~/.config/jev-kit/env; set +a\n"
@@ -373,6 +425,25 @@ R1_SUGGESTION = (
     "If output might contain a key, pipe it through:\n"
     "    sed 's/apikey_[A-Za-z0-9_]*/[REDACTED]/g'"
 )
+
+# The same advice in commands that exist on Windows. A deny that tells a
+# Windows session to run `set -a; . ~/.config/jev-kit/env` is advice it cannot
+# follow in either of its shells, so the platform picks the wording.
+R1_SUGGESTION_WINDOWS = (
+    "Do not print a secret. Load it into the environment instead, in the same "
+    "shell as the command that needs it. In PowerShell, read it WITHOUT a "
+    "reader cmdlet, so nothing can reach the transcript:\n"
+    "    [IO.File]::ReadAllLines(\"$env:APPDATA\\jev-kit\\env\") | "
+    "ForEach-Object { $n,$v = $_ -split '=',2; Set-Item \"env:$n\" $v }\n"
+    "and confirm it is present WITHOUT revealing it:\n"
+    "    if ($env:TYPESAFE_API_KEY) { 'key loaded' }\n"
+    "If output might contain a key, pipe it through:\n"
+    "    ... | ForEach-Object { $_ -replace 'apikey_[A-Za-z0-9_]*','[REDACTED]' }\n"
+    "cmd has no equivalent one-liner: use PowerShell for this, or have the "
+    "human set the variable."
+)
+
+R1_SUGGESTION = R1_SUGGESTION_WINDOWS if is_windows() else R1_SUGGESTION_POSIX
 
 
 def _is_safe_path(tok):
@@ -434,7 +505,7 @@ def prefilter_secret(ctx):
                              extra={"target": fp, "kind": "read"})
         return None
 
-    if tool != "Bash":
+    if tool not in SHELL_TOOLS:
         return None
 
     command = ctx["command"]
@@ -447,7 +518,7 @@ def prefilter_secret(ctx):
             continue
 
         # a reader aimed at a known secret store
-        if prog in READERS:
+        if prog in READERS or _windows_reader(prog):
             if prog in ("grep", "egrep", "rg", "ag") and _quiet_grep(args):
                 continue
             hit = _secret_path_in(args)
@@ -647,7 +718,7 @@ def _has_path_arg(args, exts=(".py", ".js", ".ts", ".tsx", ".jsx", ".mjs")):
 
 
 def prefilter_wide_run(ctx):
-    if ctx["tool_name"] != "Bash":
+    if ctx["tool_name"] not in SHELL_TOOLS:
         return None
     for seg in ctx["segments"]:
         prog, args = program_of(seg)
@@ -739,7 +810,7 @@ def _in_tmux(command, ctx):
 
 
 def prefilter_long_run(ctx):
-    if ctx["tool_name"] != "Bash":
+    if ctx["tool_name"] not in SHELL_TOOLS:
         return None
     command = ctx["command"]
     if not command or _in_tmux(command, ctx):
@@ -824,7 +895,7 @@ R5_SUGGESTION = (
 
 
 def prefilter_sudo(ctx):
-    if ctx["tool_name"] != "Bash":
+    if ctx["tool_name"] not in SHELL_TOOLS:
         return None
     for seg in ctx["segments"]:
         toks = words(seg)
@@ -880,10 +951,23 @@ R6_SUGGESTION = (
     "If the task genuinely needs a browser, use Playwright headless (Chromium only)."
 )
 
+# The same advice for a machine that is Windows AND headless -- a Server Core
+# box, a build agent. It never mentions $DISPLAY or an X server, because
+# neither exists there, and it never asserts the box has no desktop: the rule
+# is off by default on Windows and only reaches this text because somebody put
+# it back in rules.json, which is them saying so.
+R6_SUGGESTION_WINDOWS = (
+    "This machine is configured as one that should not open a GUI or a browser "
+    "(R6 is off by default on Windows; rules.json here turns it back on). Print "
+    "the URL or path and let the user open it themselves. If the task genuinely "
+    "needs a browser, use Playwright headless."
+)
 
-def prefilter_gui(ctx):
-    if ctx["tool_name"] != "Bash":
+
+def prefilter_gui(ctx, windows=None):
+    if ctx["tool_name"] not in SHELL_TOOLS:
         return None
+    win = is_windows(windows)
     for seg in ctx["segments"]:
         prog, args = program_of(seg)
         if prog in _GUI_PROGRAMS:
@@ -893,6 +977,9 @@ def prefilter_gui(ctx):
                 a.startswith("--headless") for a in args
             ):
                 continue
+            if win:
+                return Match("`%s` tries to open a GUI or browser" % prog,
+                             R6_SUGGESTION_WINDOWS)
             return Match("`%s` tries to open a GUI or browser on a headless server" % prog, R6_SUGGESTION)
     return None
 
@@ -908,7 +995,7 @@ R7_SUGGESTION = (
 
 
 def prefilter_destructive(ctx):
-    if ctx["tool_name"] != "Bash":
+    if ctx["tool_name"] not in SHELL_TOOLS:
         return None
     for seg in ctx["segments"]:
         prog, args = program_of(seg)
@@ -966,7 +1053,7 @@ def prefilter_commit_secret(ctx):
     handed anyway, and only the first four characters of a match are ever
     recorded.
     """
-    if ctx["tool_name"] != "Bash":
+    if ctx["tool_name"] not in SHELL_TOOLS:
         return None
 
     command = ctx.get("command") or ""
@@ -1223,7 +1310,7 @@ def prefilter_general_risk(ctx):
     operation globbed high in the tree. Anything else returns None and R10
     costs nothing at all -- not a Jev call, not a log row.
     """
-    if ctx["tool_name"] != "Bash":
+    if ctx["tool_name"] not in SHELL_TOOLS:
         return None
     cwd = (ctx.get("cwd") or "").rstrip("/")
 
@@ -1471,7 +1558,7 @@ def suppression_reason(rule_id, answers):
 RULES = [
     Rule(
         id="R1-secret-exposure",
-        tools=("Bash", "Read", "NotebookRead"),
+        tools=SHELL_TOOLS + ("Read", "NotebookRead"),
         action="deny",
         prefilter=prefilter_secret,
         questions=questions_secret,
@@ -1489,14 +1576,14 @@ RULES = [
     ),
     Rule(
         id="R3-whole-suite-or-uncapped-build",
-        tools=("Bash",),
+        tools=SHELL_TOOLS,
         action="warn",
         prefilter=prefilter_wide_run,
         why="CLAUDE.md resource envelope: cap parallelism explicitly; prefer targeted test runs.",
     ),
     Rule(
         id="R4-long-work-bare-shell",
-        tools=("Bash",),
+        tools=SHELL_TOOLS,
         action="warn",
         prefilter=prefilter_long_run,
         questions=questions_long_run,
@@ -1505,21 +1592,30 @@ RULES = [
     ),
     Rule(
         id="R5-sudo",
-        tools=("Bash",),
+        tools=SHELL_TOOLS,
         action="deny",
         prefilter=prefilter_sudo,
         why="CLAUDE.md: sudo only for a named system package, never under $HOME.",
     ),
     Rule(
         id="R6-gui-or-browser",
-        tools=("Bash",),
+        tools=SHELL_TOOLS,
         action="deny",
+        # OFF by default on native Windows. The rule encodes "this box is a
+        # headless server with no desktop"; a Windows workstation has one, and
+        # opening a browser there is a normal thing to do, so firing would be
+        # wrong on the platform's own terms. A machine that IS a headless
+        # Windows box turns it back on with
+        # {"R6-gui-or-browser": "deny"} in rules.json, and the deny text drops
+        # the "headless server" wording there (see prefilter_gui).
+        windows_action="off",
         prefilter=prefilter_gui,
-        why="CLAUDE.md: there is no desktop; print the URL instead.",
+        why="CLAUDE.md: there is no desktop; print the URL instead. Default off "
+            "on native Windows, where a desktop is the normal case.",
     ),
     Rule(
         id="R7-destructive",
-        tools=("Bash",),
+        tools=SHELL_TOOLS,
         action="warn",
         prefilter=prefilter_destructive,
         why="CLAUDE.md: ask first for anything hard to reverse or outward-facing.",
@@ -1533,14 +1629,14 @@ RULES = [
     ),
     Rule(
         id="R8-tool-choice-guard",
-        tools=("Bash",),
+        tools=SHELL_TOOLS,
         action="deny",
         legacy="tool_choice_guard",
         why="Original tool-choice guard, behaviour unchanged.",
     ),
     Rule(
         id="R9-commit-secret",
-        tools=("Bash",),
+        tools=SHELL_TOOLS,
         action="deny",
         prefilter=prefilter_commit_secret,
         why="CLAUDE.md Safety: never commit secrets. Credential shapes from "
@@ -1548,7 +1644,7 @@ RULES = [
     ),
     Rule(
         id="R10-general-risk",
-        tools=("Bash",),
+        tools=SHELL_TOOLS,
         action="warn",
         prefilter=prefilter_general_risk,
         questions=questions_general_risk,
@@ -1584,9 +1680,22 @@ def load_action_overrides(path=None):
     return out
 
 
-def effective_action(rule, overrides=None):
+def default_action(rule, windows=None):
+    """The rule's default action on THIS platform, before rules.json.
+
+    Identical to `rule.action` for every rule that does not set
+    `windows_action`. Never raises."""
+    try:
+        if rule.windows_action is not None and is_windows(windows):
+            return rule.windows_action
+    except Exception:
+        pass
+    return rule.action
+
+
+def effective_action(rule, overrides=None, windows=None):
     ov = overrides if overrides is not None else load_action_overrides()
-    return ov.get(rule.id, rule.action)
+    return ov.get(rule.id, default_action(rule, windows=windows))
 
 
 # --- the hot path ------------------------------------------------------------
@@ -1594,7 +1703,7 @@ def effective_action(rule, overrides=None):
 def build_ctx(data, tool_name=None):
     ti = data.get("tool_input") or {}
     tool_name = tool_name or data.get("tool_name") or ""
-    command = str(ti.get("command") or "") if tool_name == "Bash" else ""
+    command = str(ti.get("command") or "") if tool_name in SHELL_TOOLS else ""
     return {
         "tool_name": tool_name,
         "tool_input": ti,
@@ -1610,7 +1719,7 @@ def build_ctx(data, tool_name=None):
     }
 
 
-def prefilter_matches(ctx, overrides=None):
+def prefilter_matches(ctx, overrides=None, windows=None):
     """Return [(rule, Match|None)] for every rule that could fire on this call.
 
     Legacy rules yield (rule, None) -- their own pre-filter lives in the guard
@@ -1625,7 +1734,7 @@ def prefilter_matches(ctx, overrides=None):
     for rule in RULES:
         if not rule.applies_to(tool_name):
             continue
-        if ov.get(rule.id, rule.action) == "off":
+        if ov.get(rule.id, default_action(rule, windows=windows)) == "off":
             continue
         if rule.fallback:
             fallbacks.append(rule)
@@ -1660,7 +1769,7 @@ def prefilter_matches(ctx, overrides=None):
     return out
 
 
-def dry_run(ctx, ask=None, overrides=None):
+def dry_run(ctx, ask=None, overrides=None, windows=None):
     """Evaluate every rule against one payload with NO logging, NO stdout and
     NO session state -- used by the eval harness and the unit tests.
 
@@ -1675,8 +1784,8 @@ def dry_run(ctx, ask=None, overrides=None):
 
     out = []
     ov = overrides if overrides is not None else load_action_overrides()
-    for rule, match in prefilter_matches(ctx, ov):
-        eff = ov.get(rule.id, rule.action)
+    for rule, match in prefilter_matches(ctx, ov, windows=windows):
+        eff = ov.get(rule.id, default_action(rule, windows=windows))
         row = {
             "rule_id": rule.id,
             "action": eff,

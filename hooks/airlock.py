@@ -111,19 +111,28 @@ def _spawn_shadow_worker(raw):
     import subprocess
     import tempfile
 
+    from airlock import platform_compat
+
     path = None
     try:
+        # mkstemp already creates the file 0600 on POSIX and inside the
+        # per-user %TEMP% on Windows; restrict_path re-applies the mode on
+        # POSIX and deliberately does nothing on Windows, where a POSIX mode
+        # cannot express "owner only" (see airlock/platform_compat.py).
         fd, path = tempfile.mkstemp(prefix="airlock-", suffix=".json")
-        os.chmod(path, 0o600)
+        platform_compat.restrict_path(path, 0o600)
         with os.fdopen(fd, "w") as f:
             f.write(raw)
+        # start_new_session=True on POSIX, DETACHED_PROCESS |
+        # CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW on Windows. Either way
+        # the worker outlives this process, which exits 0 immediately.
         subprocess.Popen(  # noqa: F821 -- imported above
             [sys.executable, WORKER, path],
             stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
-            start_new_session=True,
             close_fds=True,
+            **platform_compat.detached_popen_kwargs()
         )
     except Exception:
         if path:

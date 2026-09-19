@@ -58,7 +58,84 @@ class TestSummarizeLastHour(unittest.TestCase):
         self.assertEqual(summary["fail_open_rate"], 0.0)
 
 
+class TestHealthWithoutADaemon(unittest.TestCase):
+    """The Windows branch: there is no daemon, so its absence must not be
+    reported as an outage. A machine with no warm connection is a supported
+    configuration, not a broken one."""
+
+    def _run(self, key_ok=True, fail_open_rate=0.0, direct=None):
+        direct = direct if direct is not None else {"ok": True, "latency_ms": 900}
+        with mock.patch("airlock.health.has_unix_sockets", return_value=False), \
+             mock.patch("airlock.health.check_direct_ask", return_value=direct), \
+             mock.patch("airlock.health.check_key_loadable", return_value=key_ok), \
+             mock.patch("airlock.health.check_mode", return_value="shadow"), \
+             mock.patch("airlock.health.summarize_last_hour", return_value={
+                 "total_rows": 10, "judged": 5, "fail_open": 0,
+                 "fail_open_rate": fail_open_rate, "denies": 0,
+                 "p95_latency_ms": 900.0}), \
+             mock.patch("airlock.health.check_tune_state",
+                        return_value={"interval_min": None, "last_run_age_s": None}):
+            return health.run_health_check()
+
+    def test_a_missing_daemon_is_skipped_not_down(self):
+        status, result = self._run()
+        self.assertEqual(status, "healthy")
+        self.assertFalse(result["daemon_supported"])
+        self.assertIn("skipped", result["daemon_ping"])
+        self.assertIn("skipped", result["daemon_ask"])
+
+    def test_the_daemon_socket_is_never_touched(self):
+        with mock.patch("airlock.health.check_daemon_ping") as ping, \
+             mock.patch("airlock.health.check_daemon_ask") as ask:
+            self._run()
+            ping.assert_not_called()
+            ask.assert_not_called()
+
+    def test_a_direct_call_takes_the_daemon_probe_s_place(self):
+        _status, result = self._run()
+        self.assertTrue(result["direct_ask"]["ok"])
+        self.assertEqual(result["direct_ask"]["latency_ms"], 900)
+
+    def test_a_failing_direct_call_is_degraded(self):
+        status, _result = self._run(direct={"ok": False, "error": "timed out"})
+        self.assertEqual(status, "degraded")
+
+    def test_no_api_key_is_degraded_never_down(self):
+        """A keyless install still fails open and still runs the code-only
+        rules; it is not an outage."""
+        status, _result = self._run(key_ok=False)
+        self.assertEqual(status, "degraded")
+
+    def test_a_high_fail_open_rate_is_still_degraded(self):
+        status, _result = self._run(fail_open_rate=0.9)
+        self.assertEqual(status, "degraded")
+
+    def test_a_keyless_direct_probe_is_skipped_rather_than_failed(self):
+        with mock.patch("airlock.health.check_key_loadable", return_value=False):
+            result = health.check_direct_ask(deadline=health._now() + 5)
+        self.assertIsNone(result["ok"])
+        self.assertIn("no API key", result["skipped"])
+
+
 class TestRunHealthCheck(unittest.TestCase):
+    """Every test here is about the DAEMON branch -- ping, then ask, then the
+    status it produces -- so the platform is pinned to POSIX rather than read
+    off the host. On Windows there is no daemon and run_health_check takes the
+    other branch entirely: the daemon checks report `skipped` instead of
+    `down`, and a direct HTTPS probe takes their place. That branch has its
+    own tests below."""
+
+    def _run_with_daemon(self):
+        """Force the daemon branch.
+
+        `windows=False` is not enough on a Windows host: has_unix_sockets()
+        then reports what the interpreter actually has, and a Windows CPython
+        genuinely has no AF_UNIX. These tests are about the code that runs
+        WHEN there is a daemon, so the capability itself is what gets pinned.
+        """
+        with mock.patch("airlock.health.has_unix_sockets", return_value=True):
+            return health.run_health_check()
+
     def _patch_common(self, ping_ok, ask_result, key_ok=True, mode_val="shadow", fail_open_rate=0.0):
         return [
             mock.patch("airlock.health.check_daemon_ping", return_value={"ok": ping_ok, "latency_ms": 5}),
@@ -77,7 +154,7 @@ class TestRunHealthCheck(unittest.TestCase):
         for p in patches:
             p.start()
         try:
-            status, result = health.run_health_check()
+            status, result = self._run_with_daemon()
         finally:
             for p in patches:
                 p.stop()
@@ -89,7 +166,7 @@ class TestRunHealthCheck(unittest.TestCase):
         for p in patches:
             p.start()
         try:
-            status, result = health.run_health_check()
+            status, result = self._run_with_daemon()
         finally:
             for p in patches:
                 p.stop()
@@ -105,7 +182,7 @@ class TestRunHealthCheck(unittest.TestCase):
                  "denies": 0, "p95_latency_ms": 0.0,
              }), \
              mock.patch("airlock.health.check_tune_state", return_value={"interval_min": 30, "last_run_age_s": None}):
-            status, result = health.run_health_check()
+            status, result = self._run_with_daemon()
             ask.assert_not_called()
             self.assertEqual(status, "down")
 
@@ -114,7 +191,7 @@ class TestRunHealthCheck(unittest.TestCase):
         for p in patches:
             p.start()
         try:
-            status, result = health.run_health_check()
+            status, result = self._run_with_daemon()
         finally:
             for p in patches:
                 p.stop()
@@ -125,7 +202,7 @@ class TestRunHealthCheck(unittest.TestCase):
         for p in patches:
             p.start()
         try:
-            status, result = health.run_health_check()
+            status, result = self._run_with_daemon()
         finally:
             for p in patches:
                 p.stop()
@@ -136,7 +213,7 @@ class TestRunHealthCheck(unittest.TestCase):
         for p in patches:
             p.start()
         try:
-            status, result = health.run_health_check()
+            status, result = self._run_with_daemon()
         finally:
             for p in patches:
                 p.stop()
@@ -147,7 +224,7 @@ class TestRunHealthCheck(unittest.TestCase):
         for p in patches:
             p.start()
         try:
-            status, result = health.run_health_check()
+            status, result = self._run_with_daemon()
         finally:
             for p in patches:
                 p.stop()

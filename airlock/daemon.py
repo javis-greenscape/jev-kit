@@ -378,6 +378,20 @@ def serve_forever(server, api_key, pool_size=DEFAULT_POOL_SIZE, connection_facto
 
 
 def main():
+    # The daemon is POSIX-only and deliberately out of scope on Windows:
+    # it listens on a Unix domain socket, which Windows does not have, and a
+    # localhost TCP listener is precisely the design this project refuses.
+    # Windows clients fall back to the direct HTTPS call (airlock/client.py),
+    # about 0.9 s cold against about 0.3 s warm. Saying so and exiting beats
+    # failing somewhere further down with an AttributeError on AF_UNIX.
+    from .platform_compat import has_unix_sockets
+    if not has_unix_sockets():
+        sys.stderr.write(
+            "airlock daemon: this platform has no Unix domain sockets, so the warm\n"
+            "connection daemon does not run here. Nothing to do: the client already\n"
+            "falls back to a direct HTTPS call per judgement (about 0.9s).\n")
+        sys.exit(0)
+
     api_key = keyfile.get_api_key()
     if not api_key:
         sys.stderr.write("airlock daemon: no TYPESAFE_API_KEY found, exiting\n")

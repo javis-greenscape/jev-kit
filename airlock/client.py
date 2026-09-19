@@ -13,6 +13,7 @@ import urllib.request
 import uuid
 
 from . import keyfile, paths
+from .platform_compat import has_unix_sockets
 
 API_URL = "https://api.typesafe.ai/v1/systemone"
 MODEL = "jev-latest"
@@ -69,11 +70,20 @@ def call_jev(api_key, state, questions, timeout=DEFAULT_TIMEOUT):
     return data, latency_ms
 
 
-def _ask_via_daemon(body, timeout_s):
+def _ask_via_daemon(body, timeout_s, windows=None):
     """Try the warm daemon connection. Returns (response_dict, latency_ms) on
     success, or None on anything at all -- missing socket, refused
     connection, malformed reply, daemon-reported failure -- so the caller can
-    fall back to a direct call without ever seeing an exception from here."""
+    fall back to a direct call without ever seeing an exception from here.
+
+    On Windows this returns None immediately and costs nothing: there is no
+    AF_UNIX there, the daemon is out of scope, and `ask()` goes straight to
+    the direct HTTPS call (about 0.9 s cold rather than about 0.3 s warm).
+    Checking up front rather than letting `socket.AF_UNIX` raise an
+    AttributeError into the blanket except below means the skip is a
+    deliberate, documented decision instead of a swallowed error."""
+    if not has_unix_sockets(windows):
+        return None
     path = _daemon_socket_path()
     sock = None
     try:
@@ -101,7 +111,7 @@ def _ask_via_daemon(body, timeout_s):
                 pass
 
 
-def ask(body, timeout_s=DEFAULT_TIMEOUT):
+def ask(body, timeout_s=DEFAULT_TIMEOUT, windows=None):
     """Preferred entry point for every caller. Tries the warm daemon socket
     first (connect timeout 0.2s); if the socket is missing, refuses, or
     errors in any way, falls back to the direct HTTPS call (call_jev) so
@@ -111,8 +121,11 @@ def ask(body, timeout_s=DEFAULT_TIMEOUT):
     Returns (response_dict, latency_ms), same shape as call_jev. Never raises
     beyond what call_jev already raises on the fallback path -- the daemon
     path itself never propagates an exception.
+
+    On Windows the daemon step is skipped outright (see _ask_via_daemon), so
+    every judgement is the direct HTTPS call.
     """
-    via_daemon = _ask_via_daemon(body, timeout_s)
+    via_daemon = _ask_via_daemon(body, timeout_s, windows=windows)
     if via_daemon is not None:
         response, latency_ms, _reused = via_daemon
         return response, latency_ms

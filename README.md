@@ -10,9 +10,9 @@
 
 <p>
   <a href="LICENSE"><img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-blue"></a>
-  <img alt="tests" src="https://img.shields.io/badge/tests-573%20passing-brightgreen">
+  <img alt="tests" src="https://img.shields.io/badge/tests-770%20passing-brightgreen">
   <img alt="Python 3.10+" src="https://img.shields.io/badge/python-3.10%2B-blue">
-  <img alt="Platforms" src="https://img.shields.io/badge/platforms-Linux%20%7C%20WSL2-lightgrey">
+  <img alt="Platforms" src="https://img.shields.io/badge/platforms-Linux%20%7C%20WSL2%20%7C%20Windows-lightgrey">
   <img alt="Claude Code" src="https://img.shields.io/badge/Claude%20Code-PreToolUse%20hook-8A3FFC">
   <img alt="TypeSafe Jev" src="https://img.shields.io/badge/TypeSafe-Jev-0F9D58">
 </p>
@@ -50,6 +50,10 @@ cd ~/code/jev-kit
 install/install.sh          # guard + daemon + monitoring + filesearch
                             # + claude-update + belay, all under $HOME
 ```
+
+**On native Windows without WSL**, that is not the install: the installer is
+Python, not bash. Follow
+**[docs/INSTALL-WINDOWS.md](docs/INSTALL-WINDOWS.md)** instead.
 
 `install.sh` never runs `sudo`, never writes outside `$HOME`, and never edits a
 `settings.json` unless you pass `--wire`. Without `--wire` it prints the exact
@@ -133,6 +137,7 @@ numbers and no sustained real use.
 | Warm daemon | Holds a warm connection so a judgement costs about 0.3 s instead of about 0.9 s | **yes** | Nothing of its own | exercised |
 | Compaction | Installer for the community `fast-jev-compaction` plugin | no, opt-in | **Up to about 25,000 tokens of raw, unredacted tool inputs and results per request** | never enabled here |
 | File search | Per-user `plocate` index of `$HOME` and its hourly timer | **yes** | Nothing. Entirely local | exercised |
+| File search (Windows) | Detects [Everything](https://www.voidtools.com/) (`es.exe`) and its index and steers searches at it. **Detects only: it never installs either**, and says what the human must do instead | **yes** on Windows, n/a elsewhere | Nothing. Entirely local | run on one Windows 11 machine |
 | **Uses** | | | | |
 | Browser agent | A Jev-decided browser agent, cloned and patched at a pin | no, opt-in | Page state and goals, to the decider you configure | own numbers |
 | Review | A Jev code reviewer at a pin, with a fail-open wrapper | no, opt-in | Diffs, to whatever review gate you configure | no numbers here |
@@ -257,7 +262,17 @@ Full tables, methods and the known limits: **[docs/measurements.md](docs/measure
 | **WSL2** (Ubuntu, systemd on) | Supported. Identical to Linux once `systemd=true` is in `/etc/wsl.conf` and the distribution has been restarted. See [INSTALL-WSL.md](docs/INSTALL-WSL.md). |
 | **WSL2** (systemd off) | Works, degraded, and the installer detects it. No daemon (a direct HTTPS call per judgement, roughly 0.9 s instead of 0.3 s), no timers, no hourly index refresh. The guard itself is unaffected. |
 | **macOS** | Plausible but **untested**. The guard is stdlib Python and should run. There is no systemd, so `--no-systemd` is required, and the daemon, all timers and `plocate` are out. `launchd` equivalents are not written. Nobody has run it. |
-| **Native Windows** (no WSL) | **Not supported yet.** The hook command form, the Unix-socket daemon, the systemd units and the `plocate` file-search rule all assume POSIX. The itemised gap is in [docs/native-windows.md](docs/native-windows.md). |
+| **Native Windows** (no WSL) | **The core is supported**, and was run on a real Windows 11 machine. Guard in shadow and enforce, the whole rules table, the key file, file search steered at [Everything](https://www.voidtools.com/) (`es.exe`) instead of `plocate`, health check, installer, doctor, uninstaller. **No warm daemon**, and belay, compaction, browser, review and tuning are **not ported**. See [INSTALL-WINDOWS.md](docs/INSTALL-WINDOWS.md), and [native-windows.md](docs/native-windows.md) for what is done and what remains. |
+
+### What "supported" means on native Windows
+
+| | |
+|---|---|
+| **Works** | The `PreToolUse` guard in shadow and enforce mode, through the Bash tool and the PowerShell tool alike. The whole rules table, with one per-platform default: **R6 (GUI/browser) is `off` on Windows**, because a workstation with a desktop opening a browser is ordinary rather than wrong; `rules.json` turns it back on. The key file at `%APPDATA%\jev-kit\env`, with `%APPDATA%\airlock\env` still honoured. The file-search rule, steering at `es.exe` with path-scoped, regex and case flags. The health check. `install/windows_install.py`, `windows_doctor.py`, `windows_uninstall.py` and their `.cmd`/`.ps1` launchers. |
+| **Out of scope, by design** | **The warm daemon.** It listens on a Unix domain socket, which Windows does not have; the client falls back cleanly to a direct HTTPS call per judgement, about **0.9 s** cold against about **0.3 s** warm on Linux. A named pipe is the right analogue but needs a non-stdlib dependency, and a localhost TCP listener is precisely the design this project refuses. |
+| **Out of scope, not ported** | `belay`, `compaction`, `browser`, `review`, `tuning`. Also `filesearch/`: on Linux airlock *builds* the index, and on Windows it deliberately does not. Everything is third-party software with its own installer and service, so airlock only *detects* it and steers at it, and never installs it. |
+| **Tested how** | The unit suite on **Windows Python 3.11.9, Windows 11**. Real `PreToolUse` events piped at the installed hook: a deny through the Bash tool and the same deny through the PowerShell tool (R1, an attempt to print the key file), an allow, the Everything steer classified, a malformed payload and the kill switch. The installer, doctor and uninstaller run for real into a scratch directory. `es.exe` 1.1.0.38 detected and queried. Exact commands and output: [docs/native-windows.md](docs/native-windows.md). |
+| **Not tested there** | **A Jev-judged deny.** The Windows machine was kept keyless on purpose, so every judged path there fail-opened -- which is itself the fail-open evidence. The judged path is verified on Linux only. |
 <!-- END PLATFORM TABLE -->
 
 ## FAQ

@@ -202,7 +202,19 @@ class EnforceBase(unittest.TestCase):
 class TestUserRequestedSoftening(EnforceBase):
     """R6 (xdg-open) is a code-only deny: no Jev call for the rule itself, so
     the only Jev call in these tests is the user_requested question. That
-    makes the softening the single thing under test."""
+    makes the softening the single thing under test.
+
+    R6's DEFAULT action is `off` on native Windows, so it is pinned ON here.
+    These tests are about the softening, not about the platform."""
+
+    OVERRIDES = {"R6-gui-or-browser": "deny"}
+
+    def setUp(self):
+        EnforceBase.setUp(self)
+        p = mock.patch.object(rules_mod, "load_action_overrides",
+                              return_value=self.OVERRIDES)
+        p.start()
+        self.addCleanup(p.stop)
 
     def _run(self, noul, transcript, session):
         answer = ({"answers": {"user_requested": {"noul": noul}}}, 20)

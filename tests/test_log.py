@@ -11,6 +11,8 @@ import os
 import stat
 import tempfile
 import unittest
+
+from tests import posix_only
 from pathlib import Path
 from unittest import mock
 
@@ -18,7 +20,22 @@ from airlock import log as jlog
 
 
 class TestLog(unittest.TestCase):
-    def test_append_creates_dir_and_file_with_correct_modes(self):
+    def test_append_creates_the_dir_and_the_file(self):
+        """Platform-neutral: the log has to be written. WHO can read it is a
+        separate question with a different answer per platform, below."""
+        with tempfile.TemporaryDirectory() as tmp:
+            log_dir = Path(tmp) / "state" / "airlock"
+            log_file = log_dir / "shadow.jsonl"
+            with mock.patch.object(jlog, "LOG_DIR", log_dir), mock.patch.object(jlog, "LOG_FILE", log_file):
+                jlog.append({"a": 1})
+            self.assertTrue(log_dir.is_dir())
+            self.assertTrue(log_file.is_file())
+
+    @posix_only("a POSIX mode. On Windows os.chmod only toggles the read-only\n"
+                "            attribute and privacy comes from the %LOCALAPPDATA% ACL\n"
+                "            instead -- see airlock/platform_compat.py:restrict_path\n"
+                "            and tests/test_windows_platform.py:TestPermissions")
+    def test_the_log_is_owner_only(self):
         with tempfile.TemporaryDirectory() as tmp:
             log_dir = Path(tmp) / "state" / "airlock"
             log_file = log_dir / "shadow.jsonl"

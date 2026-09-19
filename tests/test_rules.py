@@ -18,6 +18,7 @@ from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+from tests import posix_only
 from airlock import enforce, rules  # noqa: E402
 
 HOME = os.path.expanduser("~")
@@ -28,8 +29,9 @@ def ctx_bash(command, **ti):
     return rules.build_ctx({"tool_name": "Bash", "tool_input": ti, "cwd": "/tmp"}, "Bash")
 
 
-def fired(ctx, rule_id=None, overrides=None):
-    rows = rules.dry_run(ctx, overrides=overrides if overrides is not None else {})
+def fired(ctx, rule_id=None, overrides=None, windows=None):
+    rows = rules.dry_run(ctx, overrides=overrides if overrides is not None else {},
+                         windows=windows)
     if rule_id is None:
         return [r for r in rows if r["fires"]]
     return [r for r in rows if r["rule_id"] == rule_id]
@@ -194,11 +196,16 @@ class TestOtherRules(unittest.TestCase):
             self.assertEqual(fired(ctx_bash(c), "R5-sudo"), [], c)
 
     def test_r6_gui(self):
+        """R6's DEFAULT action is `off` on native Windows (a workstation with a
+        desktop opening a browser is ordinary), so the platform is injected
+        here rather than inherited from whichever machine runs the suite.
+        TestR6DefaultsOffOnWindows in test_windows_rules.py owns the
+        per-platform default itself."""
         for c in ("xdg-open https://x", "sensible-browser http://localhost:3000", "firefox a.html"):
-            self.assertTrue(fired(ctx_bash(c), "R6-gui-or-browser"), c)
+            self.assertTrue(fired(ctx_bash(c), "R6-gui-or-browser", windows=False), c)
         for c in ("chromium --headless=new --dump-dom https://x", "openssl rand -hex 16",
                   "echo 'open http://localhost:3000 yourself'"):
-            self.assertEqual(fired(ctx_bash(c), "R6-gui-or-browser"), [], c)
+            self.assertEqual(fired(ctx_bash(c), "R6-gui-or-browser", windows=False), [], c)
 
     def test_r7_destructive(self):
         for c in ("git push --force origin harden", "git reset --hard origin/main",
@@ -251,7 +258,12 @@ class TestEnforcePath(unittest.TestCase):
         patcher = mock.patch("airlock.log.append", side_effect=self.logged.append)
         patcher.start()
         self.addCleanup(patcher.stop)
-        ov = mock.patch("airlock.rules.load_action_overrides", return_value={})
+        # R6 is pinned ON rather than left at its default, because its default
+        # is `off` on native Windows and several tests below use `xdg-open` as
+        # a convenient code-only deny. Pinning keeps them about the ENFORCE
+        # path rather than about which platform runs the suite.
+        ov = mock.patch("airlock.rules.load_action_overrides",
+                        return_value={"R6-gui-or-browser": "deny"})
         ov.start()
         self.addCleanup(ov.stop)
 
@@ -685,7 +697,11 @@ class TestExtraSecretPaths(unittest.TestCase):
         self.assertTrue(res[1].search("cat ~/.config/b/env"))
 
     def test_a_broken_value_never_raises(self):
-        with mock.patch.dict(os.environ, {"AIRLOCK_EXTRA_SECRET_PATHS": ":::"}):
+        # os.pathsep, not a literal ":": the variable is split on the
+        # platform's own PATH separator, which is ";" on Windows, where ":::"
+        # is one perfectly ordinary token rather than three empty ones.
+        with mock.patch.dict(os.environ,
+                             {"AIRLOCK_EXTRA_SECRET_PATHS": os.pathsep * 3}):
             self.assertEqual(rules._extra_secret_path_res(), [])
 
 
@@ -756,6 +772,9 @@ class TestR1ProtectsTheKeyFilePointer(unittest.TestCase):
         self._write_pointer(moved)
         self.assertTrue(fired(ctx_bash("cat %s" % moved), "R1-secret-exposure")[0]["fires"])
 
+    @posix_only("refusing an untrusted pointer is a uid + chmod check; on "
+                "Windows the pointer is followed and the gap is recorded "
+                "instead -- see TestPointerTrustOnWindows in test_keyfile.py")
     def test_an_untrusted_pointer_still_protects_its_target(self):
         """keyfile.py refuses to FOLLOW a group-writable pointer, but the path
         it names is still the next file a transcript would be told to read."""

@@ -87,7 +87,11 @@ class TestDenyJsonShape(EnforceTestBase):
         out = payload["hookSpecificOutput"]
         self.assertEqual(out["hookEventName"], "PreToolUse")
         self.assertEqual(out["permissionDecision"], "deny")
-        self.assertIn("plocate", out["permissionDecisionReason"])
+        # The indexed tool the deny points at is per-platform: plocate on
+        # Linux, es.exe on Windows. The shape of the deny is not.
+        from airlock import policy as _policy
+        self.assertIn(_policy.filename_search_suggestion().splitlines()[0],
+                      out["permissionDecisionReason"])
         entry = self._logged[-1]
         self.assertTrue(entry["enforced"])
         self.assertEqual(entry["mode"], "enforce")

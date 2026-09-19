@@ -17,6 +17,8 @@ import time
 import unittest
 from unittest import mock
 
+from airlock import platform_compat
+
 HOOK_PATH = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "hooks", "airlock.py")
 
 _spec = importlib.util.spec_from_file_location("airlock_hook_entry", HOOK_PATH)
@@ -27,6 +29,18 @@ _spec.loader.exec_module(hook_entry)
 
 def _leftover_payload_files():
     return set(glob.glob(os.path.join(tempfile.gettempdir(), "airlock-*.json")))
+
+
+def _remove_quietly(path):
+    """Delete a file, never complaining. Used where subprocess.Popen is
+    mocked: the real worker then never runs, so it never consumes and deletes
+    the payload file the hook wrote, and one would be left behind in %TEMP%
+    (or /tmp) on every run of the suite."""
+    try:
+        import os as _os
+        _os.remove(path)
+    except Exception:
+        pass
 
 
 class TestHookEntry(unittest.TestCase):
@@ -88,8 +102,17 @@ class TestHookEntry(unittest.TestCase):
              mock.patch("subprocess.Popen") as popen:
             hook_entry.main()
             popen.assert_called_once()
-            _args, kwargs = popen.call_args
-            self.assertTrue(kwargs.get("start_new_session"))
+            args, kwargs = popen.call_args
+            self.addCleanup(_remove_quietly, args[0][-1])
+            # The detached-child mechanism is platform-specific:
+            # start_new_session on POSIX, the DETACHED_PROCESS |
+            # CREATE_NEW_PROCESS_GROUP creation flags on Windows. Both are
+            # asserted directly in tests/test_windows_platform.py; here the
+            # assertion is just that the hook used whichever this platform
+            # has, rather than hard-coding one of them.
+            expected = platform_compat.detached_popen_kwargs()
+            for key, value in expected.items():
+                self.assertEqual(kwargs.get(key), value)
             self.assertEqual(kwargs.get("stdin"), subprocess.DEVNULL)
             self.assertEqual(kwargs.get("stdout"), subprocess.DEVNULL)
             self.assertEqual(kwargs.get("stderr"), subprocess.DEVNULL)
@@ -112,6 +135,16 @@ class TestHookEntry(unittest.TestCase):
         dir and strips TYPESAFE_API_KEY so the worker finds no API key and
         exits immediately without any real network call or write to the real
         shadow log -- this is a unit test, not tests/live_smoke.py.
+
+        The budget is higher on Windows, and honestly so. Almost all of it is
+        CPython interpreter start-up plus the antivirus filter that sits in
+        front of every CreateProcess there: measured at roughly 450ms on the
+        Windows 11 workstation this was tested on, against roughly 40ms on
+        Linux, for the same code doing the same work. No change to this
+        repository moves that number -- it is the cost of starting Python on
+        Windows at all, which is paid by every PreToolUse hook on the machine,
+        not just this one. What the budget still catches is the thing it was
+        written for: an import or a filesystem walk creeping into the hot path.
         """
         payload = json.dumps(
             {
@@ -125,6 +158,15 @@ class TestHookEntry(unittest.TestCase):
             env = dict(os.environ)
             env.pop("TYPESAFE_API_KEY", None)
             env["HOME"] = fake_home
+            # HOME alone isolates nothing on Windows: airlock/paths.py
+            # resolves config, state and releases from %APPDATA% and
+            # %LOCALAPPDATA%, so the real detached worker this test spawns
+            # would write its shadow log into the user's actual profile.
+            # Observed doing exactly that on the Windows machine this was
+            # tested on, which is why all four are pinned.
+            env["USERPROFILE"] = fake_home
+            env["APPDATA"] = os.path.join(fake_home, "AppData", "Roaming")
+            env["LOCALAPPDATA"] = os.path.join(fake_home, "AppData", "Local")
             start = time.monotonic()
             proc = subprocess.run(
                 [sys.executable, HOOK_PATH],
@@ -137,7 +179,10 @@ class TestHookEntry(unittest.TestCase):
             elapsed_ms = (time.monotonic() - start) * 1000
         self.assertEqual(proc.returncode, 0)
         self.assertEqual(proc.stdout, "")
-        self.assertLess(elapsed_ms, 100, "hook entry point took %.1fms" % elapsed_ms)
+        budget_ms = 800 if sys.platform == "win32" else 100
+        self.assertLess(elapsed_ms, budget_ms,
+                        "hook entry point took %.1fms (budget %dms on %s)"
+                        % (elapsed_ms, budget_ms, sys.platform))
 
 
 class TestModeDispatch(unittest.TestCase):

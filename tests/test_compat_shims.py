@@ -22,6 +22,8 @@ import subprocess
 import sys
 import tempfile
 import unittest
+
+from tests import posix_only
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -121,6 +123,7 @@ class TestPackageShims(unittest.TestCase):
         self.assertEqual(missing, [])
 
 
+@posix_only("runs the hook through a POSIX shell with a throwaway HOME;\n            the Windows equivalent is install/windows_doctor.py")
 class TestHookShims(unittest.TestCase):
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
@@ -212,6 +215,7 @@ class MigrationTestBase(unittest.TestCase):
         return home
 
 
+@posix_only("install/migrate-to-airlock.sh is bash, the layout it migrates is\n            the XDG one, and the fixture builds symlinks -- which an\n            unprivileged Windows user cannot create at all (WinError 1314)")
 class TestMigrationScript(MigrationTestBase):
     def test_live_layout_migrates_and_is_idempotent(self):
         with tempfile.TemporaryDirectory() as home:

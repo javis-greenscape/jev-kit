@@ -14,6 +14,8 @@ import stat
 import tempfile
 import threading
 import unittest
+
+from tests import posix_only
 from unittest import mock
 
 from airlock import daemon
@@ -53,6 +55,7 @@ class _FakeConnection:
         self.closed = True
 
 
+@posix_only("the daemon binds a Unix domain socket; it does not run on Windows at all")
 class TestConnectionPool(unittest.TestCase):
     def test_reuses_connection_across_requests(self):
         conn = _FakeConnection([
@@ -126,6 +129,7 @@ class TestConnectionPool(unittest.TestCase):
         self.assertEqual(conn_b.requests, 1)
 
 
+@posix_only("the daemon binds a Unix domain socket; it does not run on Windows at all")
 class TestStats(unittest.TestCase):
     def test_arithmetic(self):
         s = daemon.Stats()
@@ -156,6 +160,7 @@ def _read_line(f):
     return json.loads(f.readline().decode("utf-8"))
 
 
+@posix_only("the daemon binds a Unix domain socket; it does not run on Windows at all")
 class TestProtocolRoundTrip(unittest.TestCase):
     """Starts the real daemon connection-handling loop over a temp Unix
     socket, with the outbound HTTPS call faked, and drives it as a client
@@ -262,6 +267,7 @@ class TestProtocolRoundTrip(unittest.TestCase):
         c.close()
 
 
+@posix_only("the daemon binds a Unix domain socket; it does not run on Windows at all")
 class TestSocketAndDirModes(unittest.TestCase):
     def test_bind_socket_sets_modes(self):
         with tempfile.TemporaryDirectory() as base:
@@ -292,6 +298,7 @@ class TestSocketAndDirModes(unittest.TestCase):
             self.assertEqual(d, "/run/user/%d/airlock" % os.getuid())
 
 
+@posix_only("the daemon binds a Unix domain socket; it does not run on Windows at all")
 class TestKeyNeverLogged(unittest.TestCase):
     def test_log_line_never_contains_the_key(self):
         import io

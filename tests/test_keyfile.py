@@ -10,6 +10,8 @@ import os
 import pathlib
 import tempfile
 import unittest
+
+from tests import posix_only
 from unittest import mock
 
 from airlock import keyfile
@@ -62,6 +64,7 @@ class TestKeyfile(unittest.TestCase):
             os.remove(path)
 
 
+@posix_only("the ~/.config default; the Windows default is\n            %APPDATA%\\airlock\\env -- see\n            tests/test_windows_platform.py:TestWindowsKeyFile")
 class TestDefaultEnvFile(unittest.TestCase):
     """The default key file is generic so a fresh machine needs no config at
     all, and it is KIT-level (~/.config/jev-kit/env) because every component in
@@ -159,6 +162,8 @@ class TestDefaultEnvFile(unittest.TestCase):
             self.assertTrue(keyfile.default_env_file())
 
 
+@posix_only("pointer trust here is a uid check and a chmod check, and Windows\n"
+            "            has neither; the Windows half is TestPointerTrustOnWindows below")
 class TestPointerTrust(unittest.TestCase):
     """The pointer file chooses which file this process parses for a secret, so
     it is followed only when its own permissions say the owner wrote it. Every
@@ -349,6 +354,97 @@ class TestPointerTrust(unittest.TestCase):
                                     {"AIRLOCK_KEY_FILE": "/explicit/env",
                                      "JEVKIT_KEY_FILE": "/kit/env"}):
                 self.assertEqual(keyfile.key_file(), "/explicit/env")
+
+
+class TestPointerTrustOnWindows(unittest.TestCase):
+    """Windows has no uid and no meaningful st_mode, so the two permission
+    checks cannot run there. The module does not pretend they passed and does
+    not refuse every pointer either: it follows the pointer and RECORDS what
+    was and was not checked. The structural checks still run."""
+
+    def setUp(self):
+        keyfile.reset_diagnostics()
+
+    def _fixture(self, home):
+        config = pathlib.Path(home) / "AppData" / "Roaming" / "airlock"
+        config.mkdir(parents=True)
+        target = os.path.join(home, "AppData", "Roaming", "jev-kit", "env")
+        os.makedirs(os.path.dirname(target), exist_ok=True)
+        open(target, "w").close()
+        pointer = config / "keyfile.path"
+        pointer.write_text(target + "\n")
+        return config, target
+
+    def _target(self, home, **kw):
+        config, target = self._fixture(home)
+        with mock.patch.object(keyfile.paths, "config_file",
+                               lambda name: config / name), \
+             mock.patch.dict(os.environ, {"USERPROFILE": home}):
+            return keyfile.pointer_target(windows=True, **kw), target
+
+    def test_the_pointer_is_followed(self):
+        with tempfile.TemporaryDirectory() as home:
+            got, target = self._target(home)
+            self.assertEqual(got, target)
+
+    def test_the_diagnostics_say_what_was_and_was_not_checked(self):
+        with tempfile.TemporaryDirectory() as home:
+            self._target(home)
+            blob = " ".join(keyfile.pointer_diagnostics())
+        self.assertIn("CHECKED", blob)
+        self.assertIn("NOT CHECKED", blob)
+        self.assertIn("owner uid", blob)
+        self.assertIn("ACL", blob)
+
+    def test_a_group_writable_mode_is_not_used_to_refuse_on_windows(self):
+        """The same fixture that POSIX refuses is FOLLOWED on Windows, because
+        the mode there is synthesised and means nothing. The diagnostics are
+        what carry the honesty, not a refusal."""
+        with tempfile.TemporaryDirectory() as home:
+            config, target = self._fixture(home)
+            (config / "keyfile.path").chmod(0o666)
+            with mock.patch.object(keyfile.paths, "config_file",
+                                   lambda name: config / name), \
+                 mock.patch.dict(os.environ, {"USERPROFILE": home}):
+                self.assertEqual(keyfile.pointer_target(windows=True), target)
+                keyfile.reset_diagnostics()
+                # The POSIX branch refuses the same fixture. (Its DIAGNOSTIC
+                # text is asserted in TestPointerTrust, which runs on POSIX
+                # only: forced onto the POSIX branch on a real Windows host
+                # there is no os.getuid() to call, so the refusal happens one
+                # step earlier and says less.)
+                self.assertIsNone(keyfile.pointer_target(windows=False))
+
+    def test_the_structural_checks_still_run(self):
+        with tempfile.TemporaryDirectory() as home:
+            config, _target = self._fixture(home)
+            (config / "keyfile.path").write_text("not-an-absolute-path\n")
+            with mock.patch.object(keyfile.paths, "config_file",
+                                   lambda name: config / name), \
+                 mock.patch.dict(os.environ, {"USERPROFILE": home}):
+                self.assertIsNone(keyfile.pointer_target(windows=True))
+            self.assertTrue(any("not absolute" in d
+                                for d in keyfile.pointer_diagnostics()))
+
+    def test_a_missing_target_still_falls_back(self):
+        with tempfile.TemporaryDirectory() as home:
+            config, target = self._fixture(home)
+            os.remove(target)
+            with mock.patch.object(keyfile.paths, "config_file",
+                                   lambda name: config / name), \
+                 mock.patch.dict(os.environ, {"USERPROFILE": home}):
+                self.assertIsNone(keyfile.pointer_target(windows=True))
+
+    def test_a_pointer_outside_the_profile_is_followed_but_warned_about(self):
+        with tempfile.TemporaryDirectory() as home:
+            config, target = self._fixture(home)
+            with mock.patch.object(keyfile.paths, "config_file",
+                                   lambda name: config / name), \
+                 mock.patch.dict(os.environ, {"USERPROFILE": "Z:\\somewhere-else"}):
+                self.assertEqual(keyfile.pointer_target(windows=True), target)
+            blob = " ".join(keyfile.pointer_diagnostics())
+        self.assertIn("USERPROFILE", blob)
+        self.assertIn("still followed", blob)
 
 
 if __name__ == "__main__":

@@ -4,21 +4,25 @@ If the same session gets denied the same normalised command (or the same
 Agent description) again within LOOP_WINDOW_S, the repeat is allowed rather
 than denied again -- a wrong deny can wedge a session into repeating the same
 blocked call forever otherwise. State lives at
-~/.local/state/airlock/loop_state.json (directory mode 700, file mode 600),
-guarded with flock so concurrent PreToolUse hook processes never corrupt it.
+~/.local/state/airlock/loop_state.json (%LOCALAPPDATA%\\airlock\\state\\
+loop_state.json on Windows), directory mode 700 and file mode 600 on POSIX,
+guarded with a whole-file lock so concurrent PreToolUse hook processes never
+corrupt it. The lock and the permission call both go through
+airlock/platform_compat.py: flock and chmod on POSIX, a byte-range lock and
+the per-user %LOCALAPPDATA% ACL on Windows.
 
 Fail-safe direction: any failure reading/writing this file means
 was_recently_denied() returns False (i.e. "no prior denial seen") -- the
 consequence is one extra deny gets emitted rather than a wrong one being
 silently allowed through loop protection.
 """
-import fcntl
 import json
 import os
 import time
 from pathlib import Path
 
 from . import paths
+from . import platform_compat
 
 STATE_DIR = paths.state_dir()
 STATE_FILE = STATE_DIR / "loop_state.json"
@@ -36,16 +40,17 @@ def _key_str(key):
 
 def _ensure_dir():
     STATE_DIR.mkdir(parents=True, exist_ok=True)
-    try:
-        os.chmod(STATE_DIR, 0o700)
-    except Exception:
-        pass
+    platform_compat.restrict_path(STATE_DIR, 0o700)
 
 
-def _open_locked(lock_type):
+def _open_locked(lock_kind):
     _ensure_dir()
-    fd = os.open(str(STATE_FILE), os.O_CREAT | os.O_RDWR, 0o600)
-    fcntl.flock(fd, lock_type)
+    # O_BINARY is a Windows-only flag and 0 on POSIX (see airlock/log.py):
+    # this file is seeked and truncated by offset, so text-mode newline
+    # translation would corrupt it outright.
+    fd = os.open(str(STATE_FILE),
+                 os.O_CREAT | os.O_RDWR | getattr(os, "O_BINARY", 0), 0o600)
+    platform_compat.lock_file(fd, lock_kind)
     return fd
 
 
@@ -89,16 +94,13 @@ def was_recently_denied(session_id, key, window_s):
     """True if (session_id, key) was recorded by record_denial() within the
     last window_s seconds. Never raises."""
     try:
-        fd = _open_locked(fcntl.LOCK_SH)
+        fd = _open_locked(platform_compat.LOCK_SHARED)
     except Exception:
         return False
     try:
         data = _load(fd)
     finally:
-        try:
-            fcntl.flock(fd, fcntl.LOCK_UN)
-        except Exception:
-            pass
+        platform_compat.unlock_file(fd)
         try:
             os.close(fd)
         except Exception:
@@ -117,7 +119,7 @@ def record_denial(session_id, key):
     """Record that (session_id, key) was just denied, for future loop
     protection. Never raises."""
     try:
-        fd = _open_locked(fcntl.LOCK_EX)
+        fd = _open_locked(platform_compat.LOCK_EXCLUSIVE)
     except Exception:
         return
     try:
@@ -129,10 +131,7 @@ def record_denial(session_id, key):
     except Exception:
         return
     finally:
-        try:
-            fcntl.flock(fd, fcntl.LOCK_UN)
-        except Exception:
-            pass
+        platform_compat.unlock_file(fd)
         try:
             os.close(fd)
         except Exception:
