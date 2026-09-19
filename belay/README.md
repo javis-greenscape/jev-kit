@@ -1,16 +1,16 @@
 # belay: the jev-belay Stop hook, wrapped
 
 [valentynkit/jev-belay](https://github.com/valentynkit/jev-belay), pinned at
-commit `98f39e0`. On the Claude Code **Stop** event it looks at the last
-turn's mutations and check commands, and -- only if there is evidence of a
-change with no fresh passing check -- asks TypeSafe's Jev model four
-questions about whether the final message overclaims completion. It is used
+commit `98f39e0`. On the Claude Code **Stop** event it looks at the last turn's
+mutations and check commands. Only where there is evidence of a change with no
+fresh passing check does it ask TypeSafe's Jev model four questions about
+whether the final message overclaims completion. It is used
 here unmodified, at a pin, scoped to one account at a time; see
 [`docs/CREDITS.md`](../docs/CREDITS.md) for the pin and the licence.
 
 What it sends off the machine, read from its own source: the task text, the
-final assistant message, and check command lines, all run through a 13-rule
-secret redactor first, capped at 1,500 + 2,000 characters. No diffs, no file
+final assistant message, and check command lines. All three run through a
+13-rule secret redactor first, capped at 1,500 + 2,000 characters. No diffs, no file
 contents, no tool inputs.
 
 ## What gets installed
@@ -22,7 +22,7 @@ contents, no tool inputs.
 | `run.sh`, installed | `$HOME/bin/airlock-belay-run` | The wrapper the Stop hook actually calls |
 
 Nothing is added to any `settings.json`. `install.sh` prints the block to add
-and stops there -- the same posture as the rest of this repository.
+and stops there, which is the posture of the rest of this repository.
 
 ## Install
 
@@ -30,8 +30,8 @@ and stops there -- the same posture as the rest of this repository.
 belay/install.sh
 ```
 
-Then add the printed Stop hook to **one** account's `settings.json` --
-`~/.claude*/settings.json`, whichever account you are testing with -- and set
+Then add the printed Stop hook to **one** account's `settings.json`
+(`~/.claude*/settings.json`, whichever account you are testing with) and set
 `JEV_BELAY_LOG=1` (the wrapper already sets it). Read
 `~/.claude/belay/decisions.jsonl` for a week before trusting a block, and
 before adding it to any other account.
@@ -39,16 +39,16 @@ before adding it to any other account.
 ## The key
 
 `run.sh` never hard-codes a key-file path and never keeps its own copy of the
-lookup: it sources `install/keyfile.sh`, the one shell implementation of the
+lookup. It sources `install/keyfile.sh`, the one shell implementation of the
 resolution order every component here shares, so the wrapper and the hook can
 never end up reading different files. The order itself is documented in
-`airlock/keyfile.py`'s module docstring. With no key loadable it fails open --
-exits 0, does nothing -- exactly like the guard.
+`airlock/keyfile.py`'s module docstring. With no key loadable it fails open,
+exits 0 and does nothing, exactly like the guard.
 
 ## Absolute paths, always
 
 Claude Code hook commands do not expand `~`. If a hook command contains it,
-the hook silently never runs -- no error, just nothing happening. That is why
+the hook silently never runs. No error, nothing happening. That is why
 `install.sh` prints an absolute path (`$HOME/bin/airlock-belay-run`
 resolved, not written literally as `~/bin/...`) and why the wrapper itself
 resolves its own directory with `$(cd "$(dirname ...)" && pwd)` rather than

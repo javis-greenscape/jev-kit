@@ -5,7 +5,7 @@
 > (`tests/test_docclass.py`), plus one live run against a public IRS Form W-9
 > (`docclass/smoke.py`, see [Tests](#tests)). Not tested: any real taxonomy, any
 > real document set, any accuracy claim. There is **no labelled corpus and no
-> measured accuracy** for this component -- the numbers quoted below are the
+> measured accuracy** for this component. The numbers quoted below are the
 > upstream behaviour study's, not this code's.
 
 `classify_page(text, taxonomy)` plus a CLI for text-layer PDFs. The shape is
@@ -20,9 +20,9 @@ question with dozens of options, most of them irrelevant to the page in front
 of it. Family first, then the specific type within the chosen family, keeps
 each question small. A family with no narrower types costs exactly one call.
 
-**`not_in_this_list` on both stages.** A Choice has to return something. Without
-an escape option, a page that is genuinely none of the listed kinds comes back
-as the least-wrong one, with a confidence that says nothing about whether the
+**`not_in_this_list` on both stages.** A Choice has to return something.
+Without an escape option, a page that is none of the listed kinds comes back as
+the least-wrong one, with a confidence that says nothing about whether the
 answer belonged in the list at all.
 
 **A confidence gate.** Below the gate, the page is `needs_review` and goes to a
@@ -125,8 +125,8 @@ The smoke test downloads a public IRS Form W-9 and classifies its six pages
 against the example taxonomy, which has no US-tax-form kind in it. Run
 2026-09-19: all six pages came back `form`, confidence 0.98-1.00.
 
-Read honestly: `form` is right for the form pages and defensible but crude for
+Read it this way: `form` is right for the form pages and defensible but crude for
 the instruction pages, which the example taxonomy has no kind for at all. That
-is a finding about the example taxonomy, not about the code -- and it is exactly
-the shape of thing a real taxonomy has to get right, which is why the gate and
+is a finding about the example taxonomy rather than about the code. It is the
+shape of thing a real taxonomy has to get right, which is why the gate and
 the escape hatch exist.

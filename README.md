@@ -10,7 +10,7 @@
 
 <p>
   <a href="LICENSE"><img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-blue"></a>
-  <img alt="tests" src="https://img.shields.io/badge/tests-999%20passing-brightgreen">
+  <img alt="tests" src="https://img.shields.io/badge/tests-1038%20passing-brightgreen">
   <img alt="Python 3.10+" src="https://img.shields.io/badge/python-3.10%2B-blue">
   <img alt="Platforms" src="https://img.shields.io/badge/platforms-Linux%20%7C%20WSL2%20%7C%20Windows-lightgrey">
   <img alt="Claude Code" src="https://img.shields.io/badge/Claude%20Code-PreToolUse%20hook-8A3FFC">
@@ -19,6 +19,7 @@
 
 <p>
   <a href="#quickstart">Quickstart</a> &middot;
+  <a href="#jev-as-the-decision-maker-the-browser-agent">Browser result</a> &middot;
   <a href="#what-is-in-the-kit">What is in the kit</a> &middot;
   <a href="#how-it-works">How it works</a> &middot;
   <a href="#measured-results">Measured results</a> &middot;
@@ -30,12 +31,17 @@
 
 </div>
 
+> **Jev decides, Claude writes.** With Jev choosing each click, the browser
+> agent's Claude bill was **0.0008 USD** a run against **0.1868 USD** with
+> Sonnet choosing, at the same 9/9 success. [The numbers, and how they were
+> taken.](#jev-as-the-decision-maker-the-browser-agent)
+
 ## What is Jev, and why a kit
 
 Jev is a TypeSafe System One model. It does not return text. It returns a typed
-decision -- yes or no, a choice, a score -- with a probability attached, in
-roughly 0.3 s, for a fraction of a cent. That is fast enough and cheap enough
-to sit inside an agent's loop as a judge rather than beside it as another chat.
+decision with a probability attached: yes or no, a choice, a score. That takes
+roughly 0.3 s and costs a fraction of a cent, so it fits inside an agent's loop
+as a judge rather than beside it as another chat.
 
 A kit, because the judge is the easy part. The work is the places it pays off:
 which tool call to question, which sub-agent rung a task needs, what to redact
@@ -111,7 +117,7 @@ shell, or `touch ~/.config/airlock/disabled` for the machine.
 >
 > Paste this into Claude Code:
 >
-> *"Install jev-kit from https://github.com/jonathanavis96/jev-kit -- follow
+> *"Install jev-kit from https://github.com/jonathanavis96/jev-kit. Follow
 > docs/install.md, run `install/install.sh --check-only` first and show me the
 > plan, ask me for the TYPESAFE_API_KEY rather than printing one, leave it in
 > shadow mode, and prove a deny works before telling me it is done."*
@@ -119,48 +125,67 @@ shell, or `touch ~/.config/airlock/disabled` for the machine.
 Full detail, flags, config file, WSL, rollback and the agent checklist:
 **[docs/install.md](docs/install.md)**.
 
+## Jev as the decision-maker: the browser agent
+
+A browser agent is where swapping the decision-maker shows up plainest. Same
+goals, same browser, same code. Only the model choosing each click changes.
+
+| Decider | Goals reached | Median decision | Claude spend per run |
+|---|---|---|---|
+| **Jev** | **9/9** | **314-486 ms** | **0.0008 USD** |
+| Claude Sonnet | 9/9 | 1.1-1.5 s | 0.1868 USD |
+| Claude Haiku | 4/9 | 0.76-2.8 s | 0.0344 USD |
+
+Jev reached every goal Sonnet reached, two to four times faster per decision,
+for 233 times less Claude spend per run. The bill collapses because the
+language model is no longer asked to decide each click, only to write text into
+a field.
+
+Method: 3 goals, 3 arms, 3 repetitions each (27 runs), one machine, one shared
+headless Chromium, 2026-09-19. Spend is goal 1, read from the CLI's own
+`total_cost_usd`. At n=3 a cell is directional, not significant. Full tables:
+**[docs/measurements.md](docs/measurements.md#the-browser-component)**.
+
 ## What is in the kit
 
 Airlock is the tool-call guard. It is one component of the kit, not the kit.
 
 `Exercised` means unit tests, a labelled eval, a measured bench and real daily
-use on at least one machine. `Experimental` means the logic has unit tests and
-the component has been run by hand, but has no labelled corpus, no measured
-numbers and no sustained real use.
+use on at least one machine. `Experimental` means unit tests and hand-runs
+only: no labelled corpus, no measured numbers, no sustained use.
 
 | Component | What it does | Default | What leaves the machine | Exercised |
 |---|---|---|---|---|
 | **Guards** | | | | |
-| Airlock, the tool-call guard | Judges each `PreToolUse` call against a rules table and, for the ambiguous half, one typed Jev question | **yes** | Redacted summaries of the ambiguous fraction of tool calls | exercised |
-| Tier guard | Checks the sub-agent rung a dispatch chose against the task Jev judges it to be | **yes**, part of the guard | The dispatch's description and prompt, redacted | exercised |
-| Belay | When an agent says it is finished with no passing check behind it, sends it back to verify | **yes** | Task text, final message and check commands, redacted and capped | exercised |
-| Session check | A `SessionStart` hook that tells **you**, when you start a session, if the guard has stopped judging. Silent when healthy | **yes** | Nothing. Reads local state only, never the network | exercised |
+| Airlock, the tool-call guard | Judges each `PreToolUse` call: rules table first, one typed Jev question for the ambiguous half | **yes** | Redacted call summaries | exercised |
+| Tier guard | Checks the sub-agent rung a dispatch chose against the task | **yes**, part of the guard | Dispatch description and prompt, redacted | exercised |
+| Belay | Sends a finished-but-unverified agent back to check its work | **yes** | Task text and check commands, redacted | exercised |
+| Session check | Says at session start when the guard has stopped judging | **yes** | Nothing. Local state only | exercised |
 | **Speed and cost** | | | | |
-| Warm daemon | Holds a warm connection so a judgement costs about 0.3 s instead of about 0.9 s | **yes** | Nothing of its own | exercised |
-| Compaction | Installer for the community `fast-jev-compaction` plugin | no, opt-in | **Up to about 25,000 tokens of raw, unredacted tool inputs and results per request** | never enabled here |
-| File search | Per-user `plocate` index of `$HOME` and its hourly timer | **yes** | Nothing. Entirely local | exercised |
-| File search (Windows) | Detects [Everything](https://www.voidtools.com/) (`es.exe`) and its index and steers searches at it. **Detects only: it never installs either**, and says what the human must do instead | **yes** on Windows, n/a elsewhere | Nothing. Entirely local | run on one Windows 11 machine |
+| Warm daemon | Holds a warm connection: 0.3 s a judgement, not 0.9 s | **yes** | Nothing of its own | exercised |
+| Compaction | Installs the community `fast-jev-compaction` plugin | no, opt-in | **Up to 25,000 tokens of raw tool inputs and results per request** | never enabled here |
+| File search | Per-user `plocate` index of `$HOME`, refreshed hourly | **yes** | Nothing. Local | exercised |
+| File search (Windows) | Detects [Everything](https://www.voidtools.com/) (`es.exe`) and steers searches at it. Never installs it | **yes** on Windows | Nothing. Local | one Windows 11 machine |
 | **Uses** | | | | |
-| Browser agent | A Jev-decided browser agent, cloned and patched at a pin | no, opt-in | Page state and goals, to the decider you configure | own numbers |
-| Review | A Jev code reviewer at a pin, with a fail-open wrapper | no, opt-in | Diffs, to whatever review gate you configure | no numbers here |
+| Browser agent | Jev decides each click. Cloned and patched at a pin | no, opt-in | Page state and goals, to the decider you configure | own numbers |
+| Review | A Jev code reviewer at a pin, with a fail-open wrapper | no, opt-in | Diffs, to the gate you configure | no numbers here |
 | Document classifier | Two-stage classifier with an escape hatch and a confidence gate | no | Page text, when you call it | **experimental** |
-| Log triage | Redact-first, local-rules-first triage on stdin | no | Nothing until local rules are exhausted; redacted lines after | **experimental** |
+| Log triage | Redact-first, local-rules-first triage on stdin | no | Redacted lines, once local rules run out | **experimental** |
 | Shim | An OpenAI-shaped HTTP shim over the `claude` CLI | no, opt-in | Whatever you send through it | **experimental** |
 | **Operations** | | | | |
-| Installer and doctor | One installer, a doctor that runs real calls, deploy, rollback, wire | n/a | Nothing | exercised |
+| Installer and doctor | Install, doctor with real calls, deploy, rollback, wire | n/a | Nothing | exercised |
 | Monitoring | Five-minute health check and its timer | **yes** | Nothing | exercised |
-| Push monitor | Optional push to a monitor you host, in `heartbeat` or `explicit` mode | no, opt-in | A status word and, in `explicit` mode, which check failed -- redacted and capped | exercised |
-| Tuning loop | Reads the shadow log, has a judge score the verdicts, commits to its own branch | no, opt-in | Real Claude sessions on the account you nominate | exercised |
-
-The guard's tool-choice branch that suggests `graphify query` instead of a raw
-grep only exists when the search root has a graphify graph
-(`graphify-out/graph.json`); with no graph present it is inert, which is most
-users, since most do not use graphify at all.
-| Auto-updater | Idle-only Claude Code updater. Updates only when no run is alive | **yes** | Nothing | exercised |
+| Push monitor | Pushes status to a monitor you host, in one of two modes | no, opt-in | A status word, plus which check failed, redacted and capped | exercised |
+| Tuning loop | Scores shadow-log verdicts, commits to its own branch | no, opt-in | Claude sessions on the account you nominate | exercised |
+| Auto-updater | Updates Claude Code, and only while no run is alive | **yes** | Nothing | exercised |
 
 Per-component detail, exposure and install flags:
 **[docs/components.md](docs/components.md)**. The rules themselves:
 **[docs/rules.md](docs/rules.md)**.
+
+The guard's steer toward `graphify query` instead of a raw recursive grep only
+exists where the search root carries a graph (`graphify-out/graph.json`). With
+no graph the branch is inert, which covers most users.
 
 ## How it works
 
@@ -201,8 +226,8 @@ flowchart LR
 
 The ladder is yours: `~/.config/airlock/tiers.json` overrides the built-in one,
 because agent type names differ per machine. Rewrite mode, which edits the
-dispatch instead of advising, exists and is off by default for a reason spelled
-out in [docs/rules.md](docs/rules.md#rewrite-mode-off-by-default-and-here-is-the-catch).
+dispatch instead of advising, exists and is off by default for a reason set out
+in [docs/rules.md](docs/rules.md#rewrite-mode-off-by-default-and-here-is-the-catch).
 
 ## Measured results
 
@@ -227,12 +252,12 @@ Nothing is extrapolated.
 | Browser agent, Claude cost per run | **0.0008 USD** with Jev against **0.1868 USD** with Sonnet deciding (goal 1) | same sweep. Cost is the CLI's own `total_cost_usd`, never tokens multiplied by a price |
 | A/B bench, guard against no guard | **zero denies** over 30 sessions | `bench/results/20260919-120344.md`, 2026-09-19, enforce mode, five tasks |
 
-**On that last row, honestly: the guard is a backstop, not a tax.** Thirty
-sessions of ordinary agent work produced nothing worth blocking, because agents
-already pick the right tool almost every time. What the bench establishes is
-that the guard is cheap and stays out of the way, not that it has saved
-anything yet. That result is why the guard now skips the Jev call entirely when
-the code-computed facts make a deny unreachable.
+**Read that last row as a backstop, not a tax.** Thirty sessions of ordinary
+agent work produced nothing worth blocking, because agents already pick the
+right tool almost every time. The bench shows the guard is cheap and stays out
+of the way. It does not show that the guard has saved anything yet, and that is
+why the guard now skips the Jev call when the code-computed facts make a deny
+unreachable.
 
 Full tables, methods and the known limits: **[docs/measurements.md](docs/measurements.md)**.
 
@@ -252,11 +277,11 @@ Full tables, methods and the known limits: **[docs/measurements.md](docs/measure
   0.8 and a margin of at least 0.4 over the runner-up. Rewrite mode needs 0.9
   and 0.5.
 - **What leaves the machine.** Redacted summaries of the ambiguous fraction of
-  tool calls, and nothing else, unless you opt into a component that says
-  otherwise in its row above. Never a raw tool result: every string passes
-  through `airlock/redact.py` first, and truncation happens after redaction so
-  a secret straddling the boundary is not half-leaked. Compaction is the one
-  large exposure, which is why it is never installed for you.
+  tool calls, and nothing else, unless you opt into a component whose row above
+  says otherwise. Never a raw tool result: every string passes through
+  `airlock/redact.py` first, and truncation happens after redaction so a secret
+  straddling the boundary is not half-leaked. Compaction is the one large
+  exposure, which is why it is never installed for you.
 - **This is not a security control.** It is a cost and hygiene guard that fails
   open by design. A control that depends on an agent choosing to obey it is not
   a control. If something must not happen, restrict it at the platform.
@@ -278,7 +303,7 @@ Full tables, methods and the known limits: **[docs/measurements.md](docs/measure
 |---|---|
 | **Works** | The `PreToolUse` guard in shadow and enforce mode, through the Bash tool and the PowerShell tool alike. The whole rules table, with no per-platform exceptions: R6 (GUI/browser) is `off` by default on every platform, Windows included, and `rules.json` turns it on where the machine really is headless. The key file at `%APPDATA%\jev-kit\env`, with `%APPDATA%\airlock\env` still honoured. The file-search rule, steering at `es.exe` with path-scoped, regex and case flags. The health check. `install/windows_install.py`, `windows_doctor.py`, `windows_uninstall.py` and their `.cmd`/`.ps1` launchers. |
 | **Out of scope, by design** | **The warm daemon.** It listens on a Unix domain socket, which Windows does not have; the client falls back cleanly to a direct HTTPS call per judgement, about **0.9 s** cold against about **0.3 s** warm on Linux. A named pipe is the right analogue but needs a non-stdlib dependency, and a localhost TCP listener is precisely the design this project refuses. |
-| **Out of scope, not ported** | `belay`, `compaction`, `browser`, `review`, `tuning`. Also `filesearch/`: on Linux airlock *builds* the index, and on Windows it deliberately does not. Everything is third-party software with its own installer and service, so airlock only *detects* it and steers at it, and never installs it. |
+| **Out of scope, not ported** | `belay`, `compaction`, `browser`, `review`, `tuning`. Also `filesearch/`: on Linux airlock *builds* the index, and on Windows it does not. Everything is third-party software with its own installer and service, so airlock only *detects* it and steers at it, and never installs it. |
 | **Tested how** | The unit suite on **Windows Python 3.11.9, Windows 11**. Real `PreToolUse` events piped at the installed hook: a deny through the Bash tool and the same deny through the PowerShell tool (R1, an attempt to print the key file), an allow, the Everything steer classified, a malformed payload and the kill switch. The installer, doctor and uninstaller run for real into a scratch directory. `es.exe` 1.1.0.38 detected and queried. Exact commands and output: [docs/native-windows.md](docs/native-windows.md). |
 | **Verified on Windows** | **The Jev-judged path, 2026-09-19**, Windows Python **3.11.9** on Windows 11, with a real key in a throwaway profile that was destroyed afterwards: judged search denies through the Bash tool and the PowerShell tool, a judged allow, the tier guard blocking two rungs over and warning one rung over, the tier rewrite, the doctor and the health check's direct HTTPS probe. Measured judged latency over 32 calls: median **1030 ms**, max **1359 ms** (no warm daemon there). |
 | **The enforce budget on Windows** | **2000 ms, decided and applied** (POSIX, WSL and macOS stay at 1500 ms). One of those 32 calls died on a TLS handshake timeout and fail-opened (3.1%) against the then-1500 ms budget; Windows has no warm daemon, so every judgement is a fresh HTTPS connection. 2000 ms clears the measured 1359 ms max with room to spare. Details: [native-windows.md](docs/native-windows.md). |
@@ -286,114 +311,141 @@ Full tables, methods and the known limits: **[docs/measurements.md](docs/measure
 
 ## FAQ
 
-**Does it slow my agent down?**
-A call no rule covers adds one Python process: 33.2 ms median, and about 23 ms
-of that is interpreter start-up you would pay for any hook at all. A call that
-does reach Jev adds about 0.3 s through the warm daemon. Enforce mode applies a
-hard budget on top, and past it the call runs anyway.
+<details>
+<summary><b>What does it cost?</b></summary>
 
-**What does it cost?**
-A Jev judgement is a fraction of a cent, and most tool calls never make one:
-the code pre-filter exits first, and the guard skips the call entirely when the
-code-computed facts make a deny unreachable. The browser component's measured
-decision loop came to 0.0008 USD of Claude spend per run against 0.1868 USD
-with Sonnet deciding. Your own bill depends on your traffic, which is why the
-tuning loop reads your shadow log rather than a number we picked.
+A Jev judgement costs a fraction of a cent, and most tool calls never make one.
+The browser agent's decision loop came to 0.0008 USD of Claude spend a run,
+against 0.1868 USD with Sonnet deciding. Your own bill follows your traffic,
+which is why the tuning loop reads your shadow log instead of quoting a figure.
 
-**I run this on a headless server.**
-Then you want **R6** (`R6-gui-or-browser`), which blocks `xdg-open`, `wslview`,
-`explorer.exe` and the browser binaries and tells the agent to print the URL or
-use Playwright headless instead. It is **off by default on every platform**,
-because most people run Claude Code on a machine that has a desktop, where
-opening a browser is an ordinary thing to do. Turn it on with one entry in
-`~/.config/airlock/rules.json`:
+</details>
 
-```json
-{"R6-gui-or-browser": "deny"}
-```
+<details>
+<summary><b>Does it slow my agent down?</b></summary>
 
-`install/install.sh` writes that entry for you when it detects a headless
-machine (Linux, no `$DISPLAY`, no `$WAYLAND_DISPLAY`, not WSL, and no
-graphical or seated session according to `loginctl`). The detection is
-deliberately conservative -- anything uncertain is treated as a desktop -- so
-`--headless` forces it on and `--no-headless` forces it off. On an existing
-install, one command does it, merging into whatever else is already in the
-file and backing that file up first:
+A call no rule covers adds 33.2 ms, and about 23 ms of that is interpreter
+start-up you would pay for any hook at all. A call that does reach Jev adds
+about 0.3 s through the warm daemon. Enforce mode caps that with a hard budget,
+past which the call runs anyway. Every figure:
+[docs/measurements.md](docs/measurements.md#hook-latency).
+
+</details>
+
+<details>
+<summary><b>Can it block something wrongly, and how do I get past it?</b></summary>
+
+Yes it can, and there are four ways out, in rising order of permanence:
+
+- `[airlock-ok: <reason>]` in the call's description, with the reason logged.
+- Downgrade or disable that one rule in `~/.config/airlock/rules.json`.
+- `export AIRLOCK_DISABLE=1` for the shell.
+- `echo shadow > ~/.config/airlock/mode` to stop blocking anything.
+
+Loop protection also means the same call is never denied twice in ten minutes,
+so a retry gets through on its own.
+
+</details>
+
+<details>
+<summary><b>Is my code sent anywhere?</b></summary>
+
+No. TypeSafe gets a redacted summary of the ambiguous fraction of tool calls:
+the command line, or the dispatch description. Never a tool result, never file
+contents, never a diff. Every string passes through `airlock/redact.py` first.
+The two exceptions are opt-in and named in the table above: compaction sends
+raw tool inputs and results, and review sends diffs.
+
+</details>
+
+<details>
+<summary><b>What if TypeSafe is down?</b></summary>
+
+Everything fails open. No judgement means the tool call is allowed. The
+code-only rules keep working with no network at all: R5 sudo, R6 GUI, R9 commit
+secret, and the code halves of R1, R3, R4 and R7.
+
+</details>
+
+<details>
+<summary><b>Does it work on Windows?</b></summary>
+
+Yes, on native Windows without WSL, and the core was run on a real Windows 11
+machine on 2026-09-19. The installer is Python rather than bash, there is no
+warm daemon, and file search steers at `es.exe` rather than `plocate`. Belay,
+compaction, browser, review and tuning are not ported.
+
+Start at **[docs/INSTALL-WINDOWS.md](docs/INSTALL-WINDOWS.md)**; what is done
+and what remains is in [docs/native-windows.md](docs/native-windows.md).
+
+</details>
+
+<details>
+<summary><b>I run this on a headless server.</b></summary>
+
+Turn on **R6** (`R6-gui-or-browser`), which blocks `xdg-open`, `wslview`,
+`explorer.exe` and the browser binaries, and which `install/install.sh` sets for
+you when it detects a headless machine.
 
 ```
 (cd ~/.local/share/airlock/current && python3 -m airlock.headless merge ~/.config/airlock/rules.json)
 ```
 
-An R6 value you have already set is never overwritten, by the installer or by
-that command. `install/doctor.sh` reports which way R6 is set on this machine
-and why.
+Why R6 ships off, what counts as headless, and the `--headless` and
+`--no-headless` flags: **[docs/install.md](docs/install.md#headless-machines-and-rule-r6)**.
 
-**How do I know the guard is still working?**
-It tells you. The guard fails open by design, so a dead guard would otherwise
-be silent -- no key, TypeSafe unreachable, the health timer stopped, all look
-exactly like a quiet machine. The **session check** is a `SessionStart` hook,
-installed by default, that reads local state at the start of every session and
-says one short thing when the guard is not judging: the mode is `off` or the
-kill switch is on, no key resolves, the last health row is bad (naming the
-check that failed), the health check has gone stale on a machine that has been
-up long enough for that to mean something, or tuning could not run. It prints
-**nothing at all** when everything is fine, never calls the network, has a hard
-300 ms budget, fails open like the guard, and repeats the same warning at most
-once every six hours -- immediately, though, if the problem changes.
+</details>
 
-On a **server** you want the other half instead: the five-minute health timer
-plus a push monitor that alerts when the pushes stop. On a **workstation**
-silence means the machine is off, so a silence alert is useless; if you also
-want a phone alert there, set `AIRLOCK_KUMA_PUSH_MODE=explicit` and give that
-monitor a heartbeat interval measured in days. Explicit mode cannot report a
-health timer that has itself died -- the session check is what covers that.
-See [monitoring/README.md](monitoring/README.md).
+<details>
+<summary><b>How do I know the guard is still working?</b></summary>
 
-To see the whole picture at once: `install/doctor.sh`.
+It tells you. The **session check** is a `SessionStart` hook, installed by
+default. It reads local state and says one short thing when the guard is not
+judging: the mode is off, no key resolves, the last health row is bad or stale,
+or tuning could not run. It prints nothing at all when everything is fine, and
+it never calls the network.
 
-**What if TypeSafe is down?**
-Everything fails open. No judgement means the tool call is allowed, and the
-code-only rules (R5 sudo, R6 GUI, R9 commit secret, and the code halves of
-R1, R3, R4, R7) keep working with no network at all.
+On a server, use the five-minute health timer and a push monitor that alerts
+when the pushes stop. On a workstation, silence means the machine is off, so set
+`AIRLOCK_KUMA_PUSH_MODE=explicit` instead. See
+[monitoring/README.md](monitoring/README.md), or run `install/doctor.sh` to see
+the whole picture at once.
 
-**Can it block something wrongly, and how do I get past it?**
-Yes, and there are four ways out, in rising order of permanence: put
-`[airlock-ok: <reason>]` in the call's description and it goes through with the
-reason logged; downgrade or disable that one rule in
-`~/.config/airlock/rules.json`; `export AIRLOCK_DISABLE=1` for the shell; or
-`echo shadow > ~/.config/airlock/mode` to stop blocking anything. Loop
-protection also means the same call is never denied twice in ten minutes, so a
-retry gets through on its own.
+</details>
 
-**Does it work without systemd?**
-Yes, degraded, and the installer detects it and says so. You lose the warm
-daemon (a judgement costs about 0.9 s instead of about 0.3 s), the health-check
-and tuning timers, and the hourly index refresh. The guard is one Python
-process per tool call and needs nothing scheduled.
+<details>
+<summary><b>Why is the guard called "Airlock", and is it a sandbox?</b></summary>
 
-**Is my code sent anywhere?**
-No. What goes to TypeSafe is a redacted summary of the ambiguous fraction of
-tool calls: the command line or the dispatch description, never a tool result,
-never file contents, never a diff. Every string passes through
-`airlock/redact.py` first. The exceptions are opt-in and named in the table
-above: compaction sends raw tool inputs and results and is never installed for
-you, and review sends diffs to whatever gate you configure.
+It is not a sandbox. Other projects of that name isolate agents or untrusted
+code in a VM or a container. This is a policy hook inside your own session that
+judges individual tool calls and at most returns a deny to Claude Code. The
+name covers the guard component alone, and the kit around it is jev-kit.
 
-**Why is the guard called "Airlock", and is it a sandbox?**
-It is not a sandbox. Several projects called "airlock" isolate agents or
-untrusted code in a VM or container; this does none of that. It is a policy
-hook inside your own session that judges individual tool calls and at most
-returns a deny to Claude Code. The name applies to the guard component only --
-its Python package, its systemd units, its config directory -- and the kit
-around it is jev-kit. It was `jev-guard`, then `plumbline`; the first rename
-was forced because [leepokai/jev-guard](https://github.com/leepokai/jev-guard)
-already uses that name. Both older names still work: see
+It was `jev-guard`, then `plumbline`, and both older names still work. The
+forced rename and the cutover:
+[docs/components.md](docs/components.md#why-the-guard-is-called-airlock) and
 [docs/MIGRATING-TO-AIRLOCK.md](docs/MIGRATING-TO-AIRLOCK.md).
 
-**Can I use just one piece of it?**
+</details>
+
+<details>
+<summary><b>Does it work without systemd?</b></summary>
+
+Yes, degraded, and the installer detects it and says so. You lose the warm
+daemon (0.9 s a judgement rather than 0.3 s), the health-check and tuning
+timers, and the hourly index refresh. The guard is one Python process per tool
+call and needs nothing scheduled.
+
+</details>
+
+<details>
+<summary><b>Can I use just one piece of it?</b></summary>
+
 Yes. Every component except the guard is optional and separately installable by
-flag, and several (browser, review, shim, docclass, logtriage) do not need the
-guard at all.
+flag. Browser, review, shim, docclass and logtriage do not need the guard at
+all.
+
+</details>
 
 ## Roadmap
 
@@ -411,6 +463,11 @@ Issues and pull requests are welcome.
 
 - `python3 -m unittest discover -s tests` must pass. It is fully mocked, so it
   needs no key and makes no network calls.
+- `python3 tools/check_docs.py` must pass: it resolves every relative link in
+  the README and `docs/`, and checks every Mermaid block.
+- `python3 tools/check_prose.py README.md` must pass. It flags machine-writing
+  phrases, em dashes, long sentences, flat rhythm and walls of text; add
+  `--fix-hints` for a plainer form where a mechanical one exists.
 - A rule change needs labelled cases in `eval/`. **No real data in an eval
   case**: no real paths, hostnames, usernames, tokens or customer names. Write
   the shape, not the incident.

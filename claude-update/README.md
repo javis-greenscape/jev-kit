@@ -12,7 +12,7 @@ machine looks idle.
   last `CLAUDE_UPDATE_IDLE_MIN` minutes (default 30).
 
 An interactive session that is open but idle for longer than that does not
-block the update -- only genuine recent activity does.
+block the update. Only genuine recent activity does.
 
 ## What gets installed
 
@@ -44,8 +44,8 @@ The script assumes an npm-global install and finds its prefix in this order:
 3. `npm config get prefix`.
 
 If the resolved `claude` binary is not under that prefix at all, the script
-treats it as a **native (non-npm) install** -- the standalone installer, or a
-platform package -- and does nothing. That is not a fallback path worth
+treats it as a **native (non-npm) install**, meaning the standalone installer
+or a platform package, and does nothing. That is not a fallback path worth
 building here: a native install updates itself a different way, and this
 script would only get in the way by trying. It logs the skip and exits 0.
 

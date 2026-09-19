@@ -1,7 +1,7 @@
 # Installing jev-kit on somebody else's machine
 
-This guide is for installing on a Windows PC that belongs to somebody else --
-a colleague's machine, not one you administer day to day. Every judgement in
+This guide is for installing on a Windows PC that belongs to somebody else: a
+colleague's machine, not one you administer day to day. Every judgement in
 it follows from that: it is their machine, they did not ask for this, and a
 wrong deny on their session is the expensive failure.
 
@@ -18,11 +18,11 @@ this document applies.
 - **WSL2 is present** (`wsl -l -v` from PowerShell shows a distribution, or
   they already run a Linux terminal on this machine): follow
   [INSTALL-WSL.md](INSTALL-WSL.md) instead of this document. It
-  covers the same ground -- systemd, cloning, the key file, wiring, shadow
-  mode -- for exactly this setup, and there is no reason to duplicate it.
+  covers the same ground for exactly this setup (systemd, cloning, the key
+  file, wiring, shadow mode), so there is no reason to duplicate it.
 - **Claude Code runs natively on Windows, with no WSL**: keep reading. This
-  is the case this document actually covers, and it is honestly worse
-  supported.
+  is the case this document actually covers, and it is the worse supported of
+  the two.
 
 ## Native Windows: what works and what does not
 
@@ -48,14 +48,14 @@ Windows:
 | `belay/`'s wrapper | `belay/install.sh` writes a bash wrapper to `$HOME/bin` and clones with `git`. It needs a shell that can run bash (Git Bash, if installed); on WSL it is unremarkable. |
 | `compaction/` | The plugin itself is Claude Code's own function-hook machinery and is not Unix-specific, but `compaction/install.sh` is a bash script. Same caveat as belay. |
 
-So the realistic scope on native Windows is: the hook itself, in shadow
-mode, calling out over HTTPS with no warm daemon (the same fallback path
-WSL-without-systemd uses, just permanently rather than until systemd is
-turned on). That is a legitimate, useful subset -- it is the part that
-actually reads tool calls and can eventually deny something -- but it is not
-the full install this repository otherwise describes, and it has not been
-run on Windows to confirm even that much works. Test it yourself before
-relying on it, and say plainly to the owner that it is unproven.
+So the realistic scope on native Windows is the hook itself, in shadow mode,
+calling out over HTTPS with no warm daemon. That is the same fallback path
+WSL-without-systemd uses, permanently rather than until systemd is turned on.
+
+It is a useful subset, and it is the part that reads tool calls and can
+eventually deny something. It is not the full install this repository otherwise
+describes, and it has not been run on Windows to confirm even that much works.
+Test it yourself before relying on it, and tell the owner it is unproven.
 
 ## The rest of the install (both routes, adjusted)
 
@@ -70,9 +70,9 @@ has no OS-specific content.
 
 Same rule everywhere: **type the key into the file with an editor, never
 paste it into a Claude session.** On native Windows there is no
-`~/.config/jev-kit/env` convention to lean on automatically -- pick a
-path outside any repository, mode-restricted as far as Windows permissions
-allow, and set `AIRLOCK_KEY_FILE` in `install/config.env` to point at it.
+`~/.config/jev-kit/env` convention to lean on. Pick a path outside any
+repository, mode-restricted as far as Windows permissions allow, and set
+`AIRLOCK_KEY_FILE` in `install/config.env` to point at it.
 On the WSL route, follow INSTALL-WSL.md's key-file step exactly.
 
 ### 3. Install
@@ -89,15 +89,17 @@ updates when no headless run is alive and no session transcript has changed
 in the last 30 minutes, so it never interrupts the owner mid-session. It sends
 nothing anywhere; it is `npm install -g` on a timer with an idle check.
 
-`--belay` is a Stop hook, and it is worth explaining to the owner in plain words
-rather than by name. When an agent announces it has finished, belay checks
-whether that turn actually changed files and whether any check has passed
-since. If files changed and no passing check stands behind the claim, it asks
-Jev a few yes/no questions about what the transcript actually shows, and if
-the claim looks unsupported it sends the agent back to verify instead of
-letting the turn end. At most three times per session, and it fails open --
-no key, a slow answer or any error and the turn simply ends as normal. What
-leaves the PC is small and redacted: the task text, the final message and the
+`--belay` is a Stop hook, and it is worth explaining to the owner in plain
+words rather than by name. When an agent announces it has finished, belay
+checks whether that turn changed files and whether any check has passed since.
+
+If files changed and no passing check stands behind the claim, belay asks Jev
+a few yes/no questions about what the transcript shows. Where the claim looks
+unsupported, it sends the agent back to verify rather than letting the turn
+end. It does that at most three times per session, and it fails open: no key,
+a slow answer or any error and the turn ends as normal.
+
+What leaves the PC is small and redacted: the task text, the final message and the
 check command lines, through a 13-rule secret redactor, capped at a few
 thousand characters. No diffs, no file contents.
 
@@ -109,11 +111,11 @@ install/install.sh --guard --no-systemd --claude-update --belay
 ```
 
 then confirm with `install/doctor.sh` what actually came up versus what was
-skipped -- it reports each optional piece as "skipped", not as a failure,
+skipped. It reports each optional piece as "skipped" rather than as a failure
 when it is genuinely not installed. On native Windows the claude-update timer
 is one of those skips: the script installs, nothing schedules it.
 
-### 4. The compaction plugin -- ask the owner first, then install it
+### 4. The compaction plugin: ask the owner first, then install it
 
 Recommended, and a separate step on purpose: `install/install.sh` never
 installs it for you, even with `--compaction`. It runs through the
@@ -124,17 +126,20 @@ less compaction/README.md
 compaction/install.sh
 ```
 
-**What it sends off this PC, in one sentence:** up to roughly 25,000 tokens
-of raw tool inputs and tool-result text per request -- file contents, command
-output, fetched pages -- truncated only for size, with no redaction pass
-anywhere in the plugin's source.
+**What it sends off this PC:** up to roughly 25,000 tokens of raw tool inputs
+and tool-result text per request. File contents, command output, fetched pages,
+truncated only for size, with no redaction pass anywhere in the plugin's
+source.
 
 **The owner should agree to that before it is run**, in those words, not as a
-line item in a list of components. It is their machine and a much larger
-exposure than anything else installed here. What they get for it is that long sessions
-stay inside their context window instead of degrading -- a measured manual
-compaction elsewhere took a session from 49,288 to 23,111 tokens
-in 906 ms. It needs Claude Code 2.1.274 or later with function hooks enabled.
+line item in a list of components. It is their machine, and this is a much
+larger exposure than anything else installed here.
+
+What they get for it is that long sessions stay inside their context window
+instead of degrading. A measured manual compaction elsewhere took a session
+from 49,288 to 23,111 tokens in 906 ms. It needs Claude Code 2.1.274 or later
+with function hooks enabled.
+
 If they would rather not, skip this step; everything else above works without
 it, and nothing else in the recommended set sends anything unredacted.
 
@@ -160,15 +165,15 @@ why, consider:
 echo enforce > ~/.config/airlock/mode
 ```
 
-### 6. The kill switch -- tell the owner about this one specifically
+### 6. The kill switch, which the owner should hear about specifically
 
 ```bash
 touch ~/.config/airlock/disabled
 ```
 
 makes the hook a complete no-op until the file is removed, no matter what
-mode is set. They should know this exists and where it is, independent of
-whether they ever plan to use it -- it is their machine.
+mode is set. They should know this exists and where it is, whether or not they
+ever plan to use it. It is their machine.
 
 ### 7. Doctor
 
@@ -180,14 +185,14 @@ reports each piece as pass, fail, or skip; a skip for something you know is
 not installed (the daemon on native Windows, filesearch anywhere on native
 Windows) is expected, not a problem to chase.
 
-## The owner's data position, plainly
+## What the owner is agreeing to
 
 Whatever gets installed here changes what leaves this PC on every guarded
 Claude Code session, so it is worth saying exactly what, without hedging:
 
 - **The guard itself** sends TypeSafe redacted summaries of individual tool
-  calls -- the small, genuinely ambiguous fraction the code-only pre-filter
-  cannot decide alone -- never a raw tool result, and every string is passed
+  calls: the small, genuinely ambiguous fraction the code-only pre-filter
+  cannot decide alone. Never a raw tool result, and every string is passed
   through `airlock/redact.py` first, which replaces token-shaped strings
   with `[REDACTED]` before anything leaves. This is on whenever the guard is
   installed and not disabled; it is the core of what this repository is.
@@ -200,10 +205,10 @@ Claude Code session, so it is worth saying exactly what, without hedging:
   check and `npm install -g`.
 - **`compaction/` (fast-jev-compaction) is recommended but sends far more,
   and is never installed for you.** It sends up to about 25,000 tokens of raw
-  tool inputs and tool-result text per request, **unredacted** -- there is no
-  redaction pass in that plugin at all. Step 4 above is deliberately a
-  separate conversation with the owner about what that means for whatever
-  they have open in a session at the time. See `compaction/README.md` for the full
+  tool inputs and tool-result text per request, **unredacted**. There is no
+  redaction pass in that plugin at all. Step 4 above is kept as a separate
+  conversation with the owner about what that means for whatever they have
+  open in a session at the time. See `compaction/README.md` for the full
   picture.
 
 ## Troubleshooting

@@ -3,9 +3,10 @@
 `cases.jsonl` is the labelled corpus: one line per case, with the payload a
 PreToolUse hook would receive and the expected answer.
 
-A `tier_guard` case is labelled with the LIVE OUTCOME it should produce --
-`expect_block`, `expect_warn`, `expect_silent`, exactly one of them true -- plus
-the `task_kind` the ladder gives for its own chosen tier and task. A case whose
+A `tier_guard` case is labelled with the LIVE OUTCOME it should produce:
+`expect_block`, `expect_warn` or `expect_silent`, exactly one of them true. It
+also carries the `task_kind` the ladder gives for its own chosen tier and
+task. A case whose
 text does not determine the adequate tier carries `ambiguous: true`, no
 `task_kind`, and is excluded from both accuracies. The other guards still carry
 `would_deny`.
@@ -20,10 +21,12 @@ python3 -m airlock.eval --json
 ## Cases the tuning loop adds (`source: "shadow"`)
 
 A shadow case is only created when the judge found the **label** wrong. Its
-`expected` label is the judge's corrected option; its deny expectation is
-re-derived from the live policy given that corrected label, and is left out
-with `deny_expectation: "unverified"` when the row does not carry what the
-policy needs (a tier row with no `chosen_type`, or a `code_structure_search`
+`expected` label is the judge's corrected option.
+
+The deny expectation is re-derived from the live policy given that corrected
+label. It is left out with `deny_expectation: "unverified"` when the row does
+not carry what the policy needs (a tier row with no `chosen_type`, or a
+`code_structure_search`
 row, because whether the search root had a graphify graph is not recorded).
 
 It is never copied off the shadow row. Copying `would_deny` off a row the
@@ -40,14 +43,16 @@ so nothing here is tied to a particular machine.
 
 ## R10-general-risk
 
-The catch-all rule is a fallback: it is consulted only when no other rule
+The catch-all rule is a fallback. It is consulted only when no other rule
 matched at all, so its cases have to be commands nothing else covers. 21
-labelled cases, scored 95.2% (20/21) on 2026-09-19, with zero false denies --
-structurally impossible, since the rule can only warn. Seven of the cases are
-there to prove the code pre-filter stays SILENT (ordinary work, a read-only
-query, a download rather than an upload, a write into temp, user-level
-`systemctl --user`, and two read-only docker commands); those cost no Jev call
-at all and a regression that makes them fire shows up as an accuracy drop.
+labelled cases, scored 95.2% (20/21) on 2026-09-19, with zero false denies. A
+false deny is structurally impossible, since the rule can only warn.
+
+Seven of the cases are there to prove the code pre-filter stays SILENT:
+ordinary work, a read-only query, a download rather than an upload, a write
+into temp, user-level `systemctl --user`, and two read-only docker commands.
+Those cost no Jev call at all, and a regression that makes them fire shows up
+as an accuracy drop.
 
 ### The quieting pass, 2026-09-19
 
@@ -94,8 +99,8 @@ had been written to the two-rung block rule. Two whole classes of label artefact
 followed:
 
 * every one-rung overshoot, and every `fable` dispatch without a stated prior
-  failure, was labelled "no deny" but predicted `would_deny: true` -- **16 false
-  denies**, 14 of them in the `subagent_type` ablation cases, which carried no
+  failure, was labelled "no deny" but predicted `would_deny: true`. That is
+  **16 false denies**, 14 of them in the `subagent_type` ablation cases, which carried no
   `would_deny` label at all and therefore defaulted to false;
 * four cases were labelled `would_deny: true` while being **under-tiered**
   (`tier-scoped-1`, `tier-judgement-1`, `tier-hard-3`, `tier-scoped-4`, rung gaps
@@ -108,11 +113,12 @@ Neither number said anything about Jev.
 ### The corrected scoring
 
 Each case now carries its own label per outcome, derived from its stated chosen
-tier and task by the ladder -- never from what Jev answered. `airlock/eval.py`
-predicts the outcome with `policy.tier_surface`, the hook's own function, over an
-entry built by `policy.tier_entry_fields`, the same builder
-`guards.compute_tier_entry` uses, with rewrite mode forced off because it is off
-by default and with the cheapest-rung shortcut applied because
+tier and task by the ladder, never from what Jev answered.
+
+`airlock/eval.py` predicts the outcome with `policy.tier_surface`, the hook's
+own function, over an entry built by `policy.tier_entry_fields`, the same
+builder `guards.compute_tier_entry` uses. Rewrite mode is forced off because it
+is off by default, and the cheapest-rung shortcut is applied because
 `policy.deny_possible_agent` means such a call is never judged at all.
 
 Real Jev calls, 2026-09-19, on a 4 vCPU cloud VM (Ubuntu, 8 GB RAM,
@@ -137,7 +143,7 @@ ambiguous case is in the confusion table but not in the accuracy.
 
 ### The one case where Jev is actually wrong
 
-**`tier-mech-4`** -- `workerS` dispatched at *"Fix the off-by-one in
+**`tier-mech-4`**, a `workerS` dispatched at *"Fix the off-by-one in
 `_percentile()`: `hi` can exceed `len(values)-1`, cap it."* The cause and the fix
 are both stated and it is one line, so by the ladder that is a
 `mechanical_edit`, adequate at `scout`, and a `workerS` dispatch is one rung over
@@ -147,8 +153,9 @@ over the 0.8/0.4 deny bar either way), which makes `workerS` the adequate rung,
 so the guard says nothing.
 
 That is the whole tuning target list: **one case, and it is a `task_kind`
-boundary, not a policy bug.** The direction is safe (a missed warn, not a false
-block) but it is the exact boundary that matters most in daily use, because
+boundary rather than a policy bug.** The direction is safe, a missed warn and
+not a false block. But it is the boundary that matters most in daily use,
+because
 "here is the bug and here is the fix" is the commonest shape of small task there
 is. Worth more labelled cases either side of it before touching the question
 wording.
@@ -157,21 +164,25 @@ wording.
 
 *"Two hook processes occasionally interleave a partial line in the shadow log
 despite the flock. Find the race and fix it; nothing tried so far has reproduced
-it reliably."* Failed attempts to REPRODUCE are not the failed attempts at a FIX
-that the ladder asks for before escalating, so the text supports both
-`judgement` and `hard_problem` and does not determine the adequate tier. The
-outcome is `silent` under either reading (a `workerS` dispatch is under-tiered
-both ways), so it is labelled `ambiguous: true`, scored on neither accuracy, and
-left in the corpus because the outcome is still worth asserting. Jev answers
-`judgement`.
+it reliably."*
+
+Failed attempts to REPRODUCE are not the failed attempts at a FIX that the
+ladder asks for before escalating. So the text supports both `judgement` and
+`hard_problem` and does not determine the adequate tier.
+
+The outcome is `silent` under either reading, because a `workerS` dispatch is
+under-tiered both ways. It is labelled `ambiguous: true`, scored on neither
+accuracy, and left in the corpus because the outcome is still worth asserting.
+Jev answers `judgement`.
 
 ### The 8 one-rung cases
 
 The 8 cases tagged `source: "one-rung-surfacing"` sit on the boundary the warn
-and the rewrite act on: one rung over at each of four rungs (`scout` for a
-lookup, `workerS` for a rename, `workerO` for a specified feature, an Opus-level
-agent for a design decision), a three-rung overshoot that must still block,
-`fable` dispatched WITH a stated prior failure, and two under-tiered dispatches
+and the rewrite act on. One rung over at each of four rungs: `scout` for a
+lookup, `workerS` for a rename, `workerO` for a specified feature, an
+Opus-level agent for a design decision. Then a three-rung overshoot that must
+still block, `fable` dispatched WITH a stated prior failure, and two
+under-tiered dispatches
 that must never be "corrected" upward. All 8 now score correctly.
 
 ### Guard rail
@@ -189,11 +200,13 @@ the first place.
 `subagent_type` changes?
 
 jev-behavior-study's first finding ([`docs/CREDITS.md`](../docs/CREDITS.md)) is
-that a surface cue in the state can dominate the judgement -- holding everything
+that a surface cue in the state can dominate the judgement. Holding everything
 else fixed and calling a journey "a five-minute walk" took the model from 20/20
-correct to 0/20. The tier guard puts `subagent_type` into the state alongside
-the prompt, which is the same shape of risk, and the case it would break is the
-one the guard exists for: a hard task sent to a cheap agent.
+correct to 0/20.
+
+The tier guard puts `subagent_type` into the state alongside the prompt, which
+is the same shape of risk. The case it would break is the one the guard exists
+for: a hard task sent to a cheap agent.
 
 Five groups (one per `task_kind`), each holding one description and one prompt
 EXACTLY fixed while varying `subagent_type` across the whole ladder
@@ -215,11 +228,11 @@ knows the chosen type in code and only needs it after `task_kind` is decided.
 554 ms. The remedy arm was therefore not run, and **no change was made: the
 state keeps `subagent_type`.**
 
-Read honestly: this is 30 cases on five hand-written prompts, not a general
-result, and the study's own finding (7) is that confidence is not accuracy --
-here accuracy happened to agree with it, which is the only reason the
-confidence figure is worth quoting at all. Re-run it whenever the tier
-question's wording changes.
+Read it as 30 cases on five hand-written prompts, not a general result. The
+study's own finding (7) is that confidence is not accuracy. Here accuracy
+happened to agree with it, which is the only reason the confidence figure is
+worth quoting at all. Re-run it whenever the tier question's wording
+changes.
 
 ## The threshold locks
 

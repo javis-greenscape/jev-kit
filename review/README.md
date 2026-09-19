@@ -17,7 +17,7 @@ to the expensive reviewer as a hint.
 
 This matters and is easy to forget. `jev-review` screens source files it can
 parse as JS/TS. Point it at a Python, shell or mixed repository and it will
-report little or nothing -- which reads exactly like "nothing wrong". The
+report little or nothing, which reads exactly like "nothing wrong". The
 wrapper's note says "JS/TS only" on every run for that reason. Most of
 airlock's own code is Python, so this component earns its keep on the
 TypeScript repositories on the box, not on this one.
@@ -63,10 +63,9 @@ Set the gate once per machine with `AIRLOCK_REVIEW_GATE` instead of passing
 
 ## It fails open
 
-Every failure path -- no clone, no Node 24, no key, API down, a timeout
-(`AIRLOCK_REVIEW_TIMEOUT_S`, default 300 s), no diff, unrecognised JSON --
-produces a note saying the prefilter was unavailable and **still runs the
-gate**. A prefilter that can block a review is worse than no prefilter. Failures
+Every failure path produces a note saying the prefilter was unavailable, and
+**still runs the gate**. No clone, no Node 24, no key, API down, a timeout
+under `AIRLOCK_REVIEW_TIMEOUT_S` (default 300 s), no diff, unrecognised JSON. A prefilter that can block a review is worse than no prefilter. Failures
 are reported on stderr so they are visible rather than silent.
 
 The one thing it will not do is claim a clean bill of health: when there are no

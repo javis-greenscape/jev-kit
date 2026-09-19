@@ -25,11 +25,13 @@ imported lazily for exactly that reason.
 
 Roughly 0.3 s through the warm daemon, against roughly 0.9 s for a fresh DNS +
 TCP + TLS handshake per call. Both are round figures for a single call on an
-idle daemon. The one figure measured end to end here is the tier eval's:
-**mean 572 ms per judgement** over 58 real Jev calls at four-way concurrency,
-`python3 -m airlock.eval`, 2026-09-19, on the box described above -- which is
-a throughput number under load, not a single-call latency, and is quoted only
-so there is one figure with a method attached to it.
+idle daemon.
+
+One figure here was measured end to end: the tier eval's **mean 572 ms per
+judgement**, over 58 real Jev calls at four-way concurrency (`python3 -m
+airlock.eval`, 2026-09-19, on the box described above). That is throughput
+under load, not single-call latency. It is quoted because it is the one
+judgement figure with a method attached.
 
 ### On native Windows, with no warm daemon
 
@@ -46,14 +48,15 @@ installed launcher. **32 judged calls** (mixed `R8-tool-choice-guard` and
 | max | 1359 |
 
 **One of the 32 did not complete**: `_ssl.c:989: The handshake operation timed
-out`, which blew the then-1500 ms enforce budget and **fail-opened** -- a
-3.1% fail-open rate in this sample. Windows has no warm daemon, so every
-judgement pays a fresh DNS + TCP + TLS handshake against a budget chosen for
-a Linux box that has one. The owner's decision from these numbers: the
-default enforce budget on native Windows is now **2000 ms**
-(`airlock/enforce.py:WINDOWS_DEFAULT_BUDGET_MS`), clearing the measured
-1359 ms max with room to spare; POSIX, WSL and macOS keep 1500 ms. See
-[native-windows.md](native-windows.md).
+out`. It blew the then-1500 ms enforce budget and **fail-opened**, a 3.1%
+fail-open rate in this sample. Windows has no warm daemon, so every judgement
+pays a fresh DNS + TCP + TLS handshake against a budget chosen for a Linux box
+that has one.
+
+The decision from these numbers: the default enforce budget on native Windows
+is now **2000 ms** (`airlock/enforce.py:WINDOWS_DEFAULT_BUDGET_MS`), clearing
+the measured 1359 ms max with room to spare. POSIX, WSL and macOS keep 1500 ms.
+See [native-windows.md](native-windows.md).
 
 The health check's own direct HTTPS probe on the same machine and the same
 session: `direct_ask {ok: true, latency_ms: 1125}`, `status=healthy`.
@@ -61,44 +64,50 @@ session: `direct_ask {ok: true, latency_ms: 1125}`, `status=healthy`.
 ## Rule accuracy
 
 `python3 -m airlock.eval`, 2026-09-19. Every deny-capable rule scored 100%
-with zero false denies on its labelled cases (R1 16 cases, R2 8, R3 10, R4 11,
-R5 9, R6 9, R7 10, R9 9), so every rule ships at its intended action. **A rule
+with zero false denies on its labelled cases: R1 16 cases, R2 8, R3 10, R4 11,
+R5 9, R6 9, R7 10, R9 9. So every rule ships at its intended action. **A rule
 with any false deny on its eval cases ships as `warn`, not `deny`.**
 
 `R10-general-risk` scored **95.2% on 21 labelled cases** (20/21), with zero
-false denies -- structurally impossible, since it can only warn. It was 88.9%
-(16/18) before the quieting pass that narrowed its pre-filter away from
-user-level `systemctl` and read-only `docker`; `eval/README.md` has both runs.
-The one remaining miss is an over-warn on an `rsync` into a local backup
-directory, which also flaps between runs. Its code pre-filter fired on **2 of
-284 (0.7%)** of the Bash calls in the existing shadow log; it was actually
-*consulted* on 0 of them, because every row in that log is a call some specific
-rule had already claimed. That is the intended shape -- the fallback is the
-residue, not a second opinion.
+false denies. A false deny is structurally impossible there, because the rule
+can only warn.
+
+It scored 88.9% (16/18) before the quieting pass that narrowed its pre-filter
+away from user-level `systemctl` and read-only `docker`. Both runs are in
+`eval/README.md`. The one remaining miss is an over-warn on an `rsync` into a
+local backup directory, and it flaps between runs.
+
+Its code pre-filter fired on **2 of 284 Bash calls in the existing shadow
+log**, 0.7%. It was *consulted* on none of them, because every row in that log
+is a call some specific rule had already claimed. That is the intended shape:
+the fallback is the residue, not a second opinion.
 
 ## Tier-guard accuracy
 
 `python3 -m airlock.eval`, 2026-09-19. 58 labelled Agent dispatches, scored on
-the three outcomes the guard actually has -- block, warn, silent -- against
-labels derived from each case's own chosen tier and task by the ladder:
-**98.2%** overall (56 of 57 scored; one case is labelled `ambiguous` and
-excluded), with **zero false denies and zero missed denies**. Block 18/18,
-silent 29/29, warn 9/10. The single miss is a `task_kind` boundary, not a
-policy bug, and the direction is safe (a missed warn, never a false block).
-`eval/README.md` names it and says why the previous 16-false-deny figure was a
+the guard's three real outcomes: block, warn, silent. The labels come from each
+case's own chosen tier and task, read through the ladder.
+
+**98.2%** overall, 56 of 57 scored, with **zero false denies and zero missed
+denies**. One case is labelled `ambiguous` and excluded. Block 18/18, silent
+29/29, warn 9/10.
+
+The single miss is a `task_kind` boundary rather than a policy bug, and it
+misses in the safe direction: a missed warn, never a false block.
+`eval/README.md` names it, and says why the previous 16-false-deny figure was a
 label artefact rather than anything the model got wrong.
 
 ## A/B bench: the guard against no guard
 
 `bench/results/20260919-120344.md`, 2026-09-19: 30 sessions, enforce mode
-against no guard at all, five tasks. **Zero denies** -- agents already pick the
+against no guard at all, five tasks. **Zero denies**: agents already pick the
 right tool almost every time.
 
-Read that honestly: it is a backstop, not a tax. The measured value of the
-guard so far is that it is cheap and does not get in the way, not that it has
-saved anything. That result is also why `airlock/policy.py` now skips the Jev
-call entirely when the code-computed facts make a deny unreachable, and samples
-5% of the rest so the tuning loop still sees ordinary traffic.
+Read it as a backstop, not a tax. The measured value of the guard so far is
+that it is cheap and stays out of the way, not that it has saved anything. That
+result is also why `airlock/policy.py` now skips the Jev call when the
+code-computed facts make a deny unreachable, and samples 5% of the rest so the
+tuning loop still sees ordinary traffic.
 
 ## The `subagent_type` ablation
 
@@ -120,8 +129,8 @@ See `tuning/README.md`.
 
 From the upstream clone's own `SPIKE-NOTES.md`, measured on this box on
 2026-09-19. Three goals, three arms, three repetitions each: 27 runs, strictly
-sequential, arms interleaved, one shared headless Chromium. **n=3 per cell --
-directional, not statistically significant.**
+sequential, arms interleaved, one shared headless Chromium. **n=3 per cell, so
+read every cell as directional rather than significant.**
 
 | Arm | Success | Decision latency, median |
 |---|---|---|
@@ -132,11 +141,15 @@ directional, not statistically significant.**
 On cost, "Claude cost" is the CLI's own `total_cost_usd`, never tokens
 multiplied by a price. Per-run medians, n=3, from the same sweep:
 
-| Goal | Jev arm | Sonnet-decides arm |
-|---|---|---|
-| G1, find and open an article | 3/3, 4.87 s, **0.0008 USD** | 3/3, 9.32 s, 0.1868 USD |
-| G2, click-only navigation | 2/3, 5.24 s, **no Claude call** | 3/3, 7.70 s, 0.0364 USD |
-| G3, multi-step search and Talk page | 3/3, 8.27 s, **0.0007 USD** | 3/3, 14.68 s, 0.3727 USD |
+| Goal | Jev arm | Sonnet-decides arm | Haiku-decides arm |
+|---|---|---|---|
+| G1, find and open an article | 3/3, 4.87 s, **0.0008 USD** | 3/3, 9.32 s, 0.1868 USD | 1/3, 7.30 s, 0.0344 USD |
+| G2, click-only navigation | 2/3, 5.24 s, **no Claude call** | 3/3, 7.70 s, 0.0364 USD | 3/3, 6.26 s, 0.0773 USD |
+| G3, multi-step search and Talk page | 3/3, 8.27 s, **0.0007 USD** | 3/3, 14.68 s, 0.3727 USD | 1/3, 9.49 s, 0.1245 USD |
+
+On goal 1, the cleanest of the three, Jev's Claude spend is 233 times smaller
+than Sonnet's (0.1868 against 0.0008, rounded down). That ratio is the headline
+figure in the README.
 
 With Jev, the Claude bill for the decision loop is close to zero, because the
 only Claude calls left are the cheap `TYPE_TEXT` fills. Without Jev, every
@@ -150,14 +163,14 @@ finding and the caveats are in `browser/README.md`, with their own dates.
   is cheap and does not get in the way, not that it has saved anything. It is
   worth running in shadow for a week on a new machine and reading the log
   before arming it.
-- **Shadow mode is the default, deliberately.** Nothing here blocks anything
+- **Shadow mode is the default.** Nothing here blocks anything
   until someone writes `enforce` into the mode file.
 - **`review/` is JavaScript and TypeScript only.** Against a Python repository
   it reports very little, which reads exactly like "nothing wrong".
 - **`ask` exists but no rule uses it by default.** It was verified empirically
   against Claude Code 2.1.272: `permissionDecision: "ask"` is honoured, but in a
   headless session it is indistinguishable from a deny (the tool does not run
-  and the call lands in `permission_denials`), so it degrades to an honest deny
+  and the call lands in `permission_denials`), so it degrades to a plain deny
   when nobody is attending. Switch it on per rule in `rules.json` if you want
   it.
 - **The eval corpus is too small to calibrate on.** `jevcal` could not pick a

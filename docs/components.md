@@ -7,11 +7,11 @@ Every component is optional except the guard. Two columns are worth reading
 before you install anything: **Exercised**, which says how much use and testing
 each piece has actually had, and **What leaves the machine**.
 
-`Exercised` means: unit tests, a labelled eval, a measured bench, and real daily
+`Exercised` means unit tests, a labelled eval, a measured bench and real daily
 use on at least one machine. `Experimental` means the logic has unit tests and
-the component has been run by hand, but it has no labelled corpus, no measured
-numbers, and no sustained real use -- keep it, read its README's banner, and do
-not build anything load-bearing on it yet.
+the component has been run by hand. No labelled corpus, no measured number, no
+sustained use. Keep it, read its README's banner, and build nothing
+load-bearing on it yet.
 
 ## Guards
 
@@ -62,8 +62,8 @@ not build anything load-bearing on it yet.
 ## Why the guard is called Airlock
 
 `airlock` is the name of the guard component, its Python package, its systemd
-units and its config directory -- formerly `plumbline`, formerly `jev-guard`.
-The first rename was forced: a public project,
+units and its config directory. It was `plumbline` before that, and
+`jev-guard` before that. The first rename was forced: a public project,
 [leepokai/jev-guard](https://github.com/leepokai/jev-guard), already uses that
 name. Both older names still work through the cutover; see
 [MIGRATING-TO-AIRLOCK.md](MIGRATING-TO-AIRLOCK.md).

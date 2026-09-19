@@ -36,15 +36,15 @@ Windows Python **3.11.9** on **Windows 11**, everything run from a scratch
 directory under the Windows `%TEMP%` and removed afterwards.
 
 - **The unit suite**, `py.exe -3 -m unittest discover -s tests`: OK, with a
-  number of POSIX-only tests skipped. Each skip prints its own reason. **No
-  test requires Windows to pass** -- the whole Windows code path is exercised
-  from Linux by injecting the platform, so `install/deploy.sh`'s Linux test
-  run still gates it.
+  the POSIX-only tests skipped. Each skip prints its own reason. **No test
+  requires Windows to pass**: the whole Windows code path is exercised from
+  Linux by injecting the platform, so `install/deploy.sh`'s Linux test run
+  still gates it.
 - **A real deny**, piped at the installed launcher in enforce mode, through
   the **Bash tool** and again through the **PowerShell tool**. The rule is R1,
   secret exposure: `type %APPDATA%\jev-kit\env` and
   `Get-Content $env:APPDATA\airlock\env`. Nothing is executed and no key file
-  is opened -- the guard classifies the string and blocks it.
+  is opened. The guard classifies the string and blocks it.
 - **A real allow**: `echo hello` produces no output at all.
 - **The Everything steer**: `dir /s C:\ *.xlsm` classifies as
   `scope=disk_wide program=dir`, search-like, would-deny true, and the deny
@@ -56,8 +56,8 @@ directory under the Windows `%TEMP%` and removed afterwards.
   **3.11.9**, Windows 11, key present in the scratch profile only and
   destroyed afterwards). All of it in **enforce** mode, piped at the installed
   launcher:
-  - a **judged search deny** through the **Bash tool**, both spellings --
-    `dir /s C:\ *.xlsm` and the Git Bash form `find /c -name '*.xlsm'` --
+  - a **judged search deny** through the **Bash tool**, in both spellings
+    (`dir /s C:\ *.xlsm` and the Git Bash form `find /c -name '*.xlsm'`),
     each returning the `es.exe` steer as deny JSON;
   - the same through the **PowerShell tool**:
     `Get-ChildItem -Path C:\ -Recurse -Filter *.xlsm`;
@@ -69,7 +69,7 @@ directory under the Windows `%TEMP%` and removed afterwards.
     `subagent_type` changed `fable` -> `scout-find`, every other field
     byte-identical;
   - the **doctor with a key present**: 13 passed, 0 failed, 2 skipped (the
-    daemon, and `settings.json`, deliberately not wired);
+    daemon, and `settings.json`, which is left unwired here);
   - the **health check's direct HTTPS probe**: `status=healthy`,
     `direct_ask {ok: true, latency_ms: 1125}`.
 - **Install then uninstall**, for real: release copy, junction created,
@@ -78,7 +78,7 @@ directory under the Windows `%TEMP%` and removed afterwards.
   `--purge` removed the hook entry (only airlock's own), the junction, the
   pointer, the launcher, the releases, then state and config.
 
-## Still open, deliberately
+## Still open, and why
 
 - `belay`, `compaction`, `browser`, `review` and `tuning` are **not ported**.
 - The **warm daemon** has no Windows transport, and will not get one until
@@ -91,7 +91,7 @@ directory under the Windows `%TEMP%` and removed afterwards.
   Windows jobs are done by `windows_install.py` and `current.txt`.
 - **The enforce-mode budget on Windows is 2000 ms, decided and applied.**
   32 judged calls on that machine: median **1030 ms**, min 953, p95 1092,
-  max **1359 ms** -- and **one** of the 32 died on a TLS handshake timeout
+  max **1359 ms**. **One** of the 32 died on a TLS handshake timeout
   (`_ssl.c:989: The handshake operation timed out`) and **fail-opened**, a
   3.1% fail-open rate, against the Linux-tuned 1500 ms budget. Windows has no
   warm daemon, so every judgement pays a fresh TLS handshake, unlike POSIX,

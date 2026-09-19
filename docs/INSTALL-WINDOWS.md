@@ -27,29 +27,29 @@ release, not broken:
 1. **Python 3.8 or later, from [python.org](https://www.python.org/downloads/).**
    Not the Microsoft Store stub: the `python.exe` the Store puts on `PATH` is
    an app-execution alias that opens the Store rather than running anything,
-   and the installer deliberately refuses to put it in a hook command. The
+   and the installer refuses to put it in a hook command. The
    `py` launcher that the python.org installer puts in `C:\Windows` is what
    the launchers below look for first.
 
 2. **Claude Code**, installed and working.
 
-3. **[Git for Windows](https://git-scm.com/downloads/win) — recommended, not
+3. **[Git for Windows](https://git-scm.com/downloads/win), recommended but not
    required.** It decides which shell your hook command has to be written
    for, so it changes what the installer writes. Claude Code's setup
-   documentation puts it plainly:
+   documentation says:
 
    > Git for Windows is recommended on native Windows so Claude Code can use
    > the Bash tool. If Git for Windows is not installed, Claude Code uses
    > PowerShell as the shell tool instead.
 
    The guard covers both tools either way. **But if you install Git for
-   Windows later, re-run the installer with `--wire`**, because the hook
-   command has to change shape: `"py.exe" "hook.py"` is a valid command in
-   bash and is *not* one in PowerShell, which needs the call operator
+   Windows later, re-run the installer with `--wire`.** The hook command has
+   to change shape: `"py.exe" "hook.py"` is a valid command in bash and is
+   *not* one in PowerShell, which needs the call operator
    (`& "py.exe" "hook.py"`). The installer detects which you have and writes
    the matching form.
 
-4. **A `TYPESAFE_API_KEY`** — the one thing a human has to supply. See below.
+4. **A `TYPESAFE_API_KEY`**, the one thing a human has to supply. See below.
    Without it the guard still installs and still fails open; it simply judges
    nothing, so only the code-only rules fire.
 
@@ -116,13 +116,15 @@ A **TypeSafe API key**, for the Jev judgements.
    That path is the **kit-level** default: one `TYPESAFE_API_KEY` is read by
    every component in the kit, so it does not live under the guard's own
    directory. `%APPDATA%\airlock\env` is the guard-era default and is **still
-   fully honoured** -- a machine whose key is already there keeps working with
-   no action at all. The full seven-step resolution order (environment
-   variable, `AIRLOCK_KEY_FILE`/`JEVKIT_KEY_FILE`, the kit default, the
-   guard-era default, the pointer file, the legacy list, the kit default
-   again) is written down in exactly one place: the module docstring of
+   fully honoured**, so a machine whose key is already there keeps working
+   with no action at all.
+
+   The resolution order has seven steps: environment variable,
+   `AIRLOCK_KEY_FILE`/`JEVKIT_KEY_FILE`, the kit default, the guard-era
+   default, the pointer file, the legacy list, then the kit default again. It
+   is written down in exactly one place, the module docstring of
    `airlock/keyfile.py`. The installer and the doctor both call that resolver
-   rather than spelling a path of their own, so all three can never drift.
+   rather than spelling a path of their own, so the three can never drift.
 
 3. **Never print the key.** Not into a terminal somebody is reading, not into
    a file you then display, not into a commit message, not to confirm it.
@@ -131,21 +133,22 @@ A **TypeSafe API key**, for the Jev judgements.
    checks only that the `TYPESAFE_API_KEY=` **line** is present; it never
    reads the value.
 
-A note on file permissions, said plainly rather than papered over: on Linux
-airlock `chmod`s the key file to 0600. On Windows there is no equivalent —
-`os.chmod` there only toggles the read-only attribute and cannot express
-"owner only" — so **airlock does not chmod it and does not pretend to**. The
+A note on file permissions. On Linux airlock `chmod`s the key file to 0600.
+Windows has no equivalent: `os.chmod` there only toggles the read-only
+attribute and cannot express "owner only". So **airlock does not chmod it and
+does not pretend to**. The
 file's privacy comes from `%APPDATA%` being a per-user directory with a
 Windows ACL that already denies other non-administrative users. The doctor
 reports it that way, as an ACL claim rather than a mode check.
 
-The same honesty applies to the **key-file pointer** (`keyfile.path`). On
-Linux it is trusted only after an owner check and a mode check; Windows has
-neither a uid nor a meaningful `st_mode`, so there the structural checks still
-run (it must be a regular file naming an absolute, existing target) and the
-permission checks are replaced by a diagnostic line saying exactly **what was
+The **key-file pointer** (`keyfile.path`) is reported the same way. On Linux
+it is trusted only after an owner check and a mode check. Windows has neither
+a uid nor a meaningful `st_mode`, so there the structural checks still run: it
+must be a regular file naming an absolute, existing target.
+
+The permission checks are replaced by a diagnostic line saying **what was
 checked and what was not**. The pointer is then followed, and the doctor
-prints those lines. Claiming the ownership check passed would be a lie;
+prints those lines. Claiming the ownership check passed would be a lie, and
 refusing every pointer on Windows would take the guard offline over a question
 the standard library cannot answer there.
 
@@ -169,10 +172,10 @@ made it, so it is opt-in exactly as `--wire` is.
 py -3 install\windows_doctor.py
 ```
 
-The doctor does not check that files exist. It **runs** a real deny and a
-real allow through the actual hook process against a throwaway profile, a
-malformed payload, the kill switch, the Windows file-search classification,
-Everything detection and the health check, and reports what came back. Exit 0
+The doctor does not check that files exist. It **runs** things and reports what
+came back. A real deny and a real allow through the actual hook process against
+a throwaway profile, a malformed payload, the kill switch, the Windows
+file-search classification, Everything detection, the health check. Exit 0
 when everything installed works. Anything not installed is `skip`, never
 `FAIL`, and the daemon is `skip` permanently.
 
@@ -195,15 +198,15 @@ with `AIRLOCK_MODE=enforce` set. Each must print JSON containing
 all**.
 
 The rule being proved is **R1, secret exposure**: an attempt to print the key
-file. Nothing is executed and no key file is opened -- the guard classifies
-the string and blocks it, so this proof is safe to run on a machine that does
-have a key. R1 is a code-only decision, so it denies with no key and no
+file. Nothing is executed and no key file is opened. The guard classifies the
+string and blocks it, so this proof is safe to run on a machine that does have
+a key. R1 is a code-only decision, so it denies with no key and no
 network.
 
 Do **not** use `xdg-open` as the Windows deny proof. That is R6, and **R6 is
-`off` by default on every platform**, Windows included -- it encodes "this box
+`off` by default on every platform**, Windows included. It encodes "this box
 is a headless server with no desktop", and most machines running Claude Code
-have one. This is no longer a Windows exception; it is the shipped default
+have a desktop. This is no longer a Windows exception; it is the shipped default
 everywhere. A machine that really is headless (a Server Core box, a build
 agent, a cloud server) turns it on:
 
@@ -235,7 +238,7 @@ Every environment override still works and still wins:
 On Linux, `current` is a symlink and a deploy or rollback is one atomic
 `rename`. Windows does not hand symlink privilege to an ordinary user
 (`os.symlink` fails with *WinError 1314: A required privilege is not held by
-the client* — measured, not assumed), so that mechanism is not available.
+the client*, measured rather than assumed), so that mechanism is not available.
 There are three moving parts instead:
 
 1. **A directory junction** (`mklink /J`), when the volume allows one. A
@@ -257,7 +260,7 @@ There are three moving parts instead:
 
 The point of the third part is that `settings.json` never has to change
 again. A rollback is one line of `current.txt`, and the next tool call picks
-it up — the same promise the Linux symlink makes.
+it up. That is the same promise the Linux symlink makes.
 
 ---
 
@@ -275,8 +278,8 @@ es.exe -path "<folder>" -n 50 "<pattern>"
 - `-n <count>` stops after N results
 - `-r` treats the pattern as a regular expression
 - `-i` **matches case**. `es` is case-**in**sensitive by default, so `-i`
-  makes a search *stricter*, not looser — the opposite of `grep -i`, and the
-  one flag that is easy to get backwards.
+  makes a search *stricter*, not looser. That is the opposite of `grep -i`,
+  and the one flag that is easy to get backwards.
 
 The results are instant because they come from an index, not a crawl.
 
@@ -324,8 +327,8 @@ py -3 install\windows_uninstall.py --purge
 
 It removes **only airlock's own** `PreToolUse` entry, backing each
 `settings.json` up first, then the scheduled task, the launcher, the pointer,
-the junction and the releases. **Config and state survive by default** — the
-config directory holds your key file and the state directory holds the shadow
+the junction and the releases. **Config and state survive by default.** The
+config directory holds your key file, and the state directory holds the shadow
 log, which is the whole record of what the guard would have done. `--purge`
 removes those too and says what it removed.
 
@@ -351,8 +354,8 @@ Honesty about coverage, because "it should work" is not verification.
 The hook entry point takes roughly **450 ms** on that Windows machine against
 roughly **40 ms** on Linux, for the same code doing the same work. Almost all
 of it is CPython start-up plus the antivirus filter in front of every
-`CreateProcess`; no change to this repository moves it, and it is a cost every
-PreToolUse hook on a Windows machine pays, not just this one.
+`CreateProcess`. No change to this repository moves it. Every PreToolUse hook
+on a Windows machine pays it, not this one alone.
 
 ---
 
@@ -364,8 +367,8 @@ PreToolUse hook on a Windows machine pays, not just this one.
    every prerequisite warning to the human **before installing anything**.
 3. **Ask the human for the `TYPESAFE_API_KEY`** and tell them where to put it.
    Do not ask them to paste it into your session. If they do anyway, do not
-   echo it back, do not write it into a file you then display, and say plainly
-   that it should be rotated.
+   echo it back, do not write it into a file you then display, and tell them
+   it should be rotated.
 4. Run the installer, then the doctor, and report the **real** output. A
    download that succeeded is not a capability that works.
 5. **Before wiring, back up every `settings.json` you are about to touch.**

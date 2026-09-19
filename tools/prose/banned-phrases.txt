@@ -1,0 +1,150 @@
+# Banned phrases -- subject-agnostic machine-writing tells.
+#
+# Checked by tools/check_prose.py against README.md, docs/*.md and the component
+# READMEs. Every entry here is generic: nothing in this file names this project,
+# its components or its numbers. A project-specific ban belongs in a second file
+# passed with --phrases.
+#
+# Format, one entry per line:
+#
+#   phrase                  case-insensitive, word-boundary anchored, and matched
+#                           in its common inflections (delve, delves, delved,
+#                           delving) the way style/lint-style gates do it
+#   re:<pattern>            a raw regular expression, case-insensitive
+#   <entry> :: <hint>       an optional plainer form, printed by --fix-hints
+#
+# `#` starts a comment. Blank lines are ignored.
+#
+# Keep this list short enough to stay true. A word that is legitimate in context
+# more often than not makes the gate noise, and a noisy gate gets bypassed.
+
+# --- inflated openers and scene-setting ---
+in today's fast-paced
+in today's digital
+in an era
+ever-evolving
+ever-changing
+landscape of
+tapestry
+a testament to
+stands as a testament
+navigating the complexities
+in the world of
+in the realm of
+
+# --- the "not just X, but Y" family ---
+re:\bnot (just|merely|only) (a|an|the|about)\b :: say what it is, once
+re:\bis(n't| not) (just|merely|only) (a|an|the|about)\b :: say what it is, once
+more than just :: more than
+but rather :: but
+
+# --- throat-clearing before the point ---
+it's worth noting :: delete the phrase and keep the fact
+it is worth noting :: delete the phrase and keep the fact
+it's important to note :: delete the phrase and keep the fact
+it is important to note :: delete the phrase and keep the fact
+needless to say :: delete the sentence
+it goes without saying :: delete the sentence
+at the end of the day :: delete the phrase
+when it comes to :: for
+in conclusion :: delete the phrase
+in summary :: delete the phrase
+to sum up :: delete the phrase
+
+# --- signposting the reader does not need ---
+here's the thing :: state the thing
+here is the thing :: state the thing
+the thing is :: state the thing
+let's be honest :: state the fact
+let's talk about :: use a heading
+let's take a look :: show it
+let's dive
+first and foremost :: first
+with that said :: but
+that being said :: but
+so what does this mean
+what does this mean for you
+
+# --- describing your own writing instead of writing ---
+deliberately :: say why, or delete
+honestly :: delete the word
+honest :: delete the word
+plainly :: delete the word
+frankly :: delete the word
+candidly :: delete the word
+to be fair :: delete the phrase
+to be clear :: delete the phrase
+let me be clear :: delete the phrase
+rest assured :: delete the phrase
+
+# --- corporate mush ---
+seamless :: say what it does
+seamlessly :: say what it does
+robust :: say the measured property
+cutting-edge :: say the version or the date
+state-of-the-art :: say the version or the date
+best-in-class :: say the number
+holistic
+synergy
+paradigm shift
+low-hanging fruit
+move the needle
+circle back
+touch base
+game-changer
+game changer
+revolutionize
+revolutionise
+transformative
+unlock the
+unlocking the
+elevate your
+supercharge
+harness the power
+leverage the power
+embark on
+embark upon
+deep dive
+dive deep
+delve
+
+# --- wordy where a short word exists ---
+in order to :: to
+due to the fact that :: because
+at this point in time :: now
+prior to :: before
+subsequent to :: after
+in the event that :: if
+with regard to :: about
+with respect to :: about
+in terms of :: for
+a number of :: some
+utilize :: use
+utilise :: use
+facilitate :: let, or do
+functionality :: say what it does
+
+# --- intensifiers that add no information ---
+truly :: delete the word
+incredibly :: delete the word, give the number
+extremely :: delete the word, give the number
+simply put :: delete the phrase
+essentially :: delete the word
+basically :: delete the word
+crucial :: say what breaks without it
+pivotal :: say what breaks without it
+vital role
+plays a key role
+plays a crucial role
+comprehensive guide
+ultimate guide
+everything you need to know
+
+# --- assistant tics ---
+you're absolutely right
+you are absolutely right
+great question
+i hope this helps
+feel free to :: you can
+happy to help
+let me know if you'd like
