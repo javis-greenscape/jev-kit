@@ -31,6 +31,18 @@ def _leftover_payload_files():
     return set(glob.glob(os.path.join(tempfile.gettempdir(), "airlock-*.json")))
 
 
+def _remove_quietly(path):
+    """Delete a file, never complaining. Used where subprocess.Popen is
+    mocked: the real worker then never runs, so it never consumes and deletes
+    the payload file the hook wrote, and one would be left behind in %TEMP%
+    (or /tmp) on every run of the suite."""
+    try:
+        import os as _os
+        _os.remove(path)
+    except Exception:
+        pass
+
+
 class TestHookEntry(unittest.TestCase):
     def setUp(self):
         # main() writes a real (mode-600) temp payload file before handing off
@@ -90,7 +102,8 @@ class TestHookEntry(unittest.TestCase):
              mock.patch("subprocess.Popen") as popen:
             hook_entry.main()
             popen.assert_called_once()
-            _args, kwargs = popen.call_args
+            args, kwargs = popen.call_args
+            self.addCleanup(_remove_quietly, args[0][-1])
             # The detached-child mechanism is platform-specific:
             # start_new_session on POSIX, the DETACHED_PROCESS |
             # CREATE_NEW_PROCESS_GROUP creation flags on Windows. Both are
@@ -145,6 +158,15 @@ class TestHookEntry(unittest.TestCase):
             env = dict(os.environ)
             env.pop("TYPESAFE_API_KEY", None)
             env["HOME"] = fake_home
+            # HOME alone isolates nothing on Windows: airlock/paths.py
+            # resolves config, state and releases from %APPDATA% and
+            # %LOCALAPPDATA%, so the real detached worker this test spawns
+            # would write its shadow log into the user's actual profile.
+            # Observed doing exactly that on the Windows machine this was
+            # tested on, which is why all four are pinned.
+            env["USERPROFILE"] = fake_home
+            env["APPDATA"] = os.path.join(fake_home, "AppData", "Roaming")
+            env["LOCALAPPDATA"] = os.path.join(fake_home, "AppData", "Local")
             start = time.monotonic()
             proc = subprocess.run(
                 [sys.executable, HOOK_PATH],

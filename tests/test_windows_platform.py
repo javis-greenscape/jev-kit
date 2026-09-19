@@ -25,6 +25,18 @@ from tests import posix_only
 from airlock import client, keyfile, paths, platform_compat, winpath
 
 
+def _remove_quietly(path):
+    """Delete a file, never complaining. Used where subprocess.Popen is
+    mocked: the real worker then never runs, so it never consumes and deletes
+    the payload file the hook wrote, and one would be left behind in %TEMP%
+    (or /tmp) on every run of the suite."""
+    try:
+        import os as _os
+        _os.remove(path)
+    except Exception:
+        pass
+
+
 class TestIsWindows(unittest.TestCase):
     def test_platform_string_decides(self):
         self.assertTrue(platform_compat.is_windows(platform="win32"))
@@ -76,7 +88,8 @@ class TestDetachedPopenKwargs(unittest.TestCase):
              mock.patch("subprocess.Popen") as popen:
             hook.main()
             popen.assert_called_once()
-            _args, kwargs = popen.call_args
+            args, kwargs = popen.call_args
+            self.addCleanup(_remove_quietly, args[0][-1])
             self.assertEqual(kwargs.get("creationflags"), 0x208)
             self.assertNotIn("start_new_session", kwargs)
             self.assertEqual(kwargs.get("stdin"), subprocess.DEVNULL)
