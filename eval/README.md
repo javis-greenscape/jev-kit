@@ -3,6 +3,13 @@
 `cases.jsonl` is the labelled corpus: one line per case, with the payload a
 PreToolUse hook would receive and the expected answer.
 
+A `tier_guard` case is labelled with the LIVE OUTCOME it should produce --
+`expect_block`, `expect_warn`, `expect_silent`, exactly one of them true -- plus
+the `task_kind` the ladder gives for its own chosen tier and task. A case whose
+text does not determine the adequate tier carries `ambiguous: true`, no
+`task_kind`, and is excluded from both accuracies. The other guards still carry
+`would_deny`.
+
 ```bash
 # the whole corpus, real Jev calls, per-rule accuracy and false denies
 python3 -m airlock.eval --json
@@ -50,32 +57,115 @@ score judgement on a write that genuinely does land outside the working tree,
 not a pre-filter shape, so no narrowing fixes it; it also flaps between runs.
 Left labelled as it is rather than relabelled to match the model.
 
-## The tier guard, and the one-rung cases
+## The tier guard: three outcomes, scored separately
 
-58 labelled `tier_guard` cases. Real Jev calls, 2026-09-19:
+58 labelled `tier_guard` cases.
+
+### What was being compared with what, and why it was wrong
+
+The tier guard has **three** live outcomes, and `policy.tier_surface` picks
+between them:
+
+| outcome | when | what the session sees |
+|---|---|---|
+| `block` | a rung gap of **two or more** past the shared deny bar, or `fable` dispatched without a stated prior failed attempt | the call is denied (in enforce mode) |
+| `warn` | a gap of **exactly one**, past the same bar | `additionalContext` naming the cheaper rung; the call runs unchanged |
+| `silent` | adequate, under-tiered, an `unclear` task, below the bar, or the cheapest rung (never even judged) | nothing |
+
+`policy.evaluate_tier`'s `would_deny` flag is the **union of block and warn**.
+The eval scored that one flag against one `would_deny` label, and those labels
+had been written to the two-rung block rule. Two whole classes of label artefact
+followed:
+
+* every one-rung overshoot, and every `fable` dispatch without a stated prior
+  failure, was labelled "no deny" but predicted `would_deny: true` -- **16 false
+  denies**, 14 of them in the `subagent_type` ablation cases, which carried no
+  `would_deny` label at all and therefore defaulted to false;
+* four cases were labelled `would_deny: true` while being **under-tiered**
+  (`tier-scoped-1`, `tier-judgement-1`, `tier-hard-3`, `tier-scoped-4`, rung gaps
+  of -1, -2, -2 and -2). Under-tiering can never be a deny in any mode, so those
+  could only ever be counted wrong. They plus one genuine miss made the **5
+  missed denies**.
+
+Neither number said anything about Jev.
+
+### The corrected scoring
+
+Each case now carries its own label per outcome, derived from its stated chosen
+tier and task by the ladder -- never from what Jev answered. `airlock/eval.py`
+predicts the outcome with `policy.tier_surface`, the hook's own function, over an
+entry built by `policy.tier_entry_fields`, the same builder
+`guards.compute_tier_entry` uses, with rewrite mode forced off because it is off
+by default and with the cheapest-rung shortcut applied because
+`policy.deny_possible_agent` means such a call is never judged at all.
+
+Real Jev calls, 2026-09-19, on a 4 vCPU cloud VM (Ubuntu, 8 GB RAM,
+Python 3.14), four-way concurrency:
 
 | | cases | label accuracy | false deny | missed deny |
 |---|---|---|---|---|
-| before the surfacing work | 50 | 98.0% | 16 | 5 |
-| after, with 8 new cases | 58 | 96.6% | 16 | 5 |
+| before, `would_deny` against the old labels | 58 | 96.6% | 16 | 5 |
+| after, three outcomes against their own labels | 58 (57 scored, 1 ambiguous) | 98.2% | **0** | **0** |
 
-The false-deny and missed-deny counts are unchanged, so all 8 new cases
-predicted `would_deny` correctly; the accuracy drop is one label, not a
-regression in the verdict.
+Per outcome, after:
 
-The 8 new cases (`source: "one-rung-surfacing"`) sit on the boundary the warn
-and the rewrite now act on: one rung over at each of four rungs
-(`scout` for a lookup, `workerS` for a rename, `workerO` for a specified
-feature, an Opus-level agent for a design decision), a three-rung overshoot
-that must still block, `fable` dispatched WITH a stated prior failure, and two
-under-tiered dispatches that must never be "corrected" upward. Seven label
-correctly at confidence 1.000 and margin 1.000.
+| outcome | expected | correct | accuracy |
+|---|---|---|---|
+| `block` | 18 | 18 | 100% |
+| `warn` | 10 | 9 | 90% |
+| `silent` | 29 | 29 | 100% |
 
-The one miss is `tier-undertiered-hard-workerS`, a flaky race the prompt says
-nothing has yet reproduced: Jev calls it `judgement` rather than
-`hard_problem`, at confidence 0.75 -- below the deny bar, so it surfaces
-nothing either way, and it is under-tiered on both labels. Left labelled as
-written rather than relabelled to match the model.
+Overall outcome accuracy 98.2% (56/57). Mean latency 557-567 ms per judgement over two runs, 94,979
+tokens for the 58 cases. The `silent` row counts 29 rather than 30 because the
+ambiguous case is in the confusion table but not in the accuracy.
+
+### The one case where Jev is actually wrong
+
+**`tier-mech-4`** -- `workerS` dispatched at *"Fix the off-by-one in
+`_percentile()`: `hi` can exceed `len(values)-1`, cap it."* The cause and the fix
+are both stated and it is one line, so by the ladder that is a
+`mechanical_edit`, adequate at `scout`, and a `workerS` dispatch is one rung over
+and should warn. Jev calls it `scoped_implementation` at confidence
+0.80-0.82 and margin 0.68-0.72 (it varies a little between runs, and sits just
+over the 0.8/0.4 deny bar either way), which makes `workerS` the adequate rung,
+so the guard says nothing.
+
+That is the whole tuning target list: **one case, and it is a `task_kind`
+boundary, not a policy bug.** The direction is safe (a missed warn, not a false
+block) but it is the exact boundary that matters most in daily use, because
+"here is the bug and here is the fix" is the commonest shape of small task there
+is. Worth more labelled cases either side of it before touching the question
+wording.
+
+### `tier-undertiered-hard-workerS` is the one ambiguous case
+
+*"Two hook processes occasionally interleave a partial line in the shadow log
+despite the flock. Find the race and fix it; nothing tried so far has reproduced
+it reliably."* Failed attempts to REPRODUCE are not the failed attempts at a FIX
+that the ladder asks for before escalating, so the text supports both
+`judgement` and `hard_problem` and does not determine the adequate tier. The
+outcome is `silent` under either reading (a `workerS` dispatch is under-tiered
+both ways), so it is labelled `ambiguous: true`, scored on neither accuracy, and
+left in the corpus because the outcome is still worth asserting. Jev answers
+`judgement`.
+
+### The 8 one-rung cases
+
+The 8 cases tagged `source: "one-rung-surfacing"` sit on the boundary the warn
+and the rewrite act on: one rung over at each of four rungs (`scout` for a
+lookup, `workerS` for a rename, `workerO` for a specified feature, an Opus-level
+agent for a design decision), a three-rung overshoot that must still block,
+`fable` dispatched WITH a stated prior failure, and two under-tiered dispatches
+that must never be "corrected" upward. All 8 now score correctly.
+
+### Guard rail
+
+`tests/test_eval_tier_scoring.py` re-derives every shipped tier label from its
+own case text and asserts the file agrees, so a future edit cannot quietly
+relabel a case to whatever the model answered. It also asserts that
+`eval.tier_outcome` and `policy.tier_surface` over a real
+`guards.compute_tier_entry` agree, which is the divergence that caused this in
+the first place.
 
 ## The subagent_type ablation
 

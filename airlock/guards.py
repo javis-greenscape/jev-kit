@@ -119,15 +119,11 @@ def compute_tier_entry(data, timeout_s=None):
         states_prior_failed_attempts=prior_failed,
         chosen_type=subagent_type,
     )
+    entry.update(policy.tier_entry_fields(
+        verdict, task_kind, task_kind_conf, task_kind_margin,
+        prior_failed, subagent_type))
+    # A sampled shadow row must never look like a deny, whatever the verdict.
     entry["would_deny"] = verdict["would_deny"] and not sampled
-    entry["suggestion"] = verdict.get("suggested_agent")
-    entry["under_tiered"] = verdict["under_tiered"]
-    entry["margin"] = task_kind_margin
-    entry["rung_diff"] = verdict.get("rung_diff")
-    entry["chosen_type"] = subagent_type
-    entry["task_kind"] = task_kind
-    entry["task_kind_confidence"] = task_kind_conf
-    entry["prior_failed"] = prior_failed
     entry["chosen"] = subagent_type
     entry["adequate"] = verdict.get("adequate_rung") or NOT_JUDGED
     entry["detail"] = _tier_detail(subagent_type, verdict.get("adequate_rung"), task_kind)

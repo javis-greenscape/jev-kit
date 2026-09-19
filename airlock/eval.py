@@ -3,6 +3,28 @@ through the REAL Jev call (via client.ask, which prefers the warm daemon) and
 report accuracy per guard, a confusion table, false-deny/missed-deny counts,
 mean latency, and total tokens.
 
+The tier guard is scored on its THREE LIVE OUTCOMES, not on one flag
+=================================================================
+
+`policy.evaluate_tier`'s `would_deny` is the union of two different live
+behaviours: a rung gap of two or more (and fable without a stated prior failed
+attempt) BLOCKS, while a gap of exactly one only WARNS, and everything else --
+adequate, under-tiered, or an unclear task -- is silent. Scoring one boolean
+against one label cannot tell a block apart from a warn, and the tier labels in
+eval/cases.jsonl had been written to the two-rung block rule while the eval
+scored the wider flag. The result was 16 "false denies" and 5 "missed denies"
+that were label artefacts rather than anything Jev got wrong.
+
+So a `tier_guard` case now carries `expect_block`, `expect_warn` and
+`expect_silent` (exactly one true), and this module predicts the outcome with
+`policy.tier_surface` -- the same function the hook calls -- against an entry
+built by `policy.tier_entry_fields`, the same builder `guards.compute_tier_entry`
+uses. Rewrite mode is forced OFF, because it is off by default.
+
+A case whose text does not determine the adequate tier carries
+`ambiguous: true` and is excluded from both accuracies rather than guessed at.
+
+
 Runs cases in parallel (max 4 concurrent Jev calls). Exit code is always 0 --
 this is a report, not a test suite; the numbers are the output. Pass --json
 to also write eval/last_result.json.
@@ -40,6 +62,30 @@ def load_cases(path=None):
     return cases
 
 
+TIER_OUTCOMES = ("block", "warn", "silent")
+
+
+def tier_outcome(subagent_type, entry):
+    """What the live hook would DO with this judgement: "block", "warn" or
+    "silent". `policy.tier_surface` is the hook's own function; rewrite mode is
+    forced off because it is off by default, and the cheapest-rung shortcut is
+    applied because `policy.deny_possible_agent` means such a call is never
+    even judged."""
+    if not policy.deny_possible_agent(subagent_type):
+        return "silent"
+    surfaced = policy.tier_surface(entry, rewrite_on=False)
+    return surfaced if surfaced in TIER_OUTCOMES else "silent"
+
+
+def expected_tier_outcome(expected):
+    """The one of expect_block/expect_warn/expect_silent that is true, or None
+    when a case carries none of them (an older cases file)."""
+    for name in TIER_OUTCOMES:
+        if expected.get("expect_%s" % name):
+            return name
+    return None
+
+
 def _judge_tier(payload):
     ti = payload.get("tool_input") or {}
     subagent_type = str(ti.get("subagent_type") or "")
@@ -65,11 +111,15 @@ def _judge_tier(payload):
         states_prior_failed_attempts=prior_failed,
         chosen_type=subagent_type,
     )
+    entry = policy.tier_entry_fields(verdict, task_kind, confidence, margin,
+                                     prior_failed, subagent_type)
     usage = response.get("usage") or {}
     tokens = (usage.get("input_tokens") or 0) + (usage.get("output_tokens") or 0)
     return {
         "predicted_label": task_kind,
         "predicted_would_deny": verdict["would_deny"],
+        "predicted_outcome": tier_outcome(subagent_type, entry),
+        "rung_diff": verdict.get("rung_diff"),
         "confidence": confidence,
         "margin": margin,
         "latency_ms": latency_ms,
@@ -181,6 +231,11 @@ def run_case(case):
 
     if guard == "rules":
         expected_deny = bool(expected.get("fires") and expected.get("action") == "deny")
+    elif guard == "tier_guard":
+        # For the tier guard "deny" means the live BLOCK outcome, which is a
+        # strict subset of would_deny. Scoring against would_deny is what made
+        # the one-rung warn cases look like false denies.
+        expected_deny = bool(expected.get("expect_block"))
     else:
         expected_deny = bool(expected.get("would_deny"))
     result = {
@@ -197,6 +252,23 @@ def run_case(case):
         "latency_ms": judged.get("latency_ms"),
         "tokens": judged.get("tokens", 0),
     }
+    if guard == "tier_guard":
+        expected_outcome = expected_tier_outcome(expected)
+        predicted_outcome = judged.get("predicted_outcome")
+        result["ambiguous"] = bool(expected.get("ambiguous"))
+        result["expected_outcome"] = expected_outcome
+        result["predicted_outcome"] = predicted_outcome
+        result["outcome_correct"] = (expected_outcome is None
+                                     or expected_outcome == predicted_outcome)
+        result["rung_diff"] = judged.get("rung_diff")
+        # An ambiguous case is not scored, so it must not be counted wrong
+        # either -- the label is the thing that could not be derived.
+        if result["ambiguous"]:
+            result["label_correct"] = None
+        # predicted_would_deny stays the raw flag for reference; the deny that
+        # is actually enforced is the block outcome.
+        result["predicted_would_deny"] = (predicted_outcome == "block")
+        result["deny_correct"] = expected_deny == result["predicted_would_deny"]
     return result
 
 
@@ -214,17 +286,37 @@ def summarize(results):
         guard = r.get("guard") or "unknown"
         stats = by_guard.setdefault(guard, {
             "total": 0, "errors": 0, "label_correct": 0,
+            "scored": 0, "ambiguous": 0,
             "false_deny": 0, "missed_deny": 0,
             "confusion": {}, "latencies": [], "tokens": 0,
+            "outcome_confusion": {}, "per_outcome": {},
+            "outcome_correct": 0, "outcome_scored": 0, "outcome_misses": [],
         })
         stats["total"] += 1
         if "error" in r:
             stats["errors"] += 1
             continue
-        if r["label_correct"]:
-            stats["label_correct"] += 1
+        if r.get("ambiguous"):
+            stats["ambiguous"] += 1
+        else:
+            stats["scored"] += 1
+            if r["label_correct"]:
+                stats["label_correct"] += 1
         key = "%s->%s" % (r["expected_label"], r["predicted_label"])
         stats["confusion"][key] = stats["confusion"].get(key, 0) + 1
+        if r.get("expected_outcome") is not None:
+            okey = "%s->%s" % (r["expected_outcome"], r["predicted_outcome"])
+            stats["outcome_confusion"][okey] = stats["outcome_confusion"].get(okey, 0) + 1
+            if not r.get("ambiguous"):
+                per = stats["per_outcome"].setdefault(
+                    r["expected_outcome"], {"expected": 0, "correct": 0})
+                per["expected"] += 1
+                if r["outcome_correct"]:
+                    per["correct"] += 1
+                    stats["outcome_correct"] += 1
+                else:
+                    stats["outcome_misses"].append(r)
+                stats["outcome_scored"] += 1
         if r["predicted_would_deny"] and not r["expected_would_deny"]:
             stats["false_deny"] += 1
         if r["expected_would_deny"] and not r["predicted_would_deny"]:
@@ -236,11 +328,21 @@ def summarize(results):
     summary = {}
     for guard, stats in by_guard.items():
         judged = stats["total"] - stats["errors"]
-        accuracy = (stats["label_correct"] / judged) if judged else 0.0
+        scored = stats["scored"] or judged
+        accuracy = (stats["label_correct"] / scored) if scored else 0.0
         mean_latency = statistics.mean(stats["latencies"]) if stats["latencies"] else 0.0
-        summary[guard] = {
+        per_outcome = {}
+        for name, per in stats["per_outcome"].items():
+            per_outcome[name] = {
+                "expected": per["expected"],
+                "correct": per["correct"],
+                "accuracy": (per["correct"] / per["expected"]) if per["expected"] else 0.0,
+            }
+        entry = {
             "total": stats["total"],
             "judged": judged,
+            "scored": scored,
+            "ambiguous": stats["ambiguous"],
             "errors": stats["errors"],
             "accuracy": accuracy,
             "false_deny": stats["false_deny"],
@@ -249,6 +351,20 @@ def summarize(results):
             "mean_latency_ms": mean_latency,
             "total_tokens": stats["tokens"],
         }
+        if stats["outcome_scored"]:
+            entry["outcome_accuracy"] = stats["outcome_correct"] / stats["outcome_scored"]
+            entry["outcome_scored"] = stats["outcome_scored"]
+            entry["per_outcome"] = per_outcome
+            entry["outcome_confusion"] = stats["outcome_confusion"]
+            entry["outcome_misses"] = [
+                {"id": m["id"], "expected": m["expected_outcome"],
+                 "predicted": m["predicted_outcome"],
+                 "expected_label": m["expected_label"],
+                 "predicted_label": m["predicted_label"],
+                 "confidence": m.get("confidence"), "margin": m.get("margin")}
+                for m in stats["outcome_misses"]
+            ]
+        summary[guard] = entry
     return summary
 
 
@@ -258,13 +374,36 @@ def print_summary(summary):
     print()
     for guard, s in sorted(summary.items()):
         print("== %s ==" % guard)
-        print("  total=%d judged=%d errors=%d" % (s["total"], s["judged"], s["errors"]))
-        print("  accuracy=%.1f%%" % (s["accuracy"] * 100.0))
-        print("  false_deny=%d missed_deny=%d" % (s["false_deny"], s["missed_deny"]))
+        print("  total=%d judged=%d scored=%d ambiguous=%d errors=%d"
+              % (s["total"], s["judged"], s["scored"], s.get("ambiguous", 0), s["errors"]))
+        print("  label accuracy=%.1f%%" % (s["accuracy"] * 100.0))
+        if "outcome_accuracy" in s:
+            print("  outcome accuracy=%.1f%% (%d scored)"
+                  % (s["outcome_accuracy"] * 100.0, s["outcome_scored"]))
+            for name in TIER_OUTCOMES:
+                per = s["per_outcome"].get(name)
+                if not per:
+                    continue
+                print("    %-7s expected=%-3d correct=%-3d accuracy=%.1f%%"
+                      % (name, per["expected"], per["correct"], per["accuracy"] * 100.0))
+        note = "  (deny == the live block outcome)" if "outcome_accuracy" in s else ""
+        print("  false_deny=%d missed_deny=%d%s"
+              % (s["false_deny"], s["missed_deny"], note))
         print("  mean_latency_ms=%.0f total_tokens=%d" % (s["mean_latency_ms"], s["total_tokens"]))
-        print("  confusion (expected->predicted : count):")
+        print("  label confusion (expected->predicted : count):")
         for key, count in sorted(s["confusion"].items(), key=lambda kv: -kv[1]):
             print("    %-40s %d" % (key, count))
+        if s.get("outcome_confusion"):
+            print("  outcome confusion (expected->predicted : count):")
+            for key, count in sorted(s["outcome_confusion"].items(), key=lambda kv: -kv[1]):
+                print("    %-40s %d" % (key, count))
+        if s.get("outcome_misses"):
+            print("  cases where Jev is actually wrong under these labels:")
+            for m in s["outcome_misses"]:
+                print("    %-42s expected %-6s got %-6s  (label %s -> %s, conf %s, margin %s)"
+                      % (m["id"], m["expected"], m["predicted"],
+                         m["expected_label"], m["predicted_label"],
+                         m["confidence"], m["margin"]))
         print()
 
 

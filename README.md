@@ -537,6 +537,16 @@ was actually *consulted* on 0 of them, because every row in that log is a call
 some specific rule had already claimed. That is the intended shape -- the
 fallback is the residue, not a second opinion.
 
+**Tier-guard accuracy**, `python3 -m airlock.eval`, 2026-09-19. 58 labelled
+Agent dispatches, scored on the three outcomes the guard actually has -- block,
+warn, silent -- against labels derived from each case's own chosen tier and task
+by the ladder: **98.2%** overall (56 of 57 scored; one case is labelled
+`ambiguous` and excluded), with **zero false denies and zero missed denies**.
+Block 18/18, silent 29/29, warn 9/10. The single miss is a `task_kind` boundary,
+not a policy bug, and the direction is safe (a missed warn, never a false
+block). `eval/README.md` names it and says why the previous 16-false-deny figure
+was a label artefact rather than anything the model got wrong.
+
 **A/B bench**, `bench/results/20260919-120344.md`, 2026-09-19: 30 sessions,
 enforce mode against no guard at all, five tasks. Zero denies -- agents
 already pick the right tool almost every time. That result is why

@@ -121,6 +121,32 @@ def evaluate_tier(task_kind, task_kind_confidence, states_prior_failed_attempts,
     }
 
 
+def tier_entry_fields(verdict, task_kind, task_kind_confidence, margin,
+                      prior_failed, chosen_type):
+    """The decision-relevant half of a tier log row, in ONE place.
+
+    `enforce_deny_tier`, `tier_rewrite_target` and `tier_surface` all read an
+    entry dict rather than a verdict, so anything that wants to know what a
+    judgement WOULD do -- the guard, and airlock/eval.py -- has to assemble the
+    same dict. Assembling it twice is how the eval came to score a different
+    thing from the hook, so it is assembled here and nowhere else.
+
+    The caller adds whatever presentation and bookkeeping it needs on top
+    (timestamps, `detail`, shadow sampling).
+    """
+    return {
+        "would_deny": verdict["would_deny"],
+        "suggestion": verdict.get("suggested_agent"),
+        "under_tiered": verdict["under_tiered"],
+        "margin": margin,
+        "rung_diff": verdict.get("rung_diff"),
+        "chosen_type": chosen_type,
+        "task_kind": task_kind,
+        "task_kind_confidence": task_kind_confidence,
+        "prior_failed": prior_failed,
+    }
+
+
 # --- Enforce-mode deny gates (Part A, item 5) --------------------------------
 #
 # Shadow's would_deny stays the wider, always-logged signal above. Enforce
