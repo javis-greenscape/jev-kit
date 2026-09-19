@@ -17,9 +17,9 @@ the hook in. Do that step once you know the list, not before.
 ## 1. Turn on systemd
 
 WSL2 does not run systemd unless told to. Without it there is no warm
-daemon, no health timer, no tuning timer and no hourly filesearch index --
-`install/install.sh` still installs and the guard still works, just slower
-per call and with nothing scheduled. To get systemd:
+daemon, no health timer, no tuning timer and no hourly filesearch index.
+`install/install.sh` still installs and the guard still works, slower per call
+and with nothing scheduled. To get systemd:
 
 Inside the distribution, edit (or create) `/etc/wsl.conf`:
 
@@ -40,10 +40,10 @@ and start the distribution again. Confirm it took:
 systemctl --user show-environment
 ```
 
-If that fails, `install/install.sh` will detect the missing session itself,
-print the same instructions, and degrade to no-systemd mode rather than
-failing -- see [Install on WSL](install.md#install-on-wsl) in the install
-guide for exactly what no-systemd mode costs you. It is a legitimate way to
+If that fails, `install/install.sh` detects the missing session itself, prints
+the same instructions, and degrades to no-systemd mode rather than failing.
+[Install on WSL](install.md#install-on-wsl) in the install guide says exactly
+what no-systemd mode costs you. It is a legitimate way to
 run this for a while if you are not ready to touch `/etc/wsl.conf` yet.
 
 ## 2. Clone the repository
@@ -72,10 +72,10 @@ warn  no TYPESAFE_API_KEY found (env, or /home/<you>/.config/jev-kit/env).
 warn    the guard still installs and still fails open; it just judges nothing.
 ```
 
-Without the key the install is close to pointless and is actively
-mis-weighted: every rule with a fuzzy half (R1 secret exposure, R4, R10) asks
-Jev and so fails open, while the code-only rules (R5 sudo, R6 GUI, R9 commit
-secret, the two legacy R8 guards) still hard-deny. Arming `enforce` in that
+Without the key the install is close to pointless, and it is mis-weighted.
+Every rule with a fuzzy half asks Jev and so fails open: R1 secret exposure,
+R4, R10. The code-only rules still hard-deny, and there are five of them: R5
+sudo, R6 GUI, R9 commit secret, and the two legacy R8 guards. Arming `enforce` in that
 state blocks ordinary workstation actions while doing nothing at all about
 secrets. Get the key in place first, or stay in `shadow`.
 
@@ -99,7 +99,7 @@ records the path (never the value) so the hook can find it.
 
 **Type the key into the file with an editor** (`nano ~/.config/jev-kit/env`,
 or `$EDITOR`) as a line reading `TYPESAFE_API_KEY=...`. Do not paste it into
-a Claude session, an issue, a chat message or a command line -- anything a
+a Claude session, an issue, a chat message or a command line. Anything a
 transcript or shell history retains is a place a key can leak from. Never
 `cat` the file afterwards to check it; if you need to confirm it is there,
 check for the line without printing its value:
@@ -127,32 +127,35 @@ install/doctor.sh
 ```
 
 `--claude-update` installs the hourly idle-only Claude Code updater
-(`claude-update/README.md`): it checks once an hour and updates only when no
-headless run is alive and no session transcript has changed in the last 30
+(`claude-update/README.md`). It checks once an hour, and it updates only when
+no headless run is alive and no session transcript has changed in the last 30
 minutes, so it never lands mid-thought. There is no reason to run a stale CLI
 on this machine, so it is part of the recommended set rather than an extra.
 
-`--belay` installs the Stop hook. In plain words: when an agent says it has
-finished, belay looks at whether that turn actually changed files and whether
-any check has passed since. If files changed with no passing check behind the
-claim, it asks Jev a few yes/no questions about what the transcript actually
-shows, and if the claim looks unsupported it sends the agent back to verify
-instead of letting the turn end. It does that at most three times in a
-session, and it fails open: no key, a slow answer or any error means the turn
-ends normally. What leaves the machine is small and redacted -- the task text,
-the final message and the check command lines, through a 13-rule secret
-redactor, capped at a few thousand characters. No diffs, no file contents.
+`--belay` installs the Stop hook. When an agent says it has finished, belay
+looks at whether that turn changed files and whether any check has passed
+since.
+
+If files changed with no passing check behind the claim, belay asks Jev a few
+yes/no questions about what the transcript shows. Where the claim looks
+unsupported, it sends the agent back to verify rather than letting the turn
+end. It does that at most three times in a session, and it fails open: no key,
+a slow answer or any error means the turn ends normally.
+
+What leaves the machine is small and redacted: the task text, the final
+message and the check command lines, through a 13-rule secret redactor, capped
+at a few thousand characters. No diffs, no file contents.
 `belay/install.sh` prints the Stop hook block to add; nothing is written to a
 `settings.json` for you.
 
 Add `--tuning` once you are comfortable with what the tuning loop does
 (`tuning/README.md`); leave `--browser`, `--review` and `--shim` for later,
 deliberate decisions. Compaction is its own numbered step below, because
-`install.sh` deliberately refuses to install it for you.
+`install.sh` refuses to install it for you.
 
 `install.sh` never edits a `settings.json` unless you pass `--wire`; without
-it, the hook edit is only printed. Do not pass `--wire` yet -- wire each
-config directory by hand in the next step, because there is more than one.
+it, the hook edit is only printed. Do not pass `--wire` yet. Wire each config
+directory by hand in the next step, because there is more than one.
 
 ## 5. Finding every Claude config directory
 
@@ -171,7 +174,7 @@ for d in ~/.claude*/; do [ -f "$d/settings.json" ] && echo "$d"; done
 ```
 
 On that machine it yielded exactly two of the eleven. The others existed but
-carried no `settings.json`, so there was nothing to wire in them -- do not
+carried no `settings.json`, so there was nothing to wire in them. Do not
 create one just to have somewhere to put the hook.
 
 Also check any repo-level `.envrc`, wrapper script, or shell alias that sets
@@ -186,17 +189,19 @@ For every directory the previous step found:
 install/wire.sh --print ~/.claude/settings.json ~/.claude-<account>/settings.json ...
 ```
 
-**`wire.sh --apply` both ADDS a missing airlock hook and repoints an
-existing one.** Earlier releases of this repository only repointed: against
-a settings.json that had never had the guard in it -- which was the case for
-both files on that machine -- `wire.sh` printed `no airlock.py
-hook command found, skipping` and changed nothing, so a first install needed
-a hand-edit before `wire.sh` had anything to do. That gap is fixed: `--apply`
-now adds the missing `PreToolUse` entry itself (matcher `"*"`, timeout 5,
-command `<absolute python3> $AIRLOCK_HOME/current/hooks/airlock.py`),
-idempotently, backing the file up first and leaving every other key and hook
-untouched -- or creates the file outright if it does not exist yet. `--print`
-shows exactly what `--apply` would add or repoint.
+**`wire.sh --apply` both ADDS a missing airlock hook and repoints an existing
+one.** Earlier releases only repointed. Against a settings.json that had never
+had the guard in it, which was the case for both files on that machine,
+`wire.sh` printed `no airlock.py hook command found, skipping` and changed
+nothing. A first install needed a hand-edit before `wire.sh` had anything to
+do.
+
+That gap is fixed. `--apply` now adds the missing `PreToolUse` entry itself
+(matcher `"*"`, timeout 5, command
+`<absolute python3> $AIRLOCK_HOME/current/hooks/airlock.py`), idempotently,
+backing the file up first and leaving every other key and hook untouched. It
+creates the file outright if it does not exist yet. `--print` shows exactly
+what `--apply` would add or repoint.
 
 So on a first install the order is simply:
 
@@ -208,19 +213,17 @@ which adds the hook to every file named (each backed up first, or created if
 missing), and on every later run just repoints them at the newest release
 after a `deploy.sh`.
 
-Pass `--belay` (`install/wire.sh --apply --belay ...`, or `install.sh --wire`
-when `--belay` is one of the components selected -- it is in the installer's
-default set) to also add the `Stop` hook (matcher `"*"`, absolute path to
-`<home>/bin/airlock-belay-run`, timeout 25) to the same files, in the same
-pass. It is only added when that wrapper file actually exists on this
+Pass `--belay` to also add the `Stop` hook to the same files in the same pass:
+matcher `"*"`, absolute path to `<home>/bin/airlock-belay-run`, timeout 25.
+Use `install/wire.sh --apply --belay ...`, or `install.sh --wire` when
+`--belay` is one of the selected components. It is in the default set. It is only added when that wrapper file actually exists on this
 machine; otherwise `wire.sh` says so and leaves `Stop` alone. Pass
 `--function-hooks` to also set `"CLAUDE_CODE_ENABLE_FUNCTION_HOOKS": "1"` in
 each file's `env` block, if compaction is going in.
 
 Repeat for any further config directory the glob or your check turned up.
-Missing one is not catastrophic -- that account's sessions simply run
-without the guard -- but it means "installed" is not the same as "wired
-everywhere yet".
+Missing one is not catastrophic: that account's sessions run without the guard.
+But "installed" is then not "wired everywhere".
 
 ## 6a. Per-machine rule overrides
 
@@ -236,16 +239,17 @@ cat > ~/.config/airlock/rules.json <<'JSON'
 JSON
 ```
 
-`R6-gui-or-browser` denies `xdg-open`, `wslview` and `explorer.exe` because
-a headless server has no desktop; on a workstation those are ordinary. It is
+`R6-gui-or-browser` denies `xdg-open`, `wslview` and `explorer.exe`, because a
+headless server has no desktop. On a workstation those are ordinary. R6 is
 **`off` by default on every platform** now, and the installer never turns it on
-inside WSL (WSL reaches a Windows desktop), so the `"off"` entry above is
-belt-and-braces rather than a change. `R5-sudo` is a
-workstation's own machine, so it warns rather than blocks. `R3` and `R7`
-already default to `warn` and need no entry. `R4-long-work-bare-shell` also
-defaults to `warn`, so it needs no entry either, but note that its advice
-text still talks about a box "reached only over SSH" -- accurate for a
-server, not for a workstation.
+inside WSL, which reaches a Windows desktop. The `"off"` entry above therefore
+restates the default rather than changing it.
+
+`R5-sudo` is a workstation's own machine, so it warns rather than blocks. `R3`
+and `R7` already default to `warn` and need no entry. So does
+`R4-long-work-bare-shell`, but note that its advice text still talks about a
+box "reached only over SSH", which is accurate for a server and not for a
+workstation.
 
 **Watch out:** once `rules.json` exists, re-running `install/install.sh
 --guard` fails. Its pre-deploy `python3 -m unittest discover -s tests` reads
@@ -298,15 +302,17 @@ install/doctor.sh
 ```
 
 `doctor.sh` runs real hook processes against a throwaway `HOME`, and pins R6
-on inside that throwaway `HOME` -- which means its deny case (an `xdg-open`
-blocked by R6) passes on any machine, whatever this one's `rules.json` says
-about R6. It reports this machine's actual R6 setting separately. It proves the hook works, not what this
-machine's rules do; check those by piping an event through the deployed hook
-with the real `HOME`. `doctor.sh` (one real
-deny, one real allow, a fail-open check, a kill-switch check), checks the
-daemon over its Unix socket, runs a real health check, queries the real
-plocate index, and reports every installed systemd timer's actual state --
-it does not just check that files exist.
+on inside it. So its deny case, an `xdg-open` blocked by R6, passes on any
+machine whatever this one's `rules.json` says about R6. This machine's own R6
+setting is reported separately.
+
+It proves the hook works, not what this machine's rules do. Check those by
+piping an event through the deployed hook with the real `HOME`.
+
+`doctor.sh` runs one real deny, one real allow, a fail-open check and a
+kill-switch check. It also checks the daemon over its Unix socket, runs a real
+health check, queries the real plocate index, and reports every installed
+systemd timer's actual state. It does not merely check that files exist.
 
 ## 10. The health timer
 
@@ -318,20 +324,21 @@ add the URL, then the health check will start pushing on its next run.
 
 ## 11. The plocate index, under WSL
 
-`--filesearch` indexes `$HOME` inside the WSL distribution -- the Linux
-side only. It does not, and cannot usefully, see the Windows filesystem:
-Windows files under `/mnt/c/...` are visible from WSL but plocate's Ubuntu
-package does not index NTFS efficiently, and nothing here tries. For
-searching Windows files, **Everything's `es.exe`** command-line tool is the
-better fit -- it is a separate Windows-native tool, not something this
-repository builds or installs, so if the Windows-side files need
-searching, install Everything and use `es.exe` there. This section indexes
+`--filesearch` indexes `$HOME` inside the WSL distribution, the Linux side
+only. It does not, and cannot usefully, see the Windows filesystem. Windows
+files under `/mnt/c/...` are visible from WSL, but plocate's Ubuntu package
+does not index NTFS efficiently and nothing here tries.
+
+For Windows files, **Everything's `es.exe`** command-line tool is the better
+fit. It is a separate Windows-native tool, not something this repository builds
+or installs. If the Windows-side files need searching, install Everything and
+use `es.exe` there. This section indexes
 the Linux home only.
 
 ## 12. The compaction plugin
 
 Recommended, and a separate step on purpose: `install/install.sh` never
-installs it, even with `--compaction` -- that flag only prints the warning and
+installs it, even with `--compaction`. That flag only prints the warning and
 stops. Run the component's own installer yourself, after reading its README:
 
 ```bash
@@ -339,19 +346,22 @@ less compaction/README.md
 compaction/install.sh
 ```
 
-**What it sends off the machine, in one sentence:** up to roughly 25,000
-tokens of raw tool inputs and tool-result text per request -- file contents,
-command output, fetched pages -- truncated only for size, with no redaction
-pass anywhere in the plugin's source.
+**What it sends off the machine:** up to roughly 25,000 tokens of raw tool
+inputs and tool-result text per request. File contents, command output, fetched
+pages, truncated only for size, with no redaction pass anywhere in the plugin's
+source.
 
-That is a much larger exposure than anything else installed here, and it is
-why this step is a deliberate act rather than a flag. What you get for it is
-real: a long session stays inside its context window instead of degrading, and
-a measured manual compaction on this box took a 49,288-token session down to
-23,111 tokens in 906 ms. It needs Claude Code 2.1.274 or later with function
-hooks enabled. If the exposure is not acceptable for the work this machine
-does, skip this step and say so in the machine notes -- everything else above
-still works without it.
+That is a much larger exposure than anything else installed here, which is why
+this step is its own decision rather than a flag.
+
+What you get for it: a long session stays inside its context window instead of
+degrading. A measured manual compaction on this box took a 49,288-token session
+down to 23,111 tokens in 906 ms. It needs Claude Code 2.1.274 or later with
+function hooks enabled.
+
+If the exposure is not acceptable for the work this machine does, skip this
+step and say so in the machine notes. Everything else above still works without
+it.
 
 ## 13. Updating later
 
