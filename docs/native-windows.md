@@ -52,6 +52,26 @@ directory under the Windows `%TEMP%` and removed afterwards.
   using `es` is not steered at `es`.
 - **Keyless fail-open**: with no key loadable, a malformed payload and the
   kill switch (`AIRLOCK_DISABLE=1`) both exit 0 with no output.
+- **The Jev-judged path, with a real key** (2026-09-19, Windows Python
+  **3.11.9**, Windows 11, key present in the scratch profile only and
+  destroyed afterwards). All of it in **enforce** mode, piped at the installed
+  launcher:
+  - a **judged search deny** through the **Bash tool**, both spellings --
+    `dir /s C:\ *.xlsm` and the Git Bash form `find /c -name '*.xlsm'` --
+    each returning the `es.exe` steer as deny JSON;
+  - the same through the **PowerShell tool**:
+    `Get-ChildItem -Path C:\ -Recurse -Filter *.xlsm`;
+  - a **judged ALLOW**: `dir /s /b C:\proj\src\*.xlsm`, path-scoped inside a
+    project folder, judged in 1032 ms and not blocked;
+  - the **tier guard** on an `Agent` call two rungs over (blocked) and one
+    rung over (the warn `additionalContext`, nothing blocked);
+  - the **rewrite** output with `AIRLOCK_TIER_REWRITE=1`:
+    `subagent_type` changed `fable` -> `scout-find`, every other field
+    byte-identical;
+  - the **doctor with a key present**: 13 passed, 0 failed, 2 skipped (the
+    daemon, and `settings.json`, deliberately not wired);
+  - the **health check's direct HTTPS probe**: `status=healthy`,
+    `direct_ask {ok: true, latency_ms: 1125}`.
 - **Install then uninstall**, for real: release copy, junction created,
   `current.txt`, launcher, mode file `shadow`, `settings.json` written with a
   timestamped backup; re-running reported `already wired ... no change`; and
@@ -69,11 +89,15 @@ directory under the Windows `%TEMP%` and removed afterwards.
   and steers, and never installs.
 - `deploy.sh`, `rollback.sh` and `wire.sh` stay bash and Linux-only. Their
   Windows jobs are done by `windows_install.py` and `current.txt`.
-- **The Jev-judged deny path is verified on Linux only.** The Windows machine
-  was kept keyless on purpose -- no key was ever copied to it -- so every
-  judged path there fail-opened, which is what the fail-open evidence above
-  is. The search deny is proved as far as `evaluate_search(...)` returning
-  would-deny true plus the exact deny text.
+- **The enforce-mode budget on Windows is tight, and this is unresolved.**
+  32 judged calls on that machine: median **1030 ms**, min 953, p95 1092,
+  max **1359 ms** -- and **one** of the 32 died on a TLS handshake timeout
+  (`_ssl.c:989: The handshake operation timed out`) and **fail-opened**, a
+  3.1% fail-open rate. Windows has no warm daemon, so every judgement pays a
+  fresh TLS handshake against a 1500 ms budget that was chosen for a Linux box
+  with a daemon in front of it. A Windows-specific budget of about 2500 ms is
+  **proposed, not applied** -- it trades a slower worst case for fewer silent
+  allows, and that is the owner's call, not a change to slip in.
 - **macOS is still untested**, and its row in the README is unchanged.
 
 ## One number worth knowing before you measure anything there

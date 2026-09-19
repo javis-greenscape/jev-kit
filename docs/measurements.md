@@ -31,6 +31,30 @@ idle daemon. The one figure measured end to end here is the tier eval's:
 a throughput number under load, not a single-call latency, and is quoted only
 so there is one figure with a method attached to it.
 
+### On native Windows, with no warm daemon
+
+2026-09-19, Windows Python **3.11.9** on a Windows 11 workstation, a real key
+in a throwaway profile, enforce mode, real `PreToolUse` events piped at the
+installed launcher. **32 judged calls** (mixed `R8-tool-choice-guard` and
+`R8-tier-guard`), latency as the guard itself recorded it in its log:
+
+| | ms |
+|---|---|
+| min | 953 |
+| median | 1030 |
+| p95 | 1092 |
+| max | 1359 |
+
+**One of the 32 did not complete**: `_ssl.c:989: The handshake operation timed
+out`, which blew the 1500 ms enforce budget and **fail-opened** -- a 3.1%
+fail-open rate in this sample. Windows has no warm daemon, so every judgement
+pays a fresh DNS + TCP + TLS handshake against a budget chosen for a Linux box
+that has one. A Windows-specific budget is proposed, and deliberately not
+applied, in [native-windows.md](native-windows.md).
+
+The health check's own direct HTTPS probe on the same machine and the same
+session: `direct_ask {ok: true, latency_ms: 1125}`, `status=healthy`.
+
 ## Rule accuracy
 
 `python3 -m airlock.eval`, 2026-09-19. Every deny-capable rule scored 100%
