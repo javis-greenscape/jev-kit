@@ -137,29 +137,69 @@ def run(cmd, cwd=None, check=True, input_text=None, timeout=None):
     return proc
 
 
-def find_main_repo(start_dir):
-    """The main (first) worktree of the repo tune.py itself lives in. Never
-    hard-coded: derived from `git worktree list`, which always lists the
-    original checkout first regardless of which worktree you ask from."""
-    proc = run(["git", "-C", str(start_dir), "worktree", "list", "--porcelain"])
+def resolve_main_repo(script_dir):
+    """The git checkout the tuning loop operates on, or None.
+
+    Delegates to `airlock.repo_path.resolve_repo`, the one place this order is
+    written down: AIRLOCK_TUNE_REPO env -> the repo.path pointer the installer
+    records -> script_dir's own parent if THAT is a git checkout -> None. A
+    deployed release (script_dir under $AIRLOCK_HOME/current/tuning, no
+    .git anywhere in it) resolves via the pointer or not at all; a plain
+    checkout resolves via its own parent with no pointer needed.
+    """
+    repo_root = Path(script_dir).resolve().parent
+    sys.path.insert(0, str(repo_root))
+    from airlock import repo_path as _repo_path  # local import: sys.path just set up above
+
+    resolved = _repo_path.resolve_repo(script_dir)
+    return Path(resolved).resolve() if resolved else None
+
+
+def _worktree_belongs_to(worktree_dir, repo_dir):
+    """True iff `worktree_dir` is a linked worktree of `repo_dir` (its own
+    main checkout is `repo_dir`, per `git worktree list` run from inside it).
+    False (never raises) for anything else, including a directory that isn't
+    a git worktree at all."""
+    if not (worktree_dir / ".git").exists():
+        return False
+    proc = run(["git", "-C", str(worktree_dir), "worktree", "list", "--porcelain"], check=False)
+    if proc.returncode != 0:
+        return False
     for line in proc.stdout.splitlines():
         if line.startswith("worktree "):
-            return Path(line[len("worktree "):].strip())
-    raise RuntimeError("could not determine main repo from `git worktree list`")
+            try:
+                return Path(line[len("worktree "):].strip()).resolve() == Path(repo_dir).resolve()
+            except Exception:
+                return False
+    return False
+
+
+def retire_foreign_worktree(worktree_dir):
+    """Move a tune-worktree that belongs to a DIFFERENT repository aside
+    rather than reusing or deleting it -- it may hold auto-tune commits worth
+    keeping around for inspection. tune_state.json (the interval backoff)
+    lives in STATE_DIR, not inside the worktree, so it is untouched."""
+    retired = worktree_dir.parent / ("%s.retired-%d" % (worktree_dir.name, int(time.time())))
+    worktree_dir.rename(retired)
+    log("existing tune-worktree at %s belongs to a different repository; moved it aside to %s" % (worktree_dir, retired))
+    return retired
 
 
 def ensure_tune_worktree(main_repo):
     if WORKTREE_DIR.exists():
-        # Rebase auto-tune onto the base branch. On conflict, abort and report.
-        run(["git", "-C", str(WORKTREE_DIR), "fetch", str(main_repo), "%s:refs/heads/tune-main-ref" % BASE_BRANCH])
-        proc = run(
-            ["git", "-C", str(WORKTREE_DIR), "rebase", "refs/heads/tune-main-ref"],
-            check=False,
-        )
-        if proc.returncode != 0:
-            run(["git", "-C", str(WORKTREE_DIR), "rebase", "--abort"], check=False)
-            raise RuntimeError("rebase of auto-tune onto %s conflicted; aborted:\n%s" % (BASE_BRANCH, proc.stdout))
-        return
+        if not _worktree_belongs_to(WORKTREE_DIR, main_repo):
+            retire_foreign_worktree(WORKTREE_DIR)
+        else:
+            # Rebase auto-tune onto the base branch. On conflict, abort and report.
+            run(["git", "-C", str(WORKTREE_DIR), "fetch", str(main_repo), "%s:refs/heads/tune-main-ref" % BASE_BRANCH])
+            proc = run(
+                ["git", "-C", str(WORKTREE_DIR), "rebase", "refs/heads/tune-main-ref"],
+                check=False,
+            )
+            if proc.returncode != 0:
+                run(["git", "-C", str(WORKTREE_DIR), "rebase", "--abort"], check=False)
+                raise RuntimeError("rebase of auto-tune onto %s conflicted; aborted:\n%s" % (BASE_BRANCH, proc.stdout))
+            return
     WORKTREE_DIR.parent.mkdir(parents=True, exist_ok=True)
     # Branch may already exist (e.g. worktree dir was removed manually).
     proc = run(["git", "-C", str(main_repo), "branch", "--list", "auto-tune"], check=False)
@@ -530,6 +570,12 @@ def main():
             log("interval not elapsed (%.1f/%d min); exiting" % (elapsed_min, interval_min))
             return 0
 
+    main_repo = resolve_main_repo(Path(__file__).resolve().parent)
+    if main_repo is None:
+        log("no repository resolved (no AIRLOCK_TUNE_REPO, no repo.path pointer, and this "
+            "checkout has no .git); tuning is optional, exiting without touching state")
+        return 0
+
     all_rows = read_shadow_rows()
     new_rows = new_rows_since(all_rows, state.get("last_processed_ts", ""))
 
@@ -548,8 +594,6 @@ def main():
                     error_rate=0.0, accuracy_before=None, accuracy_after=None, tokens_jev=0,
                     wall_s=time.time() - run_start, reason="redaction sanity check failed")
             return 0
-
-    main_repo = find_main_repo(Path(__file__).resolve().parent)
 
     try:
         ensure_tune_worktree(main_repo)

@@ -6,6 +6,10 @@
 # director run it) after reviewing `git log auto-tune` in the tune worktree.
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck disable=SC1091
+. "$SCRIPT_DIR/../install/repo-path.sh"
+
 STATE_DIR="${AIRLOCK_TUNE_STATE_DIR:-$HOME/.local/state/airlock}"
 WORKTREE_DIR="${AIRLOCK_TUNE_WORKTREE_DIR:-$STATE_DIR/tune-worktree}"
 
@@ -14,9 +18,19 @@ if [ ! -d "$WORKTREE_DIR" ]; then
   exit 1
 fi
 
-MAIN_REPO="$(git -C "$WORKTREE_DIR" worktree list --porcelain | awk '/^worktree /{print $2; exit}')"
-if [ -z "$MAIN_REPO" ]; then
-  echo "could not determine main repo from git worktree list" >&2
+# Resolve the repo the same way tune.py does (env -> repo.path pointer -> our
+# own parent if a checkout), rather than trusting `git worktree list` on
+# $WORKTREE_DIR -- that would just report whatever repo the worktree happens
+# to already belong to, which is exactly wrong when it is a foreign leftover.
+if ! MAIN_REPO="$(airlock_tune_repo "$SCRIPT_DIR")"; then
+  echo "could not resolve a repository (no AIRLOCK_TUNE_REPO, no repo.path, not a checkout); refusing to promote" >&2
+  exit 1
+fi
+
+WORKTREE_REPO="$(git -C "$WORKTREE_DIR" worktree list --porcelain | awk '/^worktree /{print $2; exit}')"
+if [ -z "$WORKTREE_REPO" ] || [ "$(cd "$WORKTREE_REPO" && pwd)" != "$(cd "$MAIN_REPO" && pwd)" ]; then
+  echo "tune worktree at $WORKTREE_DIR belongs to $WORKTREE_REPO, not the resolved repo $MAIN_REPO; refusing to promote" >&2
+  echo "  (the tuning loop retires a foreign worktree on its next run; run tune.sh once, then retry)" >&2
   exit 1
 fi
 
