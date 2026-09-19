@@ -368,9 +368,14 @@ if [ "$WANT_GUARD" = "1" ]; then
   fi
 
   echo "   running the unit tests before deploying..."
-  if ( cd "$REPO_ROOT" && "$PY" -m unittest discover -s tests >/dev/null 2>&1 ); then
+  # A clean environment and a throwaway HOME: this machine's own config.env
+  # (sourced above) and its rules.json must not leak into the suite.
+  TEST_HOME="$(mktemp -d)"
+  if ( cd "$REPO_ROOT" && env -i PATH="$PATH" HOME="$TEST_HOME" "$PY" -m unittest discover -s tests >/dev/null 2>&1 ); then
+    rm -rf "$TEST_HOME"
     ok "unit tests pass"
   else
+    rm -rf "$TEST_HOME"
     fail "unit tests fail in this checkout; refusing to deploy it"
     exit 1
   fi
