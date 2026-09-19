@@ -205,7 +205,10 @@ def test_changed_field_context_does_not_reuse_generated_text(runner, monkeypatch
     runner.state["browser"].act.side_effect = [StalePage("Changed before input"), None]
     with pytest.raises(StalePage):
         runner.command("act", {"fingerprint": runner.state["page"]["fingerprint"]})
+    # Change something both context shapes look at: page body text (the "full" shape) and the
+    # field's own value (the "trimmed" shape, which drops page text — see model.field_context).
     runner.state["page"]["text"] = "Different page context"
+    runner.state["page"]["actions"][0]["value"] = "changed"
     runner.state["decision"] = decision()
     runner.command("act", {"fingerprint": runner.state["page"]["fingerprint"]})
     assert helper.call_count == 2

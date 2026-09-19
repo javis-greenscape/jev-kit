@@ -559,3 +559,106 @@ chrom` returning nothing afterward), plus `examples/run.py` now calls
   a net win if a future CLI version exposes a way to skip extended thinking under stream-json),
   but do not make it the default — `TEXT_MODEL_PROVIDER=claude-cli` (or a real API key) remains
   the faster option on this box today.
+
+  **Superseded by the next section**: both levers below turned out to be available after all
+  (an env var the CLI honours for thinking, and a smaller-context redesign for the second), and
+  together they make the standing child the fastest path measured on this box.
+
+## Thinking off and trimmed context (2026-09-19, follow-up)
+
+Two cheap experiments against the standing-child regression above, run before building anything
+bigger, per this task's brief. Both landed; both are now wired in, keeping the previous shapes
+available behind env switches.
+
+### Experiment A — `MAX_THINKING_TOKENS=0`
+
+Claude Code honours `MAX_THINKING_TOKENS` even though no CLI flag exposes it — `--help` has no
+`--effort none`/`--no-thinking`, but the env var works and was not rejected at `0` (no fallback
+to `1024` was needed). Measured on the realistic full context (goal + field + ~6000-char page
+text, same shape as before):
+
+| Configuration | Latency (5 calls, warm child) | thinking_tokens (usage) | Correct? |
+|---|---|---|---|
+| Standing child, baseline (`--effort low` only) | 2.3-6.2s (1st call pays cold-start) | 110-404 | yes |
+| Standing child, `MAX_THINKING_TOKENS=0` | 0.6-1.2s | **0** every call | yes |
+| Standing child, `MAX_THINKING_TOKENS=1024` | 2.1-3.3s | 88-179 (budget shrinks it, doesn't zero it) | yes |
+| Per-call adapter (`claude-cli`), baseline | 3.4-4.7s | n/a (plain-text `-p`, no usage detail) | yes |
+| Per-call adapter, `MAX_THINKING_TOKENS=0` | 1.7-3.5s | n/a | yes |
+
+`MAX_THINKING_TOKENS=0` removes the extended-thinking cost identified as the dominant latency
+term in the previous section, on both adapters, with the correct value returned in every run
+(`"Godel's incompleteness theorems"`, the same Wikipedia goal used throughout). It is now the
+default in both `text_model_claude_standing.py`'s child environment and
+`text_model_claude.py`'s subprocess environment (`env.setdefault("MAX_THINKING_TOKENS", "0")` —
+overridable by setting the var before start-up if a future case needs real thinking budget).
+
+### Experiment B — trimmed element-table context
+
+Built `model.field_context()`'s `"trimmed"` shape (now the default, selected by
+`TEXT_MODEL_CONTEXT=full|trimmed`): goal, the chosen element's own row from the element table
+(`action_space()`'s per-node dedup, the same shape TypeSafe itself sees), its 5 nearest rows by
+position in that same first-encounter order, page title and url. No page body text, no
+`recent_actions`. Implementation: `jev_ultrafast/model.py:field_context()` reconstructs the
+node-dedup order actions are built in (matching `action_space()`'s own ordering) to find the
+chosen field's position, then takes the 5 positions nearest by `abs(distance)`.
+
+Correctness, standing child, `MAX_THINKING_TOKENS=0`, trimmed context, one hand-built context
+per case (no page text at all):
+
+| Case | Goal | Field | Result | Correct? |
+|---|---|---|---|---|
+| Wikipedia search | "Search for Godel's incompleteness theorems on Wikipedia" | searchbox "Search Wikipedia" | `"Godel's incompleteness theorems"` | yes |
+| Flights origin (ambiguity check) | "Find flights from Manchester to Lisbon next Friday" | combobox "Where from?" (nearby: "Where to?") | `"Manchester"` | yes — picked origin, not destination |
+| Date field | "...date of birth 14 March 1990..." | textbox "Date of birth" | `"14/03/1990"` | yes |
+| Email field | "...email john.carter@example.com" | textbox "Email" | `"john.carter@example.com"` | yes |
+
+Latency with trimmed context, standing child, `MAX_THINKING_TOKENS=0`: **0.6-1.4s** per call
+across all four cases run twice through one shared child (8 calls, no repeats within a round) —
+same order of magnitude as Experiment A's full-context-but-thinking-off number, since page text
+was already a smaller share of the prompt once thinking was off; trimming it removes the
+remaining ~6000 chars of input tokens and keeps prompt-caching cheaper across turns.
+
+**One correctness caveat found, and resolved by how the test was framed, not by a code change**:
+sending the *exact same* ambiguous prompt (flights origin case) twice in a row through one
+child, with thinking off, flipped the answer to `"Lisbon"` on the second identical call and then
+returned `NONE` (no valid value) on three further identical repeats. A fresh child per request
+answered correctly 5/5. Running the four *different* cases in sequence twice through one shared
+child (the realistic pattern — no two TYPE_TEXT contexts in a real run are byte-identical)
+answered correctly all 8 times. Read as: disabling thinking makes a long-lived session more
+sensitive to exact-repeat degenerate inputs, which normal usage does not produce; noted here
+rather than hidden, no correctness failure was found under any context that varies turn to turn.
+
+### Wired in
+
+- `text_model_claude_standing.py` and `text_model_claude.py`: `MAX_THINKING_TOKENS` defaults to
+  `0` in the child/subprocess environment (Experiment A).
+- `model.py:field_context()`: `TEXT_MODEL_CONTEXT` env var, `"trimmed"` (default, winner) or
+  `"full"` (the original shape, kept for a page where the value genuinely must be read from body
+  text). Both providers (`claude-standing`, `claude-cli`) get whichever shape is selected, since
+  `field_context()` is the one call site both call through.
+
+### End-to-end re-run, README Wikipedia goal, both changes live (defaults, no env overrides beyond `TEXT_MODEL_PROVIDER=claude-standing`)
+
+Same setup as both earlier end-to-end runs (headless Chromium via `scripts/launch_chromium.js`,
+`BU_CDP_URL=http://127.0.0.1:9333`, one instance, closed after use, confirmed via `pgrep -a
+chrom` returning nothing afterward; `free -h` checked before launch, ~4.5G available).
+
+- **Reached the goal**: final URL `.../wiki/G%C3%B6del%27s_incompleteness_theorems`, status `done`.
+- **Wall time: 7.5s** (`time uv run python examples/run.py ...`) vs the previous best **9.3-9.8s**
+  (per-call `claude-cli` adapter) and the earlier standing-child regression's **11.0-12.6s**.
+- **TYPE_TEXT latency: 739ms** (`history[0]["text_latency_ms"]`) vs the previous best **4761ms**
+  (per-call adapter) and the earlier standing-child regression's **6.55s**.
+- No retries, no fallback, no `StalePage`.
+
+### Verdict
+
+**Both levers won, and stacked**: `MAX_THINKING_TOKENS=0` removes the thinking-token cost that
+was the dominant term at realistic prompt size; trimming the context removes the remaining
+input-token cost of page text. Together, the standing-child provider goes from a documented
+regression (11.0-12.6s wall, 6.55s fill) to the fastest configuration measured in this repo
+(7.5s wall, 739ms fill) — faster than the per-call `claude-cli` adapter this spike had settled
+on as the practical floor. `TEXT_MODEL_PROVIDER=claude-standing` is still not the global default
+(unset `TEXT_MODEL_PROVIDER` still requires `TEXT_MODEL_API_KEY`, matching how this repo treats
+CLI-based adapters as spike-only, OAuth-backed alternatives) but it is now the fastest opt-in
+path on this box, and both new switches (`MAX_THINKING_TOKENS`, `TEXT_MODEL_CONTEXT`) are cheap,
+reversible env-var choices rather than a rewrite.

@@ -149,11 +149,40 @@ def choose(state, goal, history):
 
 
 def field_context(goal, action, page, history):
+    """TYPE_TEXT context for the text helper. TEXT_MODEL_CONTEXT selects the shape:
+
+    - "trimmed" (default, measured 2026-09-19, see SPIKE-NOTES.md "Thinking off and trimmed
+      context"): goal, the chosen element's own element-table row, its 5 nearest rows (by
+      position in the same first-encounter order action_space() uses), page title and url. No
+      page body text, no recent_actions — the field's name/role/value plus its neighbours are
+      almost always enough to derive the value, and dropping ~6000 chars of page text is most of
+      why this shape is fast.
+    - "full": the original shape — goal, field {label, role, value}, page {title, text[:6000]},
+      last 6 recent_actions. Kept behind the switch as the fallback if a page ever needs body
+      text the trimmed shape can't see (e.g. a value that must be copied from prose on the page).
+    """
+    if os.environ.get("TEXT_MODEL_CONTEXT", "trimmed") == "full":
+        return {
+            "goal": goal,
+            "field": {k: action.get(k) for k in ("label", "role", "value")},
+            "page": {"title": page["title"], "text": page["text"][:6000]},
+            "recent_actions": [{k: h.get(k) for k in ("action", "text")} for h in history[-6:]],
+        }
+    elements, _, _ = action_space(page["actions"])
+    order, seen = [], set()
+    for a in page["actions"]:
+        node = a.get("node")
+        # Pseudo-actions (wait/scroll) carry no node and never appear in `elements`; skip them.
+        if node is not None and node not in seen:
+            seen.add(node)
+            order.append(node)
+    position = order.index(action["node"])
+    nearest = sorted((i for i in range(len(elements)) if i != position), key=lambda i: (abs(i - position), i))[:5]
     return {
         "goal": goal,
-        "field": {k: action.get(k) for k in ("label", "role", "value")},
-        "page": {"title": page["title"], "text": page["text"][:6000]},
-        "recent_actions": [{k: h.get(k) for k in ("action", "text")} for h in history[-6:]],
+        "field": elements[position],
+        "nearby_fields": [elements[i] for i in sorted(nearest)],
+        "page": {"title": page["title"], "url": page["url"]},
     }
 
 

@@ -12,6 +12,14 @@ Design (measured 2026-09-19, see SPIKE-NOTES.md "Standing text model" section):
   session; `--bare` avoids that too but requires an Anthropic API key, which this box does not
   have — OAuth only, so `--safe-mode` is the one that both skips hooks and keeps OAuth working).
   `--tools ""` disables all tool use so the child can never act, only answer.
+- `MAX_THINKING_TOKENS=0` is set on the child's environment by default (overridable by setting
+  it before start-up). Measured 2026-09-19 (see SPIKE-NOTES.md "Thinking off and trimmed
+  context"): this removes the extended-thinking cost that dominated latency at realistic prompt
+  sizes (thinking_tokens confirmed 0 in the `result` event's usage; latency dropped from
+  ~5.9-7.2s to ~0.6-1.3s per call on a warm child). One correctness caveat found: with thinking
+  off, sending the *exact same* ambiguous prompt twice in a row within one session occasionally
+  flipped the answer; with realistic varying turns (the actual usage pattern) it did not
+  reproduce across a mixed sequence of the four correctness cases run twice through one child.
 - Each request is one `{"type": "user", "message": {...}}` line on stdin; the reply is read from
   stdout until the `"type": "result"` event. A dedicated reader thread drains stdout into a
   queue so a slow/timed-out request never blocks or corrupts the next one.
@@ -81,6 +89,8 @@ class _Child:
     """One long-lived `claude -p --input-format stream-json` process."""
 
     def __init__(self):
+        env = {**os.environ, "CLAUDE_CONFIG_DIR": CLAUDE_CONFIG_DIR}
+        env.setdefault("MAX_THINKING_TOKENS", "0")
         self.proc = subprocess.Popen(
             _cmd(),
             stdin=subprocess.PIPE,
@@ -88,7 +98,7 @@ class _Child:
             stderr=subprocess.PIPE,
             text=True,
             bufsize=1,
-            env={**os.environ, "CLAUDE_CONFIG_DIR": CLAUDE_CONFIG_DIR},
+            env=env,
         )
         self.requests_served = 0
         self._queue = queue.Queue()
