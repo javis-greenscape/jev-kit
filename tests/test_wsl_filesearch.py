@@ -260,5 +260,35 @@ class TestEsOnlyInCommandPosition(unittest.TestCase):
         self.assertFalse(policy.command_already_uses_indexed_search(
             "grep -r bytes .", windows=False, wsl=True))
 
+
+class TestEsQuotingIsHonored(unittest.TestCase):
+    """Codex P2, round 2 on PR #1: the raw _ES_RE regex ignored quoting, so a
+    filename pattern that happens to contain a separator followed by `es`
+    was misread as a second command invoking Everything."""
+
+    def test_semicolon_and_es_inside_a_quoted_argument_is_not_a_command(self):
+        self.assertFalse(policy.command_already_uses_indexed_search(
+            'find /mnt/c -name "foo; es bar"', windows=False, wsl=True))
+
+    def test_pipe_and_es_inside_a_quoted_argument_is_not_a_command(self):
+        self.assertFalse(policy.command_already_uses_indexed_search(
+            'find /mnt/c -name "foo| es bar"', windows=False, wsl=True))
+
+    def test_ampersand_and_es_inside_a_quoted_argument_is_not_a_command(self):
+        self.assertFalse(policy.command_already_uses_indexed_search(
+            "find /mnt/c -name 'foo&& es bar'", windows=False, wsl=True))
+
+    def test_a_real_es_command_after_a_quoted_lookalike_is_still_found(self):
+        # The first stage's quoted argument LOOKS like a separator+es, but
+        # the second stage is a genuine es invocation.
+        self.assertTrue(policy.command_already_uses_indexed_search(
+            'find /mnt/c -name "foo; es bar"; es -path "/mnt/c" -n 50 "x"',
+            windows=False, wsl=True))
+
+    def test_native_windows_also_honors_quoting(self):
+        self.assertFalse(policy.command_already_uses_indexed_search(
+            'find /mnt/c -name "foo; es bar"', windows=True))
+
+
 if __name__ == "__main__":
     unittest.main()
