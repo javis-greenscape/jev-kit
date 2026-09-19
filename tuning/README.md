@@ -16,11 +16,15 @@ on its own.
    1440, resets to 30 after a commit or when the judged error rate exceeds
    10%). `--force` bypasses this check only (used for manual/verification
    runs); it never bypasses the min-rows check.
-3. Ensure `~/.local/state/airlock/tune-worktree` exists as a git worktree on
-   branch `auto-tune`, created from `main` if the branch doesn't exist yet,
-   otherwise rebased onto `main` (aborting and logging on a conflict). The
-   main repo path is never hard-coded -- it's read from `git worktree list`,
-   which always lists the original checkout first.
+3. Resolve which repository this run operates on (see "Which repository does
+   tuning use?" below), then ensure `~/.local/state/airlock/tune-worktree`
+   exists as a git worktree of it on branch `auto-tune`, created from `main`
+   if the branch doesn't exist yet, otherwise rebased onto `main` (aborting
+   and logging on a conflict). If no repository resolves at all -- the common
+   case for a fresh install that hasn't run `install/install.sh --tuning` yet,
+   or a deployed release with no pointer recorded -- the run exits 0 with one
+   log line and touches no state. Tuning is optional; it must never fail the
+   timer noisily.
 4. Take up to the newest 20 new shadow rows and send them to a headless judge:
    `CLAUDE_CONFIG_DIR=$AIRLOCK_TUNE_CLAUDE_CONFIG_DIR claude -p <prompt> --model
    $AIRLOCK_TUNE_JUDGE_MODEL --effort $AIRLOCK_TUNE_JUDGE_EFFORT --safe-mode --tools
@@ -64,6 +68,57 @@ on its own.
     regardless of outcome. `python3 -m airlock.report --tuning` summarizes
     the log.
 
+## Which repository does tuning use?
+
+`tune.sh`, `tune.py` and `promote.sh` all resolve "the repository" the same
+way (one implementation per language: `airlock/repo_path.py` for Python,
+`install/repo-path.sh` for the shell -- the module docstring in the former is
+where the order is written down):
+
+1. `AIRLOCK_TUNE_REPO` in the environment, honoured as given, no checks.
+2. the path recorded in `$AIRLOCK_CONFIG_DIR/repo.path` -- written by
+   `install/install.sh --tuning`, which records the checkout it was run from
+   -- if the pointer passes the same trust checks as `keyfile.path`: owned by
+   this user, not group- or world-writable (pointer file and its directory
+   both), the recorded path absolute, and naming an existing directory that
+   contains a `.git`.
+3. the resolving script's own parent directory, if THAT is a git checkout.
+4. otherwise nothing: the run exits 0 and logs one line.
+
+Step 3 is why a plain checkout (this repo, cloned and run in place, e.g. for
+manual testing) needs no pointer at all. Step 2 is why the systemd timer
+works: it runs the DEPLOYED release under `$AIRLOCK_HOME/current/tuning/`,
+which `install/deploy.sh` exports as a plain directory tree with no `.git` of
+its own -- step 3 can never fire there, so the pointer written at install time
+is the only way it resolves to anything.
+
+`install/doctor.sh` reports which repository tuning currently resolves to and
+whether `~/.local/state/airlock/tune-worktree` actually matches it.
+
+### A worktree left over from a different repository
+
+If `tune-worktree` already exists but belongs to a repository other than the
+one just resolved (its `.git` file points at a different main checkout --
+this happens after `install/install.sh --tuning` is re-run pointing at a new
+or moved checkout, or after a retired/replaced clone), it is never reused and
+never deleted. It is renamed to `tune-worktree.retired-<unix-timestamp>`
+next to itself (any auto-tune commits in it stay inspectable), a line is
+logged saying so, and a fresh worktree is created from the newly-resolved
+repository. `tune_state.json` (the interval backoff) lives in the state
+directory, not inside the worktree, so a retirement never resets it.
+
+### Moving tuning to a new checkout (e.g. after this fix is deployed)
+
+```bash
+install/install.sh --tuning --wire   # or just --tuning, if guard is already wired
+cat ~/.config/airlock/repo.path      # confirm it names the checkout you expect
+install/doctor.sh                    # "Tuning" section: resolved repo + worktree match
+systemctl --user restart airlock-tune.timer   # picks up the new pointer on its next run
+```
+
+If a stale `tune-worktree` from the old checkout is present, the next tuning
+run retires it automatically (see above) -- no manual cleanup needed.
+
 ## Design choices worth knowing about
 
 - The "strictly better overall" gate compares the SAME case set (existing +
@@ -72,10 +127,11 @@ on its own.
   full eval runs (plus a third, cheaper one restricted to the pre-existing
   case ids) every time there's something to gate on -- that's the loop's real
   ongoing cost, not the judge calls.
-- Portability: nothing here hard-codes a user's home directory. Paths derive from
-  `$HOME`, the script's own location, and `git worktree list`. The systemd
-  unit uses the `%h` specifier (expands to the invoking user's home
-  directory in a `--user` unit) for the one absolute path it needs.
+- Portability: nothing here hard-codes a user's home directory. Paths derive
+  from `$HOME`, the script's own location, and the repository resolution
+  order above. The systemd unit uses the `%h` specifier (expands to the
+  invoking user's home directory in a `--user` unit) for the one absolute
+  path it needs.
 - `AIRLOCK_TUNE_CLAUDE_CONFIG_DIR` (default: `$CLAUDE_CONFIG_DIR` if set,
   else `~/.claude`) and
   `AIRLOCK_TUNE_CLAUDE_BIN` (default `claude`) control which account and binary

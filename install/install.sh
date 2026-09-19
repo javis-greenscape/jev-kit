@@ -445,6 +445,23 @@ fi
 # --- tuning -----------------------------------------------------------------
 if [ "$WANT_TUNING" = "1" ]; then
   step "Tuning"
+  # The unit runs the DEPLOYED release ($AIRLOCK_HOME/current/tuning/tune.sh),
+  # an exported tree with no .git of its own -- it cannot derive "the repo"
+  # from its own location. Record the checkout install.sh was just run from
+  # (this one, $REPO_ROOT) so tune.py/tune.sh/promote.sh can resolve it via
+  # the repo.path pointer. Same trust checks as keyfile.path (see
+  # airlock/repo_path.py): the pointer file and its directory are ours alone,
+  # and the recorded path is absolute and an existing checkout.
+  TUNING_CONFIG_DIR="$("$PY" -c "import sys;sys.path.insert(0,'$REPO_ROOT');from airlock import paths;print(paths.config_dir())")"
+  mkdir -p "$TUNING_CONFIG_DIR"
+  chmod 700 "$TUNING_CONFIG_DIR" 2>/dev/null || true
+  if [ -e "$REPO_ROOT/.git" ]; then
+    ( umask 077; printf '%s\n' "$REPO_ROOT" > "$TUNING_CONFIG_DIR/repo.path" )
+    chmod 600 "$TUNING_CONFIG_DIR/repo.path" 2>/dev/null || true
+    ok "recorded tuning repo path in $TUNING_CONFIG_DIR/repo.path -> $REPO_ROOT"
+  else
+    fail "$REPO_ROOT has no .git; not recording a repo.path pointer (tuning will find nothing to commit to)"
+  fi
   if [ "$NO_SYSTEMD" = "1" ]; then
     warn "skipped: no systemd. Run tuning/tune.sh by hand or from cron."
   else

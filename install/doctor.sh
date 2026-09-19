@@ -256,6 +256,34 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+head_ "Tuning"
+if [ -f "$LIVE/tuning/tune.sh" ]; then
+  # shellcheck disable=SC1091
+  . "$REPO_ROOT/install/repo-path.sh"
+  if TUNE_REPO="$(airlock_tune_repo "$LIVE/tuning")"; then
+    pass "tuning repo resolved: $TUNE_REPO"
+    STATE_DIR_D="${AIRLOCK_TUNE_STATE_DIR:-$HOME/.local/state/airlock}"
+    WORKTREE_DIR_D="${AIRLOCK_TUNE_WORKTREE_DIR:-$STATE_DIR_D/tune-worktree}"
+    if [ ! -e "$WORKTREE_DIR_D" ]; then
+      skip "no tune-worktree yet at $WORKTREE_DIR_D (created on first tuning run)"
+    elif [ ! -e "$WORKTREE_DIR_D/.git" ]; then
+      fail "$WORKTREE_DIR_D exists but is not a git worktree"
+    else
+      WT_MAIN="$(git -C "$WORKTREE_DIR_D" worktree list --porcelain 2>/dev/null | awk '/^worktree /{print $2; exit}')"
+      if [ -n "$WT_MAIN" ] && [ "$(cd "$WT_MAIN" 2>/dev/null && pwd)" = "$(cd "$TUNE_REPO" && pwd)" ]; then
+        pass "tune-worktree at $WORKTREE_DIR_D matches the resolved repo"
+      else
+        fail "tune-worktree at $WORKTREE_DIR_D belongs to $WT_MAIN, not the resolved repo $TUNE_REPO (retired automatically on the next tuning run)"
+      fi
+    fi
+  else
+    skip "no repository resolved for tuning (no AIRLOCK_TUNE_REPO, no repo.path pointer, deployed release has no .git); tuning exits 0 without running"
+  fi
+else
+  skip "tuning not installed"
+fi
+
+# ---------------------------------------------------------------------------
 head_ "Optional components"
 for pair in \
   "browser:${AIRLOCK_BROWSER_DIR:-$HOME/code/jev-ultrafast}" \
