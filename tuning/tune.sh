@@ -12,6 +12,22 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+CONFIG_DIR="${AIRLOCK_CONFIG_DIR:-$HOME/.config/airlock}"
+
+# Machine-specific tuning settings, written by install/install.sh --tuning:
+# the absolute path of the `claude` binary (a systemd user unit's PATH does
+# not include an npm global prefix under $HOME, which is why every unattended
+# run died with "No such file or directory: 'claude'"), and optionally which
+# account tree the judge bills and which model/effort it uses. Paths and
+# names only -- never a key. tune.py can resolve the binary on its own too;
+# this just makes the answer explicit and auditable per machine.
+if [ -f "$CONFIG_DIR/tune.env" ]; then
+  set -a
+  # shellcheck disable=SC1091
+  . "$CONFIG_DIR/tune.env"
+  set +a
+fi
+
 # shellcheck disable=SC1091
 . "$SCRIPT_DIR/../install/repo-path.sh"
 python3 "$SCRIPT_DIR/tune.py" "$@"
@@ -19,7 +35,6 @@ python3 "$SCRIPT_DIR/tune.py" "$@"
 # Optional auto-promotion. Off unless the flag file exists, so promotion stays
 # a deliberate choice per machine. Safe while the guards are shadow-only and
 # fail-open; remove the flag before any guard is allowed to block.
-CONFIG_DIR="${AIRLOCK_CONFIG_DIR:-$HOME/.config/airlock}"
 STATE_DIR="${AIRLOCK_TUNE_STATE_DIR:-$HOME/.local/state/airlock}"
 WORKTREE_DIR="${AIRLOCK_TUNE_WORKTREE_DIR:-$STATE_DIR/tune-worktree}"
 if [ -e "$CONFIG_DIR/auto-promote" ] && [ -d "$WORKTREE_DIR" ]; then

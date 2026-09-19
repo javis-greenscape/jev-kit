@@ -265,6 +265,68 @@ head_ "Tuning"
 if [ -f "$LIVE/tuning/tune.sh" ]; then
   # shellcheck disable=SC1091
   . "$REPO_ROOT/install/repo-path.sh"
+
+  # The judge binary, resolved by tune.py itself so doctor cannot disagree
+  # with the run. This check is a FAIL, not a skip: a missing `claude` is how
+  # tuning ran twelve times and changed nothing, exiting 0 every time because
+  # tuning is designed to be optional. Silent is exactly what it must not be.
+  TUNE_CONFIG_DIR_D="${AIRLOCK_CONFIG_DIR:-$HOME/.config/airlock}"
+  if [ -f "$TUNE_CONFIG_DIR_D/tune.env" ]; then
+    set -a
+    # shellcheck disable=SC1091
+    . "$TUNE_CONFIG_DIR_D/tune.env"
+    set +a
+    pass "tune.env present at $TUNE_CONFIG_DIR_D/tune.env"
+  else
+    skip "no $TUNE_CONFIG_DIR_D/tune.env (written by install/install.sh --tuning); relying on PATH and the usual per-user locations"
+  fi
+  if JUDGE_BIN_D="$("$PY" "$LIVE/tuning/tune.py" --print-judge-bin 2>/dev/null)" && [ -n "$JUDGE_BIN_D" ]; then
+    pass "judge binary: $JUDGE_BIN_D (model ${AIRLOCK_TUNE_JUDGE_MODEL:-opus}, effort ${AIRLOCK_TUNE_JUDGE_EFFORT:-high}, account ${AIRLOCK_TUNE_CLAUDE_CONFIG_DIR:-${CLAUDE_CONFIG_DIR:-$HOME/.claude}})"
+  else
+    fail "no judge binary resolves: tuning is installed but every run will record \"judge binary not found\" and change nothing. Set AIRLOCK_TUNE_CLAUDE_BIN in $TUNE_CONFIG_DIR_D/tune.env, or re-run install/install.sh --tuning from a shell where \`command -v claude\` works."
+    "$PY" "$LIVE/tuning/tune.py" --print-judge-bin 2>&1 | sed 's/^/        /' || true
+  fi
+
+  # What the last run actually did, and how long ago. One line, so "is tuning
+  # alive?" does not need the jsonl read by hand.
+  TUNE_LOG_D="${AIRLOCK_TUNE_STATE_DIR:-${AIRLOCK_STATE_DIR:-$HOME/.local/state/airlock}}/tune_log.jsonl"
+  if [ -s "$TUNE_LOG_D" ]; then
+    LAST_RUN_D="$("$PY" - "$TUNE_LOG_D" <<'PYDOC' 2>/dev/null || true
+import json, sys, time, calendar
+last = None
+for line in open(sys.argv[1]):
+    line = line.strip()
+    if not line:
+        continue
+    try:
+        last = json.loads(line)
+    except Exception:
+        continue
+if not last:
+    sys.exit(1)
+category = last.get("category") or ("ran_committed" if last.get("committed") else "unknown (pre-category log row)")
+ts = last.get("ts") or ""
+age = ""
+try:
+    age_s = time.time() - calendar.timegm(time.strptime(ts, "%Y-%m-%dT%H:%M:%SZ"))
+    age = ", %.1f h ago" % (age_s / 3600.0)
+except Exception:
+    pass
+print("%s%s -- %s" % (category, age, last.get("reason", "")))
+PYDOC
+)"
+    if [ -n "$LAST_RUN_D" ]; then
+      case "$LAST_RUN_D" in
+        could_not_run*) fail "last tuning run: $LAST_RUN_D" ;;
+        *) pass "last tuning run: $LAST_RUN_D" ;;
+      esac
+    else
+      skip "tune log at $TUNE_LOG_D has no readable rows yet"
+    fi
+  else
+    skip "no tuning runs recorded yet at $TUNE_LOG_D"
+  fi
+
   if TUNE_REPO="$(airlock_tune_repo "$LIVE/tuning")"; then
     pass "tuning repo resolved: $TUNE_REPO"
     STATE_DIR_D="${AIRLOCK_TUNE_STATE_DIR:-$HOME/.local/state/airlock}"

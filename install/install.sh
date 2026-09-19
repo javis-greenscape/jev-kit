@@ -481,6 +481,70 @@ if [ "$WANT_TUNING" = "1" ]; then
   else
     fail "$REPO_ROOT has no .git; not recording a repo.path pointer (tuning will find nothing to commit to)"
   fi
+  # Resolve the judge binary NOW, from the installing shell's PATH, and
+  # record the absolute path. A systemd user unit runs with a minimal PATH
+  # that does not include an npm global prefix under $HOME, so `claude`
+  # resolved by name works by hand and fails on the timer -- silently, since
+  # the run exits 0 by design. tune.sh sources this file; it holds paths and
+  # names only, never a key, and is written 600 regardless.
+  TUNE_ENV="$TUNING_CONFIG_DIR/tune.env"
+  TUNE_JUDGE_BIN="${AIRLOCK_TUNE_CLAUDE_BIN:-$(command -v claude 2>/dev/null || true)}"
+  if [ -z "$TUNE_JUDGE_BIN" ]; then
+    TUNE_JUDGE_BIN="$("$PY" "$REPO_ROOT/tuning/tune.py" --print-judge-bin 2>/dev/null || true)"
+  fi
+  {
+    umask 077
+    {
+      printf '# Written by install/install.sh --tuning on %s.
+' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+      printf '# Sourced by tuning/tune.sh. Paths and names only -- never a key.
+'
+      if [ -n "$TUNE_JUDGE_BIN" ]; then
+        printf 'AIRLOCK_TUNE_CLAUDE_BIN=%s
+' "$TUNE_JUDGE_BIN"
+      else
+        printf '# No `claude` binary found at install time. Set one here:
+'
+        printf '#AIRLOCK_TUNE_CLAUDE_BIN=/absolute/path/to/claude
+'
+      fi
+      printf '# Which Claude account tree the judge bills. Unset = ~/.claude.
+'
+      if [ -n "${AIRLOCK_TUNE_CLAUDE_CONFIG_DIR:-}" ]; then
+        printf 'AIRLOCK_TUNE_CLAUDE_CONFIG_DIR=%s
+' "$AIRLOCK_TUNE_CLAUDE_CONFIG_DIR"
+      elif [ -n "${CLAUDE_CONFIG_DIR:-}" ]; then
+        printf 'AIRLOCK_TUNE_CLAUDE_CONFIG_DIR=%s
+' "$CLAUDE_CONFIG_DIR"
+      else
+        printf '#AIRLOCK_TUNE_CLAUDE_CONFIG_DIR=$HOME/.claude
+'
+      fi
+      printf '# Judge model and effort. Unset = opus / high.
+'
+      if [ -n "${AIRLOCK_TUNE_JUDGE_MODEL:-}" ]; then
+        printf 'AIRLOCK_TUNE_JUDGE_MODEL=%s
+' "$AIRLOCK_TUNE_JUDGE_MODEL"
+      else
+        printf '#AIRLOCK_TUNE_JUDGE_MODEL=opus
+'
+      fi
+      if [ -n "${AIRLOCK_TUNE_JUDGE_EFFORT:-}" ]; then
+        printf 'AIRLOCK_TUNE_JUDGE_EFFORT=%s
+' "$AIRLOCK_TUNE_JUDGE_EFFORT"
+      else
+        printf '#AIRLOCK_TUNE_JUDGE_EFFORT=high
+'
+      fi
+    } > "$TUNE_ENV"
+  }
+  chmod 600 "$TUNE_ENV" 2>/dev/null || true
+  if [ -n "$TUNE_JUDGE_BIN" ]; then
+    ok "judge binary resolved: $TUNE_JUDGE_BIN (recorded in $TUNE_ENV)"
+  else
+    fail "no \`claude\` binary found on PATH or in the usual per-user locations; tuning will record \"judge binary not found\" and change nothing until AIRLOCK_TUNE_CLAUDE_BIN is set in $TUNE_ENV"
+  fi
+
   if [ "$NO_SYSTEMD" = "1" ]; then
     warn "skipped: no systemd. Run tuning/tune.sh by hand or from cron."
   else
