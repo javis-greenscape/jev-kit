@@ -16,44 +16,191 @@ import argparse
 import hashlib
 import json
 import os
+import shutil
 import subprocess
 import sys
 import time
 from pathlib import Path
 
+# The deployed release runs this file as `<release>/tuning/tune.py`, which
+# puts `tuning/` on sys.path but not the release root, so a bare
+# `import airlock` would fail. Put the release (or checkout) root first, so
+# the redaction sanity check below can use the very same redactor that wrote
+# the rows rather than a second, divergent copy of the rules.
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
+
+try:
+    from airlock import paths as _paths
+except Exception:  # pragma: no cover - only if the tree is broken
+    _paths = None
+try:
+    from airlock.redact import redact as _redact
+except Exception:  # pragma: no cover - only if the tree is broken
+    _redact = None
+
 HOME = Path(os.environ.get("HOME") or os.path.expanduser("~"))
-STATE_DIR = Path(os.environ.get("AIRLOCK_TUNE_STATE_DIR") or (HOME / ".local" / "state" / "airlock"))
-STATE_FILE = STATE_DIR / "tune_state.json"
-TUNE_LOG_FILE = STATE_DIR / "tune_log.jsonl"
-WORKTREE_DIR = Path(os.environ.get("AIRLOCK_TUNE_WORKTREE_DIR") or (STATE_DIR / "tune-worktree"))
-SHADOW_LOG_FILE = HOME / ".local" / "state" / "airlock" / "shadow.jsonl"
-CONFIG_DIR = HOME / ".config" / "airlock"
-DISABLED_FILE = CONFIG_DIR / "disabled"
-TUNING_DISABLED_FILE = CONFIG_DIR / "tuning-disabled"
 
-# Machine-specific: which Claude account tree the tuning judge runs under.
-# A box with a single account leaves it unset and gets ~/.claude; a box with
-# several records its own value in install/config.env (see
-# install/config.env.example). No account name is baked in here.
-CLAUDE_CONFIG_DIR = (
-    os.environ.get("AIRLOCK_TUNE_CLAUDE_CONFIG_DIR")
-    or os.environ.get("PLUMBLINE_TUNE_CLAUDE_CONFIG_DIR")
-    or os.environ.get("JEV_TUNE_CLAUDE_CONFIG_DIR")
-    or os.environ.get("CLAUDE_CONFIG_DIR")
-    or str(HOME / ".claude")
-)
-CLAUDE_BIN = os.environ.get("AIRLOCK_TUNE_CLAUDE_BIN") or "claude"
 
-BASE_BRANCH = os.environ.get("AIRLOCK_TUNE_BASE_BRANCH") or "main"
+def _default_state_dir():
+    if _paths is not None:
+        try:
+            return Path(_paths.state_dir())
+        except Exception:
+            pass
+    return HOME / ".local" / "state" / "airlock"
+
+
+def _default_config_dir():
+    if _paths is not None:
+        try:
+            return Path(_paths.config_dir())
+        except Exception:
+            pass
+    return HOME / ".config" / "airlock"
+
+
+def _refresh_paths():
+    """(Re)compute every path constant from the CURRENT environment.
+
+    They are computed once at import too, so module-level readers keep
+    working; main() calls this again so that a caller -- a test, or a hand
+    run with AIRLOCK_STATE_DIR/AIRLOCK_CONFIG_DIR pointed at throwaway
+    directories -- is actually obeyed instead of losing to import order.
+    """
+    global HOME, STATE_DIR, STATE_FILE, TUNE_LOG_FILE, WORKTREE_DIR
+    global SHADOW_LOG_FILE, CONFIG_DIR, DISABLED_FILE, TUNING_DISABLED_FILE
+    HOME = Path(os.environ.get("HOME") or os.path.expanduser("~"))
+    STATE_DIR = Path(os.environ.get("AIRLOCK_TUNE_STATE_DIR") or _default_state_dir())
+    STATE_FILE = STATE_DIR / "tune_state.json"
+    TUNE_LOG_FILE = STATE_DIR / "tune_log.jsonl"
+    WORKTREE_DIR = Path(
+        os.environ.get("AIRLOCK_TUNE_WORKTREE_DIR") or (STATE_DIR / "tune-worktree")
+    )
+    SHADOW_LOG_FILE = Path(
+        os.environ.get("AIRLOCK_TUNE_SHADOW_LOG") or (_default_state_dir() / "shadow.jsonl")
+    )
+    CONFIG_DIR = _default_config_dir()
+    DISABLED_FILE = CONFIG_DIR / "disabled"
+    TUNING_DISABLED_FILE = CONFIG_DIR / "tuning-disabled"
+
+
+_refresh_paths()
+
+
+# --- which claude binary, which account, which model ----------------------
+#
+# The unattended failure this exists to stop: a systemd user unit runs with a
+# minimal PATH (typically /usr/bin:/bin) that does not contain the npm global
+# prefix the `claude` CLI is installed under, so the judge call died with
+# "[Errno 2] No such file or directory: 'claude'" on every timer firing --
+# while the same script run by hand from a login shell worked, which is
+# exactly why it looked healthy. Resolution lives in ONE function so the
+# installer, doctor.sh and the run itself all agree on the answer.
+
+JUDGE_BIN_ENV = ("AIRLOCK_TUNE_CLAUDE_BIN", "AIRLOCK_CLAUDE_BIN")
+
+
+def _judge_bin_candidate_dirs():
+    """Usual per-user install locations for the `claude` CLI, in the order a
+    login shell would normally find them. No shell is sourced: nvm is read
+    from its directory layout, never by running `nvm use`."""
+    dirs = [
+        HOME / ".npm-global" / "bin",
+        HOME / ".local" / "bin",
+        HOME / ".claude" / "local",
+        HOME / "bin",
+        HOME / ".bun" / "bin",
+        HOME / ".yarn" / "bin",
+    ]
+    nvm_dir = Path(os.environ.get("NVM_DIR") or (HOME / ".nvm"))
+    dirs.append(nvm_dir / "current" / "bin")
+    try:
+        versions = sorted((nvm_dir / "versions" / "node").iterdir())
+    except Exception:
+        versions = []
+    for version in reversed(versions):
+        dirs.append(version / "bin")
+    return dirs
+
+
+def _is_executable(path):
+    try:
+        return os.path.isfile(str(path)) and os.access(str(path), os.X_OK)
+    except Exception:
+        return False
+
+
+def resolve_judge_bin():
+    """Return (path_to_claude or None, list_of_places_searched).
+
+    Order: an explicit override from the environment (which is how
+    $AIRLOCK_CONFIG_DIR/tune.env reaches us, since tune.sh sources it), then
+    PATH, then the usual per-user install locations. First executable wins.
+    Never raises."""
+    searched = []
+    for name in JUDGE_BIN_ENV:
+        value = os.environ.get(name)
+        if not value:
+            continue
+        searched.append("$%s=%s" % (name, value))
+        expanded = os.path.expanduser(value)
+        if os.sep in expanded:
+            if _is_executable(expanded):
+                return expanded, searched
+        else:
+            found = shutil.which(expanded)
+            if found:
+                return found, searched
+    searched.append("PATH=%s" % (os.environ.get("PATH", "") or "<empty>"))
+    found = shutil.which("claude")
+    if found:
+        return found, searched
+    for directory in _judge_bin_candidate_dirs():
+        candidate = directory / "claude"
+        searched.append(str(candidate))
+        if _is_executable(candidate):
+            return str(candidate), searched
+    return None, searched
+
+
+def resolve_claude_config_dir():
+    """Which Claude account tree the tuning judge bills.
+
+    A box with a single login leaves every one of these unset and gets
+    ~/.claude; a box with several records its own value in
+    $AIRLOCK_CONFIG_DIR/tune.env or install/config.env (see
+    install/config.env.example). No account directory is baked in here.
+    """
+    return (
+        os.environ.get("AIRLOCK_TUNE_CLAUDE_CONFIG_DIR")
+        or os.environ.get("PLUMBLINE_TUNE_CLAUDE_CONFIG_DIR")
+        or os.environ.get("JEV_TUNE_CLAUDE_CONFIG_DIR")
+        or os.environ.get("CLAUDE_CONFIG_DIR")
+        or str(HOME / ".claude")
+    )
+
 
 # Judge and criteria-rewrite calls share the same model/effort: a much more
-# expensive judge is only worth it if it's also the one rewriting criteria
+# expensive judge is only worth it if it is also the one rewriting criteria
 # from what it found wrong. Opus at high effort is the default because a
 # cheaper judge is exactly what auto-tune exists to correct for -- Sonnet at
 # low/medium was cheap but also the thing most likely to rubber-stamp Jev's
-# own mistakes.
-AIRLOCK_TUNE_JUDGE_MODEL = os.environ.get("AIRLOCK_TUNE_JUDGE_MODEL") or "opus"
-AIRLOCK_TUNE_JUDGE_EFFORT = os.environ.get("AIRLOCK_TUNE_JUDGE_EFFORT") or "high"
+# own mistakes. Both are read live so tune.env can override them.
+DEFAULT_JUDGE_MODEL = "opus"
+DEFAULT_JUDGE_EFFORT = "high"
+
+
+def judge_model():
+    return os.environ.get("AIRLOCK_TUNE_JUDGE_MODEL") or DEFAULT_JUDGE_MODEL
+
+
+def judge_effort():
+    return os.environ.get("AIRLOCK_TUNE_JUDGE_EFFORT") or DEFAULT_JUDGE_EFFORT
+
+
+BASE_BRANCH = os.environ.get("AIRLOCK_TUNE_BASE_BRANCH") or "main"
 
 MIN_INTERVAL_MIN = 30
 MAX_INTERVAL_MIN = 1440
@@ -65,6 +212,25 @@ MAX_CASES = 400
 
 TIER_QUESTION_IDS = {"task_kind"}
 BASH_QUESTION_IDS = {"search_intent"}
+
+# --- run categories -------------------------------------------------------
+#
+# Every run records exactly one of these, so `tail tune_log.jsonl` answers
+# "is tuning alive?" at a glance instead of needing the reason strings read
+# and interpreted. doctor.sh prints the newest one and its age.
+CATEGORY_DID_NOT_RUN = "did_not_run"        # interval not elapsed, or disabled
+CATEGORY_COULD_NOT_RUN = "could_not_run"    # no judge binary, no repo, no worktree
+CATEGORY_RAN_NOTHING = "ran_nothing"        # ran, found nothing worth changing
+CATEGORY_RAN_REJECTED = "ran_rejected"      # ran, produced a change, gate discarded it
+CATEGORY_RAN_COMMITTED = "ran_committed"    # ran, committed to auto-tune
+
+CATEGORY_BLURB = {
+    CATEGORY_DID_NOT_RUN: "did not run",
+    CATEGORY_COULD_NOT_RUN: "could not run",
+    CATEGORY_RAN_NOTHING: "ran, nothing to change",
+    CATEGORY_RAN_REJECTED: "ran, gate rejected",
+    CATEGORY_RAN_COMMITTED: "ran, committed",
+}
 
 
 def log(msg):
@@ -220,24 +386,68 @@ def worktree_discard_changes():
 
 
 # --- redaction sanity (rows are already redacted at log time; belt+braces) -
+#
+# This check used to be a substring search for the literals "apikey_" and
+# "sk-". It was wrong twice over, and it killed three live runs outright:
+#
+#   * "sk-" is a substring of ordinary text. The live shadow log contains
+#     `disk-wide` (a scope word this project uses constantly) and `mask a
+#     disk-wide find`, neither of which is a secret.
+#   * Worse, it fired on correctly redacted material. Every "apikey_" hit in
+#     the live log was the literal source of a REDACTION command -- e.g.
+#     `sed 's/apikey_[A-Za-z0-9_]*/[REDACTED]/g'` -- because redact()'s own
+#     `apikey_[A-Za-z0-9_]+` needs at least one following word character and
+#     `[` is not one. So the check tripped on the pattern text of the thing
+#     that does the redacting.
+#
+# Both directions of the error came from a hand-maintained second list of
+# what a secret looks like. There is exactly one such list, airlock/redact.py,
+# so ask IT: a row is clean when running the real redactor over it changes
+# nothing, i.e. nothing secret-shaped survived. Over the live log that takes
+# 1140 rows down from "23 rows tripped, every one benign" to 2 rows, both a
+# long base64-ish run inside a file path.
+#
+# A row that does trip is SKIPPED and counted; it never aborts the run.
 
 
-_SECRET_LIKE = ("apikey_", "sk-")
+def redaction_residue(obj):
+    """Return the substrings of `obj` that airlock's redactor would still
+    remove, i.e. secret-shaped material that survived log-time redaction.
+    Empty list means the row is clean. Never raises."""
+    try:
+        text = json.dumps(obj, default=str)
+    except Exception:
+        return ["<row is not serialisable>"]
+    if _redact is None:
+        # No redactor importable: we cannot prove the row is clean, so we
+        # must not claim it is. Callers treat this as "skip the row".
+        return ["<airlock.redact unavailable>"]
+    try:
+        cleaned = _redact(text)
+    except Exception:
+        return ["<redactor raised>"]
+    if cleaned == text:
+        return []
+    return ["<%d char(s) of secret-shaped text survived redaction>" % abs(len(text) - len(cleaned))]
 
 
 def _looks_redacted(obj):
-    text = json.dumps(obj, default=str)
-    return not any(marker in text for marker in _SECRET_LIKE)
+    """Back-compat wrapper: True when the row carries no redaction residue."""
+    return not redaction_residue(obj)
 
 
 # --- headless Claude judge calls ------------------------------------------
 
 
-def _run_claude(prompt, effort, model="sonnet"):
+def _run_claude(prompt, effort, model="sonnet", bin_path=None):
+    if bin_path is None:
+        bin_path, searched = resolve_judge_bin()
+        if bin_path is None:
+            raise RuntimeError("no judge binary found; searched: %s" % "; ".join(searched))
     env = dict(os.environ)
-    env["CLAUDE_CONFIG_DIR"] = CLAUDE_CONFIG_DIR
+    env["CLAUDE_CONFIG_DIR"] = resolve_claude_config_dir()
     cmd = [
-        CLAUDE_BIN, "-p", prompt,
+        bin_path, "-p", prompt,
         "--model", model,
         "--effort", effort,
         "--safe-mode",
@@ -316,13 +526,69 @@ def build_judge_prompt(rows):
     )
 
 
+QUESTION_FN_NAMES = {"task_kind": "tier_questions", "search_intent": "bash_questions"}
+
+
+def allowed_criteria_options(source):
+    """Map question id -> the option names its criteria dict actually has,
+    read from questions.py itself rather than from a hand-kept list here.
+
+    This is what the criteria prompt shows the judge and what
+    apply_criteria_replacement enforces, so the two can never drift: a live
+    run was lost to `unknown option 'not_for' for question 'search_intent'`,
+    a key the judge invented because nothing had told it what the real ones
+    were. Returns {} if the source cannot be parsed."""
+    import ast
+
+    out = {}
+    try:
+        tree = ast.parse(source)
+    except Exception:
+        return out
+    for question_id, fn_name in QUESTION_FN_NAMES.items():
+        for node in ast.walk(tree):
+            if not (isinstance(node, ast.FunctionDef) and node.name == fn_name):
+                continue
+            for sub in ast.walk(node):
+                if not (isinstance(sub, ast.Return) and isinstance(sub.value, ast.Dict)):
+                    continue
+                for k, v in zip(sub.value.keys, sub.value.values):
+                    if not (isinstance(k, ast.Constant) and k.value == question_id):
+                        continue
+                    if not isinstance(v, ast.Dict):
+                        continue
+                    for ck, cv in zip(v.keys, v.values):
+                        if isinstance(ck, ast.Constant) and ck.value == "criteria" and isinstance(cv, ast.Dict):
+                            out[question_id] = [
+                                key.value for key in cv.keys
+                                if isinstance(key, ast.Constant) and isinstance(key.value, str)
+                            ]
+                break
+            break
+    return out
+
+
 def build_criteria_prompt(current_questions_source, wrong_cases, docs_summary):
     wrong_json = json.dumps(wrong_cases, indent=2, default=str)
+    allowed = allowed_criteria_options(current_questions_source)
+    if allowed:
+        allowed_text = (
+            "The ONLY keys you may use are these, exactly as written. Any "
+            "other key is dropped and wasted:\n"
+            + "".join(
+                "  %s: %s\n" % (qid, ", ".join(opts))
+                for qid, opts in sorted(allowed.items())
+            )
+            + "\n"
+        )
+    else:
+        allowed_text = ""
     return (
         "You are improving the CRITERIA TEXT of a TypeSafe System One Choice "
         "question, based on cases the model got wrong. Do not change option "
         "names, question ids, or add/remove options -- only sharpen the "
         "wording of the criteria for options that are being confused.\n\n"
+        + allowed_text
         + docs_summary + "\n\n"
         "Current airlock/questions.py source (for context only):\n"
         "```python\n" + current_questions_source + "\n```\n\n"
@@ -366,7 +632,7 @@ def apply_criteria_replacement(source, replacements):
     import ast
 
     tree = ast.parse(source)
-    question_fn_names = {"task_kind": "tier_questions", "search_intent": "bash_questions"}
+    question_fn_names = QUESTION_FN_NAMES
 
     def find_dict_value_for_key(dict_node, key_name):
         for k, v in zip(dict_node.keys, dict_node.values):
@@ -551,13 +817,32 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--force", action="store_true", help="bypass the interval backoff check")
     parser.add_argument("--min-rows", type=int, default=DEFAULT_MIN_ROWS)
+    parser.add_argument(
+        "--print-judge-bin", action="store_true",
+        help="resolve the judge binary, print it, and exit 0; exit 1 with the "
+             "places searched if none resolves (doctor.sh uses this so it "
+             "cannot disagree with the run itself)",
+    )
     args = parser.parse_args()
+
+    _refresh_paths()
+
+    if args.print_judge_bin:
+        judge_bin, searched = resolve_judge_bin()
+        if judge_bin:
+            print(judge_bin)
+            return 0
+        print("no judge binary found; searched:", file=sys.stderr)
+        for place in searched:
+            print("  %s" % place, file=sys.stderr)
+        return 1
 
     run_start = time.time()
     state = load_state()
 
     if DISABLED_FILE.exists() or TUNING_DISABLED_FILE.exists():
         log("disabled via %s or %s; exiting" % (DISABLED_FILE, TUNING_DISABLED_FILE))
+        _record(CATEGORY_DID_NOT_RUN, "disabled by kill switch", new_rows=0)
         return 0
 
     now_epoch = int(time.time())
@@ -568,12 +853,32 @@ def main():
         elapsed_min = (now_epoch - last_run_epoch) / 60.0
         if elapsed_min < interval_min:
             log("interval not elapsed (%.1f/%d min); exiting" % (elapsed_min, interval_min))
+            _record(
+                CATEGORY_DID_NOT_RUN,
+                "interval not elapsed (%.1f/%d min)" % (elapsed_min, interval_min),
+                new_rows=0,
+            )
             return 0
+
+    # Resolve the judge BEFORE any work: a missing binary is the difference
+    # between "tuning is healthy and had nothing to do" and "tuning has never
+    # once run", and the two must never look the same in the log.
+    judge_bin, searched = resolve_judge_bin()
+    if judge_bin is None:
+        log("no judge binary found. Searched, in order:")
+        for place in searched:
+            log("  %s" % place)
+        log("set AIRLOCK_TUNE_CLAUDE_BIN in $AIRLOCK_CONFIG_DIR/tune.env "
+            "(install/install.sh --tuning writes it) and re-run.")
+        _record(CATEGORY_COULD_NOT_RUN, "judge binary not found", new_rows=0)
+        return 0
+    log("judge binary: %s (model=%s effort=%s)" % (judge_bin, judge_model(), judge_effort()))
 
     main_repo = resolve_main_repo(Path(__file__).resolve().parent)
     if main_repo is None:
         log("no repository resolved (no AIRLOCK_TUNE_REPO, no repo.path pointer, and this "
             "checkout has no .git); tuning is optional, exiting without touching state")
+        _record(CATEGORY_COULD_NOT_RUN, "no repository resolved", new_rows=0)
         return 0
 
     all_rows = read_shadow_rows()
@@ -581,19 +886,43 @@ def main():
 
     if len(new_rows) < args.min_rows:
         log("only %d new shadow rows (< %d); exiting without touching interval" % (len(new_rows), args.min_rows))
+        _record(
+            CATEGORY_RAN_NOTHING,
+            "too few new rows (%d < %d)" % (len(new_rows), args.min_rows),
+            new_rows=len(new_rows),
+        )
         return 0
 
     # newest first, capped
     new_rows_sorted = sorted(new_rows, key=lambda r: str(r.get("ts", "")), reverse=True)
-    judge_rows = new_rows_sorted[:MAX_JUDGE_ROWS]
+    candidate_rows = new_rows_sorted[:MAX_JUDGE_ROWS]
 
-    for r in judge_rows:
-        if not _looks_redacted(r):
-            log("row failed redaction sanity check; refusing to send to judge")
-            _finish(state, interval_min, committed=False, new_rows=len(new_rows), judged=0, wrong=0,
-                    error_rate=0.0, accuracy_before=None, accuracy_after=None, tokens_jev=0,
-                    wall_s=time.time() - run_start, reason="redaction sanity check failed")
-            return 0
+    # A row that still carries secret-shaped text is dropped from THIS batch,
+    # counted, and the run carries on with the rest. One suspect row must not
+    # cost the whole run, which is what used to happen.
+    judge_rows = []
+    redaction_skipped = 0
+    for r in candidate_rows:
+        residue = redaction_residue(r)
+        if residue:
+            redaction_skipped += 1
+            continue
+        judge_rows.append(r)
+    if redaction_skipped:
+        log("redaction sanity: skipped %d of %d row(s); %d sent to the judge"
+            % (redaction_skipped, len(candidate_rows), len(judge_rows)))
+
+    newest_ts = new_rows_sorted[0].get("ts", "") if new_rows_sorted else state.get("last_processed_ts", "")
+
+    if not judge_rows:
+        log("every candidate row failed the redaction sanity check; nothing to judge")
+        state["last_processed_ts"] = newest_ts
+        _finish(state, interval_min, committed=False, new_rows=len(new_rows), judged=0, wrong=0,
+                error_rate=0.0, accuracy_before=None, accuracy_after=None, tokens_jev=0,
+                wall_s=time.time() - run_start,
+                reason="all %d candidate row(s) failed redaction sanity check" % redaction_skipped,
+                category=CATEGORY_RAN_NOTHING, redaction_skipped=redaction_skipped)
+        return 0
 
     try:
         ensure_tune_worktree(main_repo)
@@ -601,18 +930,20 @@ def main():
         log("worktree setup failed: %s" % exc)
         _finish(state, interval_min, committed=False, new_rows=len(new_rows), judged=0, wrong=0,
                 error_rate=0.0, accuracy_before=None, accuracy_after=None, tokens_jev=0,
-                wall_s=time.time() - run_start, reason="worktree setup failed: %s" % exc)
+                wall_s=time.time() - run_start, reason="worktree setup failed: %s" % exc,
+                category=CATEGORY_COULD_NOT_RUN, redaction_skipped=redaction_skipped)
         return 0
 
     # Advance the "new rows" cursor now, even if this run doesn't end up
     # committing anything -- rows are judged once; a discard just means no
     # change was warranted, not that we should re-judge them forever.
-    newest_ts = new_rows_sorted[0].get("ts", "") if new_rows_sorted else state.get("last_processed_ts", "")
 
     # --- 3. label with a headless Claude judge -----------------------------
     try:
         judge_prompt = build_judge_prompt(judge_rows)
-        judge_output = _run_claude(judge_prompt, effort=AIRLOCK_TUNE_JUDGE_EFFORT, model=AIRLOCK_TUNE_JUDGE_MODEL)
+        judge_output = _run_claude(
+            judge_prompt, effort=judge_effort(), model=judge_model(), bin_path=judge_bin
+        )
         judgements = _extract_json(judge_output)
         if not isinstance(judgements, list):
             raise ValueError("judge output is not a JSON array")
@@ -621,7 +952,8 @@ def main():
         state["last_processed_ts"] = newest_ts
         _finish(state, interval_min, committed=False, new_rows=len(new_rows), judged=0, wrong=0,
                 error_rate=0.0, accuracy_before=None, accuracy_after=None, tokens_jev=0,
-                wall_s=time.time() - run_start, reason="judge call invalid: %s" % exc)
+                wall_s=time.time() - run_start, reason="judge call invalid: %s" % exc,
+                category=CATEGORY_RAN_REJECTED, redaction_skipped=redaction_skipped)
         return 0
 
     wrong = []
@@ -640,7 +972,8 @@ def main():
         state["last_processed_ts"] = newest_ts
         _finish(state, interval_min, committed=False, new_rows=len(new_rows), judged=judged_count, wrong=0,
                 error_rate=error_rate, accuracy_before=None, accuracy_after=None, tokens_jev=0,
-                wall_s=time.time() - run_start, reason="no wrong rows")
+                wall_s=time.time() - run_start, reason="no wrong rows",
+                category=CATEGORY_RAN_NOTHING, redaction_skipped=redaction_skipped)
         return 0
 
     # --- 4. turn wrong rows into new eval cases -----------------------------
@@ -679,7 +1012,8 @@ def main():
         state["last_processed_ts"] = newest_ts
         _finish(state, interval_min, committed=False, new_rows=len(new_rows), judged=judged_count, wrong=wrong_count,
                 error_rate=error_rate, accuracy_before=None, accuracy_after=None, tokens_jev=0,
-                wall_s=time.time() - run_start, reason="no new cases after dedupe")
+                wall_s=time.time() - run_start, reason="no new cases after dedupe",
+                category=CATEGORY_RAN_NOTHING, redaction_skipped=redaction_skipped)
         return 0
 
     merged_cases = merge_new_cases(existing_cases, new_cases)
@@ -698,15 +1032,18 @@ def main():
         state["last_processed_ts"] = newest_ts
         _finish(state, interval_min, committed=False, new_rows=len(new_rows), judged=judged_count, wrong=wrong_count,
                 error_rate=error_rate, accuracy_before=None, accuracy_after=None, tokens_jev=tokens_jev,
-                wall_s=time.time() - run_start, reason="baseline eval failed: %s" % exc)
+                wall_s=time.time() - run_start, reason="baseline eval failed: %s" % exc,
+                category=CATEGORY_RAN_REJECTED, redaction_skipped=redaction_skipped)
         return 0
 
     # --- 5. ask for replacement criteria text ------------------------------
     questions_path = WORKTREE_DIR / "airlock" / "questions.py"
     try:
         current_source = questions_path.read_text()
-        criteria_prompt = build_criteria_prompt(current_source, [w["row"] for w in wrong] , DOCS_GUIDANCE_SUMMARY)
-        criteria_output = _run_claude(criteria_prompt, effort=AIRLOCK_TUNE_JUDGE_EFFORT, model=AIRLOCK_TUNE_JUDGE_MODEL)
+        criteria_prompt = build_criteria_prompt(current_source, [w["row"] for w in wrong], DOCS_GUIDANCE_SUMMARY)
+        criteria_output = _run_claude(
+            criteria_prompt, effort=judge_effort(), model=judge_model(), bin_path=judge_bin
+        )
         replacement = _extract_json(criteria_output)
         if not isinstance(replacement, dict):
             raise ValueError("criteria output is not a JSON object")
@@ -723,19 +1060,21 @@ def main():
         state["last_processed_ts"] = newest_ts
         _finish(state, interval_min, committed=False, new_rows=len(new_rows), judged=judged_count, wrong=wrong_count,
                 error_rate=error_rate, accuracy_before=acc_before, accuracy_after=None, tokens_jev=tokens_jev,
-                wall_s=time.time() - run_start, reason="criteria rewrite failed: %s" % exc)
+                wall_s=time.time() - run_start, reason="criteria rewrite failed: %s" % exc,
+                category=CATEGORY_RAN_REJECTED, redaction_skipped=redaction_skipped)
         return 0
 
     # --- 6. gate ------------------------------------------------------------
     changed_files = worktree_diff_files()
-    allowed = {"airlock/questions.py", "eval/cases.jsonl"}
-    if not set(changed_files) <= allowed:
+    allowed_paths = {"airlock/questions.py", "eval/cases.jsonl"}
+    if not set(changed_files) <= allowed_paths:
         log("gate failed: unexpected files changed: %s" % changed_files)
         worktree_discard_changes()
         state["last_processed_ts"] = newest_ts
         _finish(state, interval_min, committed=False, new_rows=len(new_rows), judged=judged_count, wrong=wrong_count,
                 error_rate=error_rate, accuracy_before=acc_before, accuracy_after=None, tokens_jev=tokens_jev,
-                wall_s=time.time() - run_start, reason="unexpected files changed: %s" % changed_files)
+                wall_s=time.time() - run_start, reason="unexpected files changed: %s" % changed_files,
+                category=CATEGORY_RAN_REJECTED, redaction_skipped=redaction_skipped)
         return 0
 
     test_proc = subprocess.run(
@@ -748,7 +1087,8 @@ def main():
         state["last_processed_ts"] = newest_ts
         _finish(state, interval_min, committed=False, new_rows=len(new_rows), judged=judged_count, wrong=wrong_count,
                 error_rate=error_rate, accuracy_before=acc_before, accuracy_after=None, tokens_jev=tokens_jev,
-                wall_s=time.time() - run_start, reason="unit tests failed: %s" % test_proc.stdout[-2000:])
+                wall_s=time.time() - run_start, reason="unit tests failed: %s" % test_proc.stdout[-2000:],
+                category=CATEGORY_RAN_REJECTED, redaction_skipped=redaction_skipped)
         return 0
 
     try:
@@ -771,7 +1111,8 @@ def main():
         state["last_processed_ts"] = newest_ts
         _finish(state, interval_min, committed=False, new_rows=len(new_rows), judged=judged_count, wrong=wrong_count,
                 error_rate=error_rate, accuracy_before=acc_before, accuracy_after=None, tokens_jev=tokens_jev,
-                wall_s=time.time() - run_start, reason="post-change eval failed: %s" % exc)
+                wall_s=time.time() - run_start, reason="post-change eval failed: %s" % exc,
+                category=CATEGORY_RAN_REJECTED, redaction_skipped=redaction_skipped)
         return 0
 
     gate_ok = (
@@ -792,7 +1133,8 @@ def main():
         _finish(state, interval_min, committed=False, new_rows=len(new_rows), judged=judged_count, wrong=wrong_count,
                 error_rate=error_rate, accuracy_before=acc_before, accuracy_after=acc_after, tokens_jev=tokens_jev,
                 wall_s=time.time() - run_start,
-                reason="gate failed: before=%.3f after=%.3f after_on_old=%.3f" % (acc_before, acc_after, acc_after_on_old))
+                reason="gate failed: before=%.3f after=%.3f after_on_old=%.3f" % (acc_before, acc_after, acc_after_on_old),
+                category=CATEGORY_RAN_REJECTED, redaction_skipped=redaction_skipped)
         return 0
 
     commit_msg = (
@@ -809,17 +1151,51 @@ def main():
     state["last_processed_ts"] = newest_ts
     _finish(state, MIN_INTERVAL_MIN, committed=True, new_rows=len(new_rows), judged=judged_count, wrong=wrong_count,
             error_rate=error_rate, accuracy_before=acc_before, accuracy_after=acc_after, tokens_jev=tokens_jev,
-            wall_s=time.time() - run_start, reason="committed")
+            wall_s=time.time() - run_start, reason="committed",
+            category=CATEGORY_RAN_COMMITTED, redaction_skipped=redaction_skipped)
     return 0
 
 
+def summary_line(entry):
+    """One human-readable line per run, the thing a person actually reads."""
+    return "run summary: %s (%s) -- %s" % (
+        entry.get("category", "unknown"),
+        CATEGORY_BLURB.get(entry.get("category"), "unrecognised category"),
+        entry.get("reason", ""),
+    )
+
+
+def _record(category, reason, new_rows=0, **extra):
+    """Append a log entry WITHOUT touching tune_state.json.
+
+    Used for the outcomes that must not reset the backoff clock: the timer
+    firing inside the interval, the kill switch, a missing judge binary, too
+    few rows. Writing state here would push last_run_epoch forward on every
+    timer firing and the interval would never elapse at all."""
+    entry = {
+        "ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "category": category,
+        "reason": reason,
+        "new_rows": new_rows,
+        "committed": False,
+    }
+    entry.update(extra)
+    append_tune_log(entry)
+    log(summary_line(entry))
+    return entry
+
+
 def _finish(state, next_interval_min, committed, new_rows, judged, wrong, error_rate,
-            accuracy_before, accuracy_after, tokens_jev, wall_s, reason):
+            accuracy_before, accuracy_after, tokens_jev, wall_s, reason,
+            category=None, redaction_skipped=0):
+    if category is None:
+        category = CATEGORY_RAN_COMMITTED if committed else CATEGORY_RAN_REJECTED
     state["interval_min"] = next_interval_min
     state["last_run_epoch"] = int(time.time())
     save_state(state)
     entry = {
         "ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "category": category,
         "new_rows": new_rows,
         "judged": judged,
         "wrong": wrong,
@@ -830,10 +1206,13 @@ def _finish(state, next_interval_min, committed, new_rows, judged, wrong, error_
         "interval_min_next": next_interval_min,
         "tokens_jev": tokens_jev,
         "wall_time_s": wall_s,
+        "redaction_skipped": redaction_skipped,
         "reason": reason,
     }
     append_tune_log(entry)
+    log(summary_line(entry))
     log("run finished: %s" % json.dumps(entry, default=str))
+    return entry
 
 
 if __name__ == "__main__":

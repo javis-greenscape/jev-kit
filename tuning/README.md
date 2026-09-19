@@ -25,7 +25,11 @@ on its own.
    or a deployed release with no pointer recorded -- the run exits 0 with one
    log line and touches no state. Tuning is optional; it must never fail the
    timer noisily.
-4. Take up to the newest 20 new shadow rows and send them to a headless judge:
+4. Take up to the newest 20 new shadow rows, drop any that still carry
+   secret-shaped text (see "The redaction sanity check" below -- a dropped row
+   is counted, never a reason to abandon the run), and send the rest to a
+   headless judge, whose binary was resolved before any of the above (see
+   "Finding the judge binary"):
    `CLAUDE_CONFIG_DIR=$AIRLOCK_TUNE_CLAUDE_CONFIG_DIR claude -p <prompt> --model
    $AIRLOCK_TUNE_JUDGE_MODEL --effort $AIRLOCK_TUNE_JUDGE_EFFORT --safe-mode --tools
    ""` with stdin closed (default model `opus`, effort `high`). Each
@@ -65,8 +69,9 @@ on its own.
 9. On success: commit on `auto-tune` with the before/after numbers in the
    message. `auto-tune` is **never merged into `main`** by this script.
 10. Every run appends one line to `~/.local/state/airlock/tune_log.jsonl`
-    regardless of outcome. `python3 -m airlock.report --tuning` summarizes
-    the log.
+    regardless of outcome, carrying a `category` that says which of the five
+    possible outcomes it was (see "Every run records a category" below).
+    `python3 -m airlock.report --tuning` summarizes the log.
 
 ## Which repository does tuning use?
 
@@ -119,6 +124,107 @@ systemctl --user restart airlock-tune.timer   # picks up the new pointer on its 
 If a stale `tune-worktree` from the old checkout is present, the next tuning
 run retires it automatically (see above) -- no manual cleanup needed.
 
+## Every run records a category
+
+Twelve unattended runs produced zero commits and every one of them exited 0,
+because tuning is deliberately optional and a run that cannot proceed is not
+an error. That is the right behaviour and the wrong report: "healthy, nothing
+to do" and "has never once worked" looked identical in the log.
+
+Each run now writes exactly one `category` to
+`~/.local/state/airlock/tune_log.jsonl`, and `install/doctor.sh` prints the
+newest one with its age:
+
+| category | means | examples |
+|---|---|---|
+| `did_not_run` | the run was not attempted | interval not elapsed, kill switch present |
+| `could_not_run` | attempted, blocked before any judging | no judge binary, no repository, worktree setup failed |
+| `ran_nothing` | ran, found nothing worth changing | too few new rows, judge found no wrong rows, all wrong rows already have cases |
+| `ran_rejected` | ran, produced a candidate, the gate discarded it | accuracy did not improve, unit tests failed, judge returned junk |
+| `ran_committed` | ran, committed to `auto-tune` | -- |
+
+`did_not_run`, `could_not_run` and the too-few-rows case append a log row but
+deliberately do **not** write `tune_state.json`: writing `last_run_epoch` on
+every timer firing would keep pushing the backoff clock forward and the
+interval would never elapse at all.
+
+## Finding the judge binary
+
+Seven of those twelve runs died on
+`judge call invalid: [Errno 2] No such file or directory: 'claude'`. A
+systemd user unit runs with a minimal `PATH` (typically `/usr/bin:/bin`) that
+does not include the npm global prefix under `$HOME` where the `claude` CLI
+is installed. Run by hand from a login shell it worked every time, which is
+exactly why it looked fine.
+
+Resolution now lives in one function, `tune.resolve_judge_bin()`, in this
+order, first executable wins:
+
+1. `$AIRLOCK_TUNE_CLAUDE_BIN` or `$AIRLOCK_CLAUDE_BIN` (this is how
+   `$AIRLOCK_CONFIG_DIR/tune.env` reaches the run, since `tune.sh` sources
+   it);
+2. `shutil.which("claude")`, i.e. whatever `PATH` the run actually has;
+3. the usual per-user install locations: `~/.npm-global/bin`, `~/.local/bin`,
+   `~/.claude/local`, `~/bin`, `~/.bun/bin`, `~/.yarn/bin`, and nvm's
+   `current/bin` plus each installed version's `bin`, read from nvm's
+   directory layout without sourcing a shell.
+
+If none resolves, the run logs one line naming every place it looked, records
+`reason: "judge binary not found"` with category `could_not_run`, and exits 0.
+
+`install/install.sh --tuning` resolves the binary at install time from the
+installing shell's `PATH` and records the **absolute path** in
+`$AIRLOCK_CONFIG_DIR/tune.env` (mode 600). That file may also carry
+`AIRLOCK_TUNE_CLAUDE_CONFIG_DIR` (which account the judge bills),
+`AIRLOCK_TUNE_JUDGE_MODEL` and `AIRLOCK_TUNE_JUDGE_EFFORT`. It holds paths and
+names only, never a key, and no account directory is defaulted to any
+particular person's. `install/doctor.sh` prints what resolved and **fails**
+when tuning is installed and nothing does.
+
+`python3 tuning/tune.py --print-judge-bin` prints the resolved path and exits
+0, or exits 1 listing everywhere it looked. `doctor.sh` calls exactly that, so
+doctor cannot disagree with the run.
+
+## The redaction sanity check
+
+Three runs died on `redaction sanity check failed`. The check was a substring
+search for the literals `apikey_` and `sk-` over the row's JSON, and it was
+wrong in both directions:
+
+- `sk-` is a substring of ordinary text. The live shadow log contains
+  `disk-wide` and `mask a disk-wide find` -- this project's own scope
+  vocabulary, not secrets.
+- Worse, it fired on *correctly redacted* material. Every `apikey_` hit in the
+  live log was the literal source of a redaction command, e.g.
+  `sed 's/apikey_[A-Za-z0-9_]*/[REDACTED]/g'`. `redact()`'s own
+  `apikey_[A-Za-z0-9_]+` needs at least one following word character and `[`
+  is not one, so the pattern text survives redaction -- and the check then
+  tripped on the pattern text of the thing that does the redacting.
+
+Both errors came from keeping a second, hand-maintained idea of what a secret
+looks like. There is exactly one such list, `airlock/redact.py`, so the check
+now asks *it*: a row is clean when running the real redactor over the row
+changes nothing. Over the live log of 1140 rows that takes the trip rate from
+23 rows (every one benign) to 2 (a long base64-shaped run inside a file path).
+
+A row that does trip is now **skipped and counted** (`redaction_skipped` in
+the log row), and the run carries on with the rest; only a batch where every
+row trips ends the run, as `ran_nothing`.
+
+## The criteria rewrite is validated against the real schema
+
+One run died on
+`criteria rewrite failed: unknown option 'not_for' for question 'search_intent'`
+-- a criteria key the judge invented, because nothing had told it which keys
+exist. Two changes:
+
+- `tune.allowed_criteria_options()` reads the option names straight out of
+  `airlock/questions.py` by AST, and the criteria prompt lists them to the
+  judge: *"The ONLY keys you may use are these, exactly as written."*
+- `apply_criteria_replacement()` drops an unknown question id, an unknown
+  option name or a non-string value with a log line and keeps the rest,
+  instead of failing the run over one bad key.
+
 ## Design choices worth knowing about
 
 - The "strictly better overall" gate compares the SAME case set (existing +
@@ -133,10 +239,12 @@ run retires it automatically (see above) -- no manual cleanup needed.
   invoking user's home directory in a `--user` unit) for the one absolute
   path it needs.
 - `AIRLOCK_TUNE_CLAUDE_CONFIG_DIR` (default: `$CLAUDE_CONFIG_DIR` if set,
-  else `~/.claude`) and
-  `AIRLOCK_TUNE_CLAUDE_BIN` (default `claude`) control which account and binary
-  the judge calls use. `AIRLOCK_TUNE_STATE_DIR` and `AIRLOCK_TUNE_WORKTREE_DIR`
-  override the state/worktree locations, mainly for testing.
+  else `~/.claude`) and `AIRLOCK_TUNE_CLAUDE_BIN` (no default; see "Finding
+  the judge binary" above) control which account and binary the judge calls
+  use. `AIRLOCK_TUNE_STATE_DIR`, `AIRLOCK_TUNE_WORKTREE_DIR` and
+  `AIRLOCK_TUNE_SHADOW_LOG` override the state, worktree and shadow-log
+  locations, mainly for testing and for a hand run against throwaway
+  directories.
 - `AIRLOCK_TUNE_JUDGE_MODEL` (default `opus`) and `AIRLOCK_TUNE_JUDGE_EFFORT` (default
   `high`) control both the judge call and the criteria-rewrite call -- they
   share a model/effort because a cheaper judge is exactly the thing a more
