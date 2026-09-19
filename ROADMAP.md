@@ -1,12 +1,13 @@
 # Roadmap
 
 What is known to be missing or unfinished. Nothing here is a commitment to a
-date. The [Native Windows gap](README.md#native-windows-the-gap) in the README
-is the largest single item and is itemised there rather than repeated.
+date. The [Native Windows gap](docs/native-windows.md) is the largest single item
+and is itemised there rather than repeated.
 
 ## Known gaps
 
-- **Native Windows support.** Not built, not run, itemised in the README.
+- **Native Windows support.** Not built, not run, itemised in
+  [docs/native-windows.md](docs/native-windows.md).
   Everything (`es.exe`) file search on Windows is part of that work.
 - **macOS is untested.** The guard is stdlib Python and should run with
   `--no-systemd`, but nobody has tried it, and the `launchd` equivalents of

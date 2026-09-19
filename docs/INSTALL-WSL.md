@@ -42,8 +42,8 @@ systemctl --user show-environment
 
 If that fails, `install/install.sh` will detect the missing session itself,
 print the same instructions, and degrade to no-systemd mode rather than
-failing -- see [Install on WSL](../README.md#install-on-wsl) in the main
-README for exactly what no-systemd mode costs you. It is a legitimate way to
+failing -- see [Install on WSL](install.md#install-on-wsl) in the install
+guide for exactly what no-systemd mode costs you. It is a legitimate way to
 run this for a while if you are not ready to touch `/etc/wsl.conf` yet.
 
 ## 2. Clone the repository
