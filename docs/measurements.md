@@ -14,7 +14,7 @@ pointed at a temp directory, no API key, so nothing reached the network:
 |---|---|---|
 | Bash, no rule matches | 33.2 ms | 42.4 ms |
 | Write, no rule matches | 26.9 ms | 38.1 ms |
-| code-only deny (R6 `xdg-open`) | 37.7 ms | 44.8 ms |
+| code-only deny (R6 `xdg-open`, pinned on) | 37.7 ms | 44.8 ms |
 | code-only warn (R3 bare `pytest`) | 36.5 ms | 43.9 ms |
 
 Bare `python3 -c pass` is about 23 ms here, so the hook is dominated by

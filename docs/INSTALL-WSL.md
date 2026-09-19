@@ -237,7 +237,10 @@ JSON
 ```
 
 `R6-gui-or-browser` denies `xdg-open`, `wslview` and `explorer.exe` because
-a headless server has no desktop; on a workstation those are ordinary. `R5-sudo` is a
+a headless server has no desktop; on a workstation those are ordinary. It is
+**`off` by default on every platform** now, and the installer never turns it on
+inside WSL (WSL reaches a Windows desktop), so the `"off"` entry above is
+belt-and-braces rather than a change. `R5-sudo` is a
 workstation's own machine, so it warns rather than blocks. `R3` and `R7`
 already default to `warn` and need no entry. `R4-long-work-bare-shell` also
 defaults to `warn`, so it needs no entry either, but note that its advice
@@ -294,9 +297,10 @@ mode was set before.
 install/doctor.sh
 ```
 
-`doctor.sh` runs real hook processes against a throwaway `HOME` -- which
-means its deny case (an `xdg-open` blocked by R6) passes even on a machine
-whose `rules.json` has turned R6 off. It proves the hook works, not what this
+`doctor.sh` runs real hook processes against a throwaway `HOME`, and pins R6
+on inside that throwaway `HOME` -- which means its deny case (an `xdg-open`
+blocked by R6) passes on any machine, whatever this one's `rules.json` says
+about R6. It reports this machine's actual R6 setting separately. It proves the hook works, not what this
 machine's rules do; check those by piping an event through the deployed hook
 with the real `HOME`. `doctor.sh` (one real
 deny, one real allow, a fail-open check, a kill-switch check), checks the

@@ -16,7 +16,7 @@ fuzzy part is actually in doubt.
 Each rule carries:
   id          stable short id, used in ~/.config/airlock/rules.json
   tools       tool names it applies to ("*" for every tool)
-  action      default action: "deny" | "warn" | "log"
+  action      default action: "deny" | "warn" | "log" | "off"
   prefilter   ctx -> Match | None    (all code, no I/O)
   questions   (ctx, match) -> (state, questions) for the Jev call, or None
   deny_when   answers -> bool        (the fuzzy half of the rule)
@@ -31,7 +31,9 @@ Actions:
         nobody is attending the session)
   warn  allow, and hand the advice back as hook output / a log row
   log   allow, log only, never surface anything
-  off   (config only) the rule does not run at all
+  off   the rule does not run at all. R6 ships this way on every platform:
+        a headless machine turns it on in rules.json (install/install.sh
+        writes that entry when it detects one)
 
 Per-rule overrides live in ~/.config/airlock/rules.json, e.g.:
 
@@ -93,11 +95,12 @@ class Rule(object):
         self.tools = tuple(tools)
         self.action = action
         # A different DEFAULT action on native Windows, or None for "the same
-        # everywhere". Only R6 uses it: the policy it enforces is "this box has
-        # no desktop", which is a fact about a headless Linux server and not
-        # about a Windows workstation, where opening a browser is ordinary. A
-        # rules.json entry still overrides it on either platform -- the
-        # per-platform value is a DEFAULT, never a ceiling.
+        # everywhere". No rule sets it today: R6 used to, and now defaults to
+        # `off` on every platform instead, which made the special case
+        # redundant. The mechanism is kept because the next rule that is
+        # genuinely platform-shaped will want it, and because a rules.json
+        # entry still overrides it on either platform -- the per-platform
+        # value is a DEFAULT, never a ceiling.
         self.windows_action = windows_action
         self.prefilter = prefilter
         self.questions = questions
@@ -953,14 +956,14 @@ R6_SUGGESTION = (
 
 # The same advice for a machine that is Windows AND headless -- a Server Core
 # box, a build agent. It never mentions $DISPLAY or an X server, because
-# neither exists there, and it never asserts the box has no desktop: the rule
-# is off by default on Windows and only reaches this text because somebody put
-# it back in rules.json, which is them saying so.
+# neither exists there. R6 is off by default on every platform, so reaching
+# this text at all means rules.json on this machine turned it on, which is
+# somebody saying the box has no desktop.
 R6_SUGGESTION_WINDOWS = (
     "This machine is configured as one that should not open a GUI or a browser "
-    "(R6 is off by default on Windows; rules.json here turns it back on). Print "
-    "the URL or path and let the user open it themselves. If the task genuinely "
-    "needs a browser, use Playwright headless."
+    "(R6 is off by default; rules.json here turns it on). Print the URL or path "
+    "and let the user open it themselves. If the task genuinely needs a browser, "
+    "use Playwright headless."
 )
 
 
@@ -1600,18 +1603,18 @@ RULES = [
     Rule(
         id="R6-gui-or-browser",
         tools=SHELL_TOOLS,
-        action="deny",
-        # OFF by default on native Windows. The rule encodes "this box is a
-        # headless server with no desktop"; a Windows workstation has one, and
-        # opening a browser there is a normal thing to do, so firing would be
-        # wrong on the platform's own terms. A machine that IS a headless
-        # Windows box turns it back on with
-        # {"R6-gui-or-browser": "deny"} in rules.json, and the deny text drops
-        # the "headless server" wording there (see prefilter_gui).
-        windows_action="off",
+        action="off",
+        # OFF by default on EVERY platform. The rule encodes "this box is a
+        # headless server with no desktop", and most people run Claude Code on
+        # a machine that has one, where opening a browser is a normal thing to
+        # do. A machine that really is headless turns it on with
+        # {"R6-gui-or-browser": "deny"} in rules.json -- install/install.sh
+        # writes exactly that entry when it detects a headless Linux box, and
+        # `install/install.sh --headless` forces it. The deny text adapts to
+        # the platform (see prefilter_gui).
         prefilter=prefilter_gui,
-        why="CLAUDE.md: there is no desktop; print the URL instead. Default off "
-            "on native Windows, where a desktop is the normal case.",
+        why="CLAUDE.md: there is no desktop; print the URL instead. Off by "
+            "default everywhere; headless machines turn it on in rules.json.",
     ),
     Rule(
         id="R7-destructive",

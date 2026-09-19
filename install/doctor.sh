@@ -64,6 +64,13 @@ else
   # R6: opening a browser on a headless box. Code-only, so this needs no API
   # key and no network -- it proves the hook process, the rules table, the
   # mode resolution and the deny JSON, and nothing else.
+  #
+  # R6 is OFF by default on every platform now, so this check pins it on in
+  # the throwaway HOME's own rules.json. That is deliberate: the assertion
+  # here is about the hook machinery, not about this machine's R6 policy,
+  # which is reported separately under "Mode and config" below.
+  mkdir -p "$TMPHOME/.config/airlock"
+  printf '%s\n' '{"R6-gui-or-browser": "deny"}' > "$TMPHOME/.config/airlock/rules.json"
   deny_out="$(printf '%s' '{"session_id":"doctor-deny","cwd":"/tmp","tool_name":"Bash","tool_input":{"command":"xdg-open https://example.com"}}' \
     | HOME="$TMPHOME" AIRLOCK_MODE=enforce "$PY" "$HOOK" 2>/dev/null)"
   if printf '%s' "$deny_out" | "$PY" -c '
@@ -122,6 +129,40 @@ if [ -n "$MODE" ]; then
   fi
 else
   fail "could not resolve the mode -- is $LIVE importable?"
+fi
+
+# R6 (opening a GUI or a browser) is off by default on EVERY platform, and a
+# headless machine turns it on with one entry in rules.json. Say which way
+# this machine is set and why, because "the guard is installed" and "the guard
+# will stop an agent opening a browser on this server" are different claims.
+R6_LINE="$(cd "$LIVE" && "$PY" -c '
+from airlock import headless, paths, rules
+rid = headless.R6_RULE_ID
+rule = rules.RULES_BY_ID[rid]
+path = paths.config_file("rules.json")
+ov = rules.load_action_overrides()
+default = rules.default_action(rule)
+if rid in ov:
+    print("%s\t%s\tset to %r in %s" % (rid, ov[rid], ov[rid], path))
+else:
+    hl, why = headless.detect_headless()
+    print("%s\t%s\tno entry in %s, so the built-in default applies; this machine looks %s (%s)"
+          % (rid, default, path, "HEADLESS" if hl else "like a desktop", why))
+' 2>/dev/null)"
+if [ -n "$R6_LINE" ]; then
+  R6_ACTION="$(printf '%s' "$R6_LINE" | cut -f2)"
+  R6_WHY="$(printf '%s' "$R6_LINE" | cut -f3-)"
+  if [ "$R6_ACTION" = "off" ]; then
+    pass "R6 (GUI/browser): OFF -- $R6_WHY"
+    R6_RULES_JSON="$(cd "$LIVE" && "$PY" -c 'from airlock import paths;print(paths.config_file("rules.json"))' 2>/dev/null)"
+    printf '        headless machine? turn it on with this one command:\n'
+    printf '          (cd %s && %s -m airlock.headless merge "%s")\n' \
+      "$LIVE" "$PY" "${R6_RULES_JSON:-$HOME/.config/airlock/rules.json}"
+  else
+    pass "R6 (GUI/browser): $R6_ACTION -- $R6_WHY"
+  fi
+else
+  fail "could not read the R6 setting -- is $LIVE importable?"
 fi
 
 if (cd "$LIVE" && "$PY" -c '

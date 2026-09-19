@@ -39,6 +39,12 @@ from pathlib import Path
 from . import client, policy, questions, rules as rules_mod, scope as scope_mod
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
+
+# The eval asks "does each rule classify its own cases correctly", never "is
+# this rule on by default on the machine running the eval". R6 (GUI/browser)
+# ships `off` on every platform -- see airlock/headless.py -- so it is pinned
+# at its intended action here; every other rule is already at its default.
+EVAL_OVERRIDES = {"R6-gui-or-browser": "deny"}
 CASES_FILE = REPO_ROOT / "eval" / "cases.jsonl"
 RESULT_FILE = REPO_ROOT / "eval" / "last_result.json"
 
@@ -185,7 +191,7 @@ def _judge_rules(payload, rule_id):
     if tp and not Path(tp).is_absolute():
         payload["transcript_path"] = str(REPO_ROOT / tp)
     ctx = rules_mod.build_ctx(payload, tool_name)
-    rows = rules_mod.dry_run(ctx, ask=_ask_jev, overrides={})
+    rows = rules_mod.dry_run(ctx, ask=_ask_jev, overrides=EVAL_OVERRIDES)
     mine = [r for r in rows if r["rule_id"] == rule_id]
     other = sorted({r["rule_id"] for r in rows if r["rule_id"] != rule_id and r.get("fires")})
     row = mine[0] if mine else None

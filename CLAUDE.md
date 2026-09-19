@@ -22,12 +22,13 @@ installer rather than bash, no warm daemon, and `es.exe` (voidtools
 Everything) in place of `plocate` for file search.
 
 **Working on the code?** `python3 -m unittest discover -s tests` must pass
-(805 tests on Linux; the same suite on native Windows Python skips the
+(835 tests on Linux; the same suite on native Windows Python skips the
 POSIX-only ones and passes the rest, and no test requires Windows to pass).
 `python3 tools/check_docs.py` must pass too: it resolves every relative link
 in the README and `docs/`, and checks every Mermaid block. The rules table is
-`airlock/rules.py`; everything fails open, and R6 is the one rule with a
-per-platform default (`off` on native Windows). The key-file resolution order
+`airlock/rules.py`; everything fails open, and R6 is `off` by default on every
+platform (a headless machine turns it on in `rules.json`; `airlock/headless.py`
+detects one and `install/install.sh` writes the entry). The key-file resolution order
 is written down in exactly one place, the module docstring of
 `airlock/keyfile.py`; the pointer-file trust checks and what Windows cannot
 check are in the same docstring.
