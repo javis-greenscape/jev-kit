@@ -129,6 +129,42 @@ def is_wsl(env=None, proc_version=None):
     return "microsoft" in (proc_version or "").lower()
 
 
+# --- host capacity ------------------------------------------------------------
+
+#: Cores at/below which a box counts as "small" for R3's uncapped-run warning.
+#: Measured 2026-09-20: gs, the shared VPS R3's messages were written for, has
+#: `nproc` = 4 (7GB RAM) and should keep warning; MasterRig, Jonathan's WSL
+#: workstation, has `nproc` = 12 (15GB RAM) and should not. 6 leaves headroom
+#: on both sides of that gap.
+SMALL_HOST_CPU_THRESHOLD = 6
+
+
+def cpu_count(override=None):
+    """Number of CPUs available to this process.
+
+    `override` is the injection point every caller forwards, matching
+    `is_wsl`'s `env`/`proc_version` arguments: pass an int to force the
+    answer in a test. Falls back to 2 (a conservative small number) if
+    `os.cpu_count()` cannot tell."""
+    if override is not None:
+        return override
+    try:
+        n = os.cpu_count()
+    except Exception:
+        n = None
+    return n if n else 2
+
+
+def is_small_host(cpus=None):
+    """True when this machine has few enough cores that an uncapped test
+    suite or build genuinely contends with everything else running on it.
+
+    `cpus` is the injection point for tests: pass an int to force the core
+    count instead of detecting it. See `SMALL_HOST_CPU_THRESHOLD`."""
+    n = cpus if cpus is not None else cpu_count()
+    return n <= SMALL_HOST_CPU_THRESHOLD
+
+
 def detect_headless(env=None, system=None, proc_version=None, loginctl=None):
     """(headless: bool, reason: str) for THIS machine, conservatively.
 

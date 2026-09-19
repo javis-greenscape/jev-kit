@@ -15,6 +15,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from airlock import headless, rules
 
@@ -114,6 +115,37 @@ class TestHeadlessDetection(unittest.TestCase):
                                            proc_version="", loginctl=lambda: None)
         self.assertFalse(hl)
         self.assertIn("detection failed", why)
+
+
+class TestHostCapacity(unittest.TestCase):
+    """R3 (airlock/rules.py:prefilter_wide_run) was written for gs, the
+    shared VPS: `nproc` = 4, 7GB RAM. It must stay silent on a bigger box
+    like MasterRig (`nproc` = 12, 15GB RAM), so this is gated on real,
+    injectable core-count detection rather than firing unconditionally."""
+
+    def test_cpu_count_uses_the_override(self):
+        self.assertEqual(headless.cpu_count(override=4), 4)
+        self.assertEqual(headless.cpu_count(override=12), 12)
+
+    def test_cpu_count_falls_back_to_a_safe_small_number(self):
+        with mock.patch("os.cpu_count", return_value=None):
+            self.assertGreaterEqual(headless.cpu_count(), 1)
+
+    def test_gs_sized_host_is_small(self):
+        self.assertTrue(headless.is_small_host(cpus=4))
+
+    def test_masterrig_sized_host_is_not_small(self):
+        self.assertFalse(headless.is_small_host(cpus=12))
+
+    def test_threshold_boundary(self):
+        self.assertTrue(headless.is_small_host(cpus=headless.SMALL_HOST_CPU_THRESHOLD))
+        self.assertFalse(headless.is_small_host(cpus=headless.SMALL_HOST_CPU_THRESHOLD + 1))
+
+    def test_is_small_host_detects_the_real_machine_when_not_overridden(self):
+        with mock.patch("airlock.headless.cpu_count", return_value=4):
+            self.assertTrue(headless.is_small_host())
+        with mock.patch("airlock.headless.cpu_count", return_value=12):
+            self.assertFalse(headless.is_small_host())
 
 
 class TestMergeIntoRulesJson(unittest.TestCase):
