@@ -49,12 +49,9 @@ echo "deploy.sh: running unit tests against the clean export..." >&2
 # stripped, so THIS machine's own ~/.config/airlock/rules.json or mode
 # cannot change the test outcome and refuse a deploy that is actually fine.
 TEST_HOME="$(mktemp -d)"
-( cd "$TEST_TMP" && env -u AIRLOCK_CONFIG_DIR -u PLUMBLINE_CONFIG_DIR -u JEV_GUARD_CONFIG_DIR \
-    -u AIRLOCK_STATE_DIR -u PLUMBLINE_STATE_DIR -u JEV_GUARD_STATE_DIR \
-    -u AIRLOCK_HOME -u PLUMBLINE_HOME -u JEV_HOME \
-    -u AIRLOCK_KEY_FILE -u PLUMBLINE_KEY_FILE -u JEV_GUARD_KEY_FILE \
-    -u AIRLOCK_MODE -u PLUMBLINE_MODE -u JEV_GUARD_MODE \
-    HOME="$TEST_HOME" python3 -m unittest discover -s tests )
+# env -i rather than a list of names to strip: a machine's install/config.env
+# can export any AIRLOCK_* variable, and a list is always one name behind.
+( cd "$TEST_TMP" && env -i PATH="$PATH" HOME="$TEST_HOME" python3 -m unittest discover -s tests )
 rm -rf "$TEST_HOME"
 echo "deploy.sh: unit tests passed" >&2
 
