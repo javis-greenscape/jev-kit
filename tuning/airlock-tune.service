@@ -1,0 +1,17 @@
+[Unit]
+Description=airlock unattended tuning run
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+# %h is the unit's own home directory and `current` is the deployed release
+# symlink, so this unit file is identical on every machine and names neither a
+# user nor a development checkout. The other units already do this.
+WorkingDirectory=%h/.local/share/airlock/current
+ExecStart=%h/.local/share/airlock/current/tuning/tune.sh
+# Belt-and-braces resource caution on a shared 8GB box; the script itself is
+# cheap (a handful of subprocess calls), the expense is the API calls inside
+# it, which don't need more than one CPU.
+Nice=10
+CPUQuota=100%

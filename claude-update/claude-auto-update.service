@@ -1,0 +1,8 @@
+[Unit]
+Description=Update Claude Code when no session is in use
+After=network-online.target
+
+[Service]
+Type=oneshot
+Nice=10
+ExecStart=%h/bin/claude-auto-update

@@ -1,0 +1,15 @@
+Paste this paragraph into the machine's CLAUDE.md (or AGENTS.md). It is the
+half of `filesearch/` that an agent has to be told about: the index exists,
+but nothing uses it unless the instructions say to.
+
+---
+
+**Finding a file by name across `$HOME` is `plocate`, never `find ~`.**
+`plocate -d ~/.cache/plocate/home.db -i '<pattern>'` answers in milliseconds
+from an index of the home directory that a user timer
+(`airlock-filesearch.timer`) rebuilds hourly; it skips `.git`,
+`node_modules`, `.pnpm-store`, `__pycache__` and `.venv`. A file created in
+the last hour may be missing: run
+`systemctl --user start airlock-filesearch.service` (about 16 s on a
+150 GB disk) and ask again. Inside one repository use `fd`, which walks the
+tree live and needs no index.

@@ -1,0 +1,75 @@
+#!/usr/bin/env bash
+# Print, or (with --apply) apply, the edit that wires a settings.json's
+# airlock PreToolUse hook at the deployed copy
+# ($AIRLOCK_HOME/current/hooks/airlock.py) instead of a development checkout
+# -- ADDING the entry if none is there yet (a first install has nothing to
+# repoint), or repointing it if an airlock/plumbline/jev_guard hook command
+# already exists somewhere else.
+#
+# Paths are ALWAYS passed as arguments -- this script never guesses which
+# account trees exist on the box (~/.claude, ~/.claude-<account>, ~/.claude-*,
+# etc). --apply backs up each file it touches (timestamped, same directory)
+# before writing an existing file; a settings.json that does not exist yet is
+# created outright, with just the entries this run adds.
+set -euo pipefail
+
+usage() {
+  cat >&2 <<EOF
+usage: $0 --print|--apply [--belay] [--function-hooks] <settings.json> [...]
+
+  --belay           also add the belay Stop hook (matcher "*", command
+                     <HOME>/bin/airlock-belay-run, timeout 25) -- only if
+                     that wrapper file actually exists on this machine.
+  --function-hooks  also set env.CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1.
+EOF
+  exit 2
+}
+
+if [ "$#" -lt 2 ]; then
+  usage
+fi
+
+MODE="$1"
+shift
+case "$MODE" in
+  --print) APPLY=0 ;;
+  --apply) APPLY=1 ;;
+  *) usage ;;
+esac
+
+BELAY=0
+FUNCTION_HOOKS=0
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --belay) BELAY=1; shift ;;
+    --function-hooks) FUNCTION_HOOKS=1; shift ;;
+    --) shift; break ;;
+    --*) usage ;;
+    *) break ;;
+  esac
+done
+
+[ "$#" -ge 1 ] || usage
+
+AIRLOCK_HOME="${AIRLOCK_HOME:-$HOME/.local/share/airlock}"
+NEW_HOOK="$AIRLOCK_HOME/current/hooks/airlock.py"
+BELAY_WRAPPER="${AIRLOCK_BELAY_WRAPPER:-$HOME/bin/airlock-belay-run}"
+
+# An absolute python3, same reasoning as the hook command itself: a hook
+# runs with a minimal environment and an unpredictable working directory, so
+# `python3 hooks/airlock.py` or anything relying on PATH is the wrong call.
+PY="${AIRLOCK_PYTHON3:-}"
+if [ -z "$PY" ]; then
+  PY="$(command -v python3 || true)"
+fi
+if [ -z "$PY" ]; then
+  echo "wire.sh: no python3 found on PATH; set AIRLOCK_PYTHON3 to an absolute interpreter path" >&2
+  exit 2
+fi
+NEW_HOOK_COMMAND="$PY $NEW_HOOK"
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+AIRLOCK_HOME="$AIRLOCK_HOME" NEW_HOOK="$NEW_HOOK" NEW_HOOK_COMMAND="$NEW_HOOK_COMMAND" \
+  APPLY="$APPLY" BELAY="$BELAY" BELAY_WRAPPER="$BELAY_WRAPPER" FUNCTION_HOOKS="$FUNCTION_HOOKS" \
+  python3 "$SCRIPT_DIR/_wire.py" "$@"

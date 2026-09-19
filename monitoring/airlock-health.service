@@ -1,0 +1,12 @@
+[Unit]
+Description=airlock health check
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=%h/.local/share/airlock/current
+ExecStart=%h/.local/share/airlock/current/monitoring/run_health_check.sh
+Nice=10
+CPUQuota=50%
+TimeoutStartSec=15

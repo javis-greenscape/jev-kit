@@ -1,0 +1,63 @@
+
+import tests  # noqa: F401 -- MUST be the first import. `python3 -m unittest
+# discover -s tests` runs with start_dir == top_level_dir, so unittest treats
+# `tests/` as a flat directory of top-level modules and never executes
+# tests/__init__.py as a package init (name == '.' in TestLoader._find_tests).
+# Importing it explicitly, here, first, is what actually runs its HOME/
+# AIRLOCK_*-isolating fixture before any airlock.* module resolves a real path.
+
+import json
+import os
+import stat
+import tempfile
+import unittest
+from pathlib import Path
+from unittest import mock
+
+from airlock import log as jlog
+
+
+class TestLog(unittest.TestCase):
+    def test_append_creates_dir_and_file_with_correct_modes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            log_dir = Path(tmp) / "state" / "airlock"
+            log_file = log_dir / "shadow.jsonl"
+            with mock.patch.object(jlog, "LOG_DIR", log_dir), mock.patch.object(jlog, "LOG_FILE", log_file):
+                jlog.append({"a": 1})
+
+            dir_mode = stat.S_IMODE(os.stat(log_dir).st_mode)
+            file_mode = stat.S_IMODE(os.stat(log_file).st_mode)
+            self.assertEqual(dir_mode, 0o700)
+            self.assertEqual(file_mode, 0o600)
+
+    def test_append_writes_one_json_line(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            log_dir = Path(tmp) / "state" / "airlock"
+            log_file = log_dir / "shadow.jsonl"
+            with mock.patch.object(jlog, "LOG_DIR", log_dir), mock.patch.object(jlog, "LOG_FILE", log_file):
+                jlog.append({"a": 1})
+                jlog.append({"b": 2})
+            lines = log_file.read_text().splitlines()
+            self.assertEqual(len(lines), 2)
+            self.assertEqual(json.loads(lines[0]), {"a": 1})
+            self.assertEqual(json.loads(lines[1]), {"b": 2})
+
+    def test_append_never_raises_on_bad_entry(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            log_dir = Path(tmp) / "state" / "airlock"
+            log_file = log_dir / "shadow.jsonl"
+            with mock.patch.object(jlog, "LOG_DIR", log_dir), mock.patch.object(jlog, "LOG_FILE", log_file):
+                # An entry containing something json.dumps would choke on
+                # without default=str -- must not raise.
+                class Weird:
+                    pass
+
+                jlog.append({"weird": Weird()})
+
+    def test_append_never_raises_on_unwritable_dir(self):
+        with mock.patch.object(jlog, "LOG_DIR", Path("/proc/definitely-not-writable/x")):
+            jlog.append({"a": 1})  # must not raise
+
+
+if __name__ == "__main__":
+    unittest.main()

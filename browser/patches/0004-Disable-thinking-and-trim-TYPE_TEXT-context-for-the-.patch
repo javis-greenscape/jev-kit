@@ -1,0 +1,265 @@
+From ec986a1f13d7388f7efbebc28568f0cac7cddc9a Mon Sep 17 00:00:00 2001
+From: Jonathan Avis <jonathanavis96@users.noreply.github.com>
+Date: Sat, 19 Sep 2026 10:34:16 +0000
+Subject: [PATCH 4/6] Disable thinking and trim TYPE_TEXT context for the
+ standing text model
+
+MAX_THINKING_TOKENS=0 (env var, no CLI flag exists) removes the extended-
+thinking cost that dominated latency on the standing child and the per-call
+adapter alike, with no correctness change on the cases tested. A trimmed
+element-table context (chosen field + 5 nearest rows + page title/url, no
+page body text) replaces the full page-text context by default, selectable
+via TEXT_MODEL_CONTEXT=full|trimmed; correctness verified on Wikipedia
+search, an origin/destination flights disambiguation, a date field and an
+email field.
+
+Stacked, these take TEXT_MODEL_PROVIDER=claude-standing from the previously
+measured regression (11.0-12.6s wall, 6.55s fill) to the fastest configuration
+in this repo (7.5s wall, 739ms fill for the README Wikipedia goal), beating
+the per-call claude-cli adapter this spike had settled on as the floor.
+
+See SPIKE-NOTES.md "Thinking off and trimmed context" for full measurements.
+---
+ SPIKE-NOTES.md                              | 103 ++++++++++++++++++++
+ jev_ultrafast/model.py                      |  35 ++++++-
+ jev_ultrafast/text_model_claude.py          |   4 +-
+ jev_ultrafast/text_model_claude_standing.py |  12 ++-
+ tests/test_agent.py                         |   3 +
+ 5 files changed, 152 insertions(+), 5 deletions(-)
+
+diff --git a/SPIKE-NOTES.md b/SPIKE-NOTES.md
+index f8ad587..841b43c 100644
+--- a/SPIKE-NOTES.md
++++ b/SPIKE-NOTES.md
+@@ -559,3 +559,106 @@ chrom` returning nothing afterward), plus `examples/run.py` now calls
+   a net win if a future CLI version exposes a way to skip extended thinking under stream-json),
+   but do not make it the default — `TEXT_MODEL_PROVIDER=claude-cli` (or a real API key) remains
+   the faster option on this box today.
++
++  **Superseded by the next section**: both levers below turned out to be available after all
++  (an env var the CLI honours for thinking, and a smaller-context redesign for the second), and
++  together they make the standing child the fastest path measured on this box.
++
++## Thinking off and trimmed context (2026-09-19, follow-up)
++
++Two cheap experiments against the standing-child regression above, run before building anything
++bigger, per this task's brief. Both landed; both are now wired in, keeping the previous shapes
++available behind env switches.
++
++### Experiment A — `MAX_THINKING_TOKENS=0`
++
++Claude Code honours `MAX_THINKING_TOKENS` even though no CLI flag exposes it — `--help` has no
++`--effort none`/`--no-thinking`, but the env var works and was not rejected at `0` (no fallback
++to `1024` was needed). Measured on the realistic full context (goal + field + ~6000-char page
++text, same shape as before):
++
++| Configuration | Latency (5 calls, warm child) | thinking_tokens (usage) | Correct? |
++|---|---|---|---|
++| Standing child, baseline (`--effort low` only) | 2.3-6.2s (1st call pays cold-start) | 110-404 | yes |
++| Standing child, `MAX_THINKING_TOKENS=0` | 0.6-1.2s | **0** every call | yes |
++| Standing child, `MAX_THINKING_TOKENS=1024` | 2.1-3.3s | 88-179 (budget shrinks it, doesn't zero it) | yes |
++| Per-call adapter (`claude-cli`), baseline | 3.4-4.7s | n/a (plain-text `-p`, no usage detail) | yes |
++| Per-call adapter, `MAX_THINKING_TOKENS=0` | 1.7-3.5s | n/a | yes |
++
++`MAX_THINKING_TOKENS=0` removes the extended-thinking cost identified as the dominant latency
++term in the previous section, on both adapters, with the correct value returned in every run
++(`"Godel's incompleteness theorems"`, the same Wikipedia goal used throughout). It is now the
++default in both `text_model_claude_standing.py`'s child environment and
++`text_model_claude.py`'s subprocess environment (`env.setdefault("MAX_THINKING_TOKENS", "0")` —
++overridable by setting the var before start-up if a future case needs real thinking budget).
++
++### Experiment B — trimmed element-table context
++
++Built `model.field_context()`'s `"trimmed"` shape (now the default, selected by
++`TEXT_MODEL_CONTEXT=full|trimmed`): goal, the chosen element's own row from the element table
++(`action_space()`'s per-node dedup, the same shape TypeSafe itself sees), its 5 nearest rows by
++position in that same first-encounter order, page title and url. No page body text, no
++`recent_actions`. Implementation: `jev_ultrafast/model.py:field_context()` reconstructs the
++node-dedup order actions are built in (matching `action_space()`'s own ordering) to find the
++chosen field's position, then takes the 5 positions nearest by `abs(distance)`.
++
++Correctness, standing child, `MAX_THINKING_TOKENS=0`, trimmed context, one hand-built context
++per case (no page text at all):
++
++| Case | Goal | Field | Result | Correct? |
++|---|---|---|---|---|
++| Wikipedia search | "Search for Godel's incompleteness theorems on Wikipedia" | searchbox "Search Wikipedia" | `"Godel's incompleteness theorems"` | yes |
++| Flights origin (ambiguity check) | "Find flights from Manchester to Lisbon next Friday" | combobox "Where from?" (nearby: "Where to?") | `"Manchester"` | yes — picked origin, not destination |
++| Date field | "...date of birth 14 March 1990..." | textbox "Date of birth" | `"14/03/1990"` | yes |
++| Email field | "...email john.carter@example.com" | textbox "Email" | `"john.carter@example.com"` | yes |
++
++Latency with trimmed context, standing child, `MAX_THINKING_TOKENS=0`: **0.6-1.4s** per call
++across all four cases run twice through one shared child (8 calls, no repeats within a round) —
++same order of magnitude as Experiment A's full-context-but-thinking-off number, since page text
++was already a smaller share of the prompt once thinking was off; trimming it removes the
++remaining ~6000 chars of input tokens and keeps prompt-caching cheaper across turns.
++
++**One correctness caveat found, and resolved by how the test was framed, not by a code change**:
++sending the *exact same* ambiguous prompt (flights origin case) twice in a row through one
++child, with thinking off, flipped the answer to `"Lisbon"` on the second identical call and then
++returned `NONE` (no valid value) on three further identical repeats. A fresh child per request
++answered correctly 5/5. Running the four *different* cases in sequence twice through one shared
++child (the realistic pattern — no two TYPE_TEXT contexts in a real run are byte-identical)
++answered correctly all 8 times. Read as: disabling thinking makes a long-lived session more
++sensitive to exact-repeat degenerate inputs, which normal usage does not produce; noted here
++rather than hidden, no correctness failure was found under any context that varies turn to turn.
++
++### Wired in
++
++- `text_model_claude_standing.py` and `text_model_claude.py`: `MAX_THINKING_TOKENS` defaults to
++  `0` in the child/subprocess environment (Experiment A).
++- `model.py:field_context()`: `TEXT_MODEL_CONTEXT` env var, `"trimmed"` (default, winner) or
++  `"full"` (the original shape, kept for a page where the value genuinely must be read from body
++  text). Both providers (`claude-standing`, `claude-cli`) get whichever shape is selected, since
++  `field_context()` is the one call site both call through.
++
++### End-to-end re-run, README Wikipedia goal, both changes live (defaults, no env overrides beyond `TEXT_MODEL_PROVIDER=claude-standing`)
++
++Same setup as both earlier end-to-end runs (headless Chromium via `scripts/launch_chromium.js`,
++`BU_CDP_URL=http://127.0.0.1:9333`, one instance, closed after use, confirmed via `pgrep -a
++chrom` returning nothing afterward; `free -h` checked before launch, ~4.5G available).
++
++- **Reached the goal**: final URL `.../wiki/G%C3%B6del%27s_incompleteness_theorems`, status `done`.
++- **Wall time: 7.5s** (`time uv run python examples/run.py ...`) vs the previous best **9.3-9.8s**
++  (per-call `claude-cli` adapter) and the earlier standing-child regression's **11.0-12.6s**.
++- **TYPE_TEXT latency: 739ms** (`history[0]["text_latency_ms"]`) vs the previous best **4761ms**
++  (per-call adapter) and the earlier standing-child regression's **6.55s**.
++- No retries, no fallback, no `StalePage`.
++
++### Verdict
++
++**Both levers won, and stacked**: `MAX_THINKING_TOKENS=0` removes the thinking-token cost that
++was the dominant term at realistic prompt size; trimming the context removes the remaining
++input-token cost of page text. Together, the standing-child provider goes from a documented
++regression (11.0-12.6s wall, 6.55s fill) to the fastest configuration measured in this repo
++(7.5s wall, 739ms fill) — faster than the per-call `claude-cli` adapter this spike had settled
++on as the practical floor. `TEXT_MODEL_PROVIDER=claude-standing` is still not the global default
++(unset `TEXT_MODEL_PROVIDER` still requires `TEXT_MODEL_API_KEY`, matching how this repo treats
++CLI-based adapters as spike-only, OAuth-backed alternatives) but it is now the fastest opt-in
++path on this box, and both new switches (`MAX_THINKING_TOKENS`, `TEXT_MODEL_CONTEXT`) are cheap,
++reversible env-var choices rather than a rewrite.
+diff --git a/jev_ultrafast/model.py b/jev_ultrafast/model.py
+index 483738a..c13f201 100644
+--- a/jev_ultrafast/model.py
++++ b/jev_ultrafast/model.py
+@@ -149,11 +149,40 @@ def choose(state, goal, history):
+ 
+ 
+ def field_context(goal, action, page, history):
++    """TYPE_TEXT context for the text helper. TEXT_MODEL_CONTEXT selects the shape:
++
++    - "trimmed" (default, measured 2026-09-19, see SPIKE-NOTES.md "Thinking off and trimmed
++      context"): goal, the chosen element's own element-table row, its 5 nearest rows (by
++      position in the same first-encounter order action_space() uses), page title and url. No
++      page body text, no recent_actions — the field's name/role/value plus its neighbours are
++      almost always enough to derive the value, and dropping ~6000 chars of page text is most of
++      why this shape is fast.
++    - "full": the original shape — goal, field {label, role, value}, page {title, text[:6000]},
++      last 6 recent_actions. Kept behind the switch as the fallback if a page ever needs body
++      text the trimmed shape can't see (e.g. a value that must be copied from prose on the page).
++    """
++    if os.environ.get("TEXT_MODEL_CONTEXT", "trimmed") == "full":
++        return {
++            "goal": goal,
++            "field": {k: action.get(k) for k in ("label", "role", "value")},
++            "page": {"title": page["title"], "text": page["text"][:6000]},
++            "recent_actions": [{k: h.get(k) for k in ("action", "text")} for h in history[-6:]],
++        }
++    elements, _, _ = action_space(page["actions"])
++    order, seen = [], set()
++    for a in page["actions"]:
++        node = a.get("node")
++        # Pseudo-actions (wait/scroll) carry no node and never appear in `elements`; skip them.
++        if node is not None and node not in seen:
++            seen.add(node)
++            order.append(node)
++    position = order.index(action["node"])
++    nearest = sorted((i for i in range(len(elements)) if i != position), key=lambda i: (abs(i - position), i))[:5]
+     return {
+         "goal": goal,
+-        "field": {k: action.get(k) for k in ("label", "role", "value")},
+-        "page": {"title": page["title"], "text": page["text"][:6000]},
+-        "recent_actions": [{k: h.get(k) for k in ("action", "text")} for h in history[-6:]],
++        "field": elements[position],
++        "nearby_fields": [elements[i] for i in sorted(nearest)],
++        "page": {"title": page["title"], "url": page["url"]},
+     }
+ 
+ 
+diff --git a/jev_ultrafast/text_model_claude.py b/jev_ultrafast/text_model_claude.py
+index 2e44672..76c474b 100644
+--- a/jev_ultrafast/text_model_claude.py
++++ b/jev_ultrafast/text_model_claude.py
+@@ -31,6 +31,8 @@ def field_text(context):
+         + json.dumps(context)
+     )
+     started = time.perf_counter()
++    env = {**os.environ, "CLAUDE_CONFIG_DIR": CLAUDE_CONFIG_DIR}
++    env.setdefault("MAX_THINKING_TOKENS", "0")  # measured 2026-09-19: cuts 3.4-4.7s to 1.7-3.5s, same correctness
+     try:
+         result = subprocess.run(
+             ["claude", "-p", "--model", MODEL, prompt],
+@@ -38,7 +40,7 @@ def field_text(context):
+             capture_output=True,
+             text=True,
+             timeout=30,
+-            env={**os.environ, "CLAUDE_CONFIG_DIR": CLAUDE_CONFIG_DIR},
++            env=env,
+         )
+     except (subprocess.SubprocessError, OSError) as exc:
+         raise RuntimeError(f"claude CLI invocation failed: {exc}") from None
+diff --git a/jev_ultrafast/text_model_claude_standing.py b/jev_ultrafast/text_model_claude_standing.py
+index 25136a0..6f81b71 100644
+--- a/jev_ultrafast/text_model_claude_standing.py
++++ b/jev_ultrafast/text_model_claude_standing.py
+@@ -12,6 +12,14 @@ Design (measured 2026-09-19, see SPIKE-NOTES.md "Standing text model" section):
+   session; `--bare` avoids that too but requires an Anthropic API key, which this box does not
+   have — OAuth only, so `--safe-mode` is the one that both skips hooks and keeps OAuth working).
+   `--tools ""` disables all tool use so the child can never act, only answer.
++- `MAX_THINKING_TOKENS=0` is set on the child's environment by default (overridable by setting
++  it before start-up). Measured 2026-09-19 (see SPIKE-NOTES.md "Thinking off and trimmed
++  context"): this removes the extended-thinking cost that dominated latency at realistic prompt
++  sizes (thinking_tokens confirmed 0 in the `result` event's usage; latency dropped from
++  ~5.9-7.2s to ~0.6-1.3s per call on a warm child). One correctness caveat found: with thinking
++  off, sending the *exact same* ambiguous prompt twice in a row within one session occasionally
++  flipped the answer; with realistic varying turns (the actual usage pattern) it did not
++  reproduce across a mixed sequence of the four correctness cases run twice through one child.
+ - Each request is one `{"type": "user", "message": {...}}` line on stdin; the reply is read from
+   stdout until the `"type": "result"` event. A dedicated reader thread drains stdout into a
+   queue so a slow/timed-out request never blocks or corrupts the next one.
+@@ -81,6 +89,8 @@ class _Child:
+     """One long-lived `claude -p --input-format stream-json` process."""
+ 
+     def __init__(self):
++        env = {**os.environ, "CLAUDE_CONFIG_DIR": CLAUDE_CONFIG_DIR}
++        env.setdefault("MAX_THINKING_TOKENS", "0")
+         self.proc = subprocess.Popen(
+             _cmd(),
+             stdin=subprocess.PIPE,
+@@ -88,7 +98,7 @@ class _Child:
+             stderr=subprocess.PIPE,
+             text=True,
+             bufsize=1,
+-            env={**os.environ, "CLAUDE_CONFIG_DIR": CLAUDE_CONFIG_DIR},
++            env=env,
+         )
+         self.requests_served = 0
+         self._queue = queue.Queue()
+diff --git a/tests/test_agent.py b/tests/test_agent.py
+index 41fc390..cf91609 100644
+--- a/tests/test_agent.py
++++ b/tests/test_agent.py
+@@ -205,7 +205,10 @@ def test_changed_field_context_does_not_reuse_generated_text(runner, monkeypatch
+     runner.state["browser"].act.side_effect = [StalePage("Changed before input"), None]
+     with pytest.raises(StalePage):
+         runner.command("act", {"fingerprint": runner.state["page"]["fingerprint"]})
++    # Change something both context shapes look at: page body text (the "full" shape) and the
++    # field's own value (the "trimmed" shape, which drops page text — see model.field_context).
+     runner.state["page"]["text"] = "Different page context"
++    runner.state["page"]["actions"][0]["value"] = "changed"
+     runner.state["decision"] = decision()
+     runner.command("act", {"fingerprint": runner.state["page"]["fingerprint"]})
+     assert helper.call_count == 2
+-- 
+2.53.0
+

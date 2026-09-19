@@ -1,0 +1,675 @@
+"""Synchronous judging path, run IN the PreToolUse hook process
+(hooks/airlock.py), never detached -- unlike shadow mode, a deny has to
+reach stdout before the hook exits, so this cannot hand off to a background
+worker the way airlock/worker.py does.
+
+Since the all-tools widening this is driven by the rules table
+(airlock/rules.py). The hook is registered for EVERY tool; the pure code
+pre-filters in that table decide in microseconds whether any rule could apply.
+A call no rule covers costs nothing and logs nothing. Only a rule whose
+pre-filter matched AND whose fuzzy half is genuinely in doubt spends a Jev
+request.
+
+Per-rule action (`deny` / `warn` / `log`, plus `off` in config) comes from the
+rule's default, overridable in ~/.config/airlock/rules.json. Only `deny` can
+block; `warn` returns its advice as hook output; `log` writes a row and
+nothing else.
+
+Budget: AIRLOCK_BUDGET_MS (default 1500) bounds every client.ask() call.
+Fail-open everywhere: any exception, a malformed answer, the daemon being
+down plus a slow fallback, or exceeding the budget all mean ALLOW, logged
+with `error` set and `enforced: false`. This module never raises to its
+caller (hooks/airlock.py still wraps every call here in try/except as a
+second line of defence).
+"""
+import datetime
+import json
+import os
+import re
+import sys
+import time
+
+# client and guards are imported lazily (inside the branches that need them):
+# they pull in urllib and the keyfile reader, several ms of start-up that a
+# code-only rule -- the common matched case -- must not pay for.
+from . import log, paths, policy, rules as rules_mod, state as state_mod
+
+DEFAULT_BUDGET_MS = 1500
+LOOP_WINDOW_S = 600  # 10 minutes, per the brief
+
+# `user_requested` softening. At or above this, a deny becomes a warn. It is
+# deliberately high: softening a deny is a one-way door for the guard, and the
+# answer comes from a question a tool result would love to be able to
+# influence. See airlock/context.py for the code-side belt.
+USER_REQUESTED_SOFTEN_AT = 0.75
+
+# All three stamps are accepted: `[airlock-ok: ...]` is the current name,
+# `[plumbline-ok: ...]` and `[jev-ok: ...]` are what existing sessions,
+# transcripts and habits on a machine running either older layout already
+# use. Dropping an old one would silently stop honouring overrides
+# mid-cutover, which is exactly the class of failure a rename is meant to
+# avoid.
+_OVERRIDE_RE = re.compile(r"\[(?:airlock|plumbline|jev)-ok:\s*([^\]]*)\]", re.I)
+
+_ACTION_RANK = {"deny": 0, "ask": 1, "warn": 2, "log": 3, "off": 4}
+
+
+def _now_iso():
+    return datetime.datetime.now(datetime.timezone.utc).isoformat()
+
+
+def budget_ms():
+    try:
+        return int(paths.env("AIRLOCK_BUDGET_MS", "PLUMBLINE_BUDGET_MS", "JEV_GUARD_BUDGET_MS",
+                             default=str(DEFAULT_BUDGET_MS)))
+    except Exception:
+        return DEFAULT_BUDGET_MS
+
+
+def emit_deny(reason):
+    sys.stdout.write(json.dumps({
+        "hookSpecificOutput": {
+            "hookEventName": "PreToolUse",
+            "permissionDecision": "deny",
+            "permissionDecisionReason": reason,
+        }
+    }))
+
+
+def emit_ask(reason):
+    """Hand the decision to the human: allow, but only if they say so.
+
+    Measured empirically against Claude Code 2.1.272 (the same way the warn
+    channel was), not assumed:
+
+      - `permissionDecision: "ask"` IS honoured for PreToolUse. The CLI does
+        not ignore it, and `permissionDecisionReason` reaches the model
+        verbatim.
+      - In a HEADLESS `claude -p` session there is nobody to answer, and the
+        CLI resolves an ask exactly as it resolves a deny: the tool does not
+        run and the call is recorded in the session result's
+        `permission_denials` array. `--permission-mode bypassPermissions` does
+        NOT bypass it.
+
+    So an ask in an unattended session is a deny with a more confusing reason
+    string. `_effective_block_action()` turns it back into an honest deny
+    there, detected from CLAUDE_CODE_SESSION_ATTENDED (see
+    airlock/context.py:session_is_attended).
+    """
+    sys.stdout.write(json.dumps({
+        "hookSpecificOutput": {
+            "hookEventName": "PreToolUse",
+            "permissionDecision": "ask",
+            "permissionDecisionReason": reason,
+        }
+    }))
+
+
+def emit_warn(advice):
+    """A warn NEVER blocks. It returns the advice two ways: `systemMessage`
+    (documented for every hook event, shown to the user) and
+    hookSpecificOutput.additionalContext, which this CLI accepts generically
+    for PreToolUse -- if a future version ignores it for this event the warn
+    silently degrades to the systemMessage plus the log row, and still never
+    blocks."""
+    text = "\n\n".join(advice)
+    sys.stdout.write(json.dumps({
+        "systemMessage": text,
+        "suppressOutput": True,
+        "hookSpecificOutput": {
+            "hookEventName": "PreToolUse",
+            "additionalContext": text,
+        },
+    }))
+
+
+def emit_rewrite(updated_input, text):
+    """Allow the call, but with an edited tool_input.
+
+    Verified against the installed CLI, not assumed. Claude Code 2.1.278 on
+    this box ships its own hooks reference, which lists under
+    hookSpecificOutput:
+
+        `updatedInput` - Modified tool input (PreToolUse only)
+
+    and a live `claude -p` run with a PreToolUse hook returning
+    `permissionDecision: "allow"` plus `updatedInput` executed the REWRITTEN
+    command, not the original one, and showed the accompanying
+    additionalContext to the model.
+
+    If a future CLI ignores the field the call simply runs unchanged, with the
+    context note still attached -- a rewrite degrades to a warn, never to a
+    block.
+    """
+    sys.stdout.write(json.dumps({
+        "systemMessage": text,
+        "suppressOutput": True,
+        "hookSpecificOutput": {
+            "hookEventName": "PreToolUse",
+            "permissionDecision": "allow",
+            "permissionDecisionReason": text,
+            "updatedInput": updated_input,
+            "additionalContext": text,
+        },
+    }))
+
+
+def find_override(*texts):
+    """Return the reason string from the first `[airlock-ok: <reason>]` (or
+    legacy `[plumbline-ok: ...]` / `[jev-ok: ...]`) stamp found in any of
+    `texts`, or None."""
+    for t in texts:
+        m = _OVERRIDE_RE.search(t or "")
+        if m:
+            return m.group(1).strip()
+    return None
+
+
+def _override_texts(ctx):
+    ti = ctx.get("tool_input") or {}
+    return [
+        str(ti.get("description") or ""),
+        str(ti.get("prompt") or ""),
+        str(ti.get("command") or ""),
+        str(ti.get("args") or ""),
+    ]
+
+
+def _bash_deny_reason(entry):
+    suggestion = entry.get("suggestion") or "a more targeted search"
+    scope = entry.get("scope") or "a broad search"
+    return (
+        "BLOCKED (airlock enforce): this looks like a %s search. Run instead:\n"
+        "    %s\n"
+        "Wrong call? Add `[airlock-ok: <reason>]` to this Bash call's description to override."
+        % (scope, suggestion)
+    )
+
+
+def _agent_deny_reason(entry):
+    chosen = entry.get("chosen_type", "?")
+    if chosen == "fable" and (entry.get("prior_failed") or 0.0) < 0.5:
+        return (
+            "BLOCKED (airlock enforce): dispatching 'fable' without stating a prior failed "
+            "attempt. Name what was already tried and why it failed (fable is last resort, "
+            "after worker then Opus), or dispatch a cheaper agent first.\n"
+            "Wrong call? Add `[airlock-ok: <reason>]` to the Agent prompt or description to override."
+        )
+    suggestion = entry.get("suggestion") or "a cheaper sub-agent"
+    return (
+        "BLOCKED (airlock enforce): this task looks like '%s', at least two rungs cheaper "
+        "than '%s'. Retry with subagent_type=%s.\n"
+        "Wrong call? Add `[airlock-ok: <reason>]` to the Agent prompt or description to override."
+        % (entry.get("task_kind", "?"), chosen, suggestion)
+    )
+
+
+def _agent_warn_text(entry):
+    """Two short lines: what was chosen, what Jev judged adequate, what to use
+    instead, and that nothing was blocked."""
+    from . import tiers
+    chosen = entry.get("chosen_type") or "?"
+    suggested = tiers.dispatch_name_for_rung(entry.get("suggestion")) or entry.get("suggestion") or "a cheaper agent"
+    return (
+        "airlock tier advice: dispatched '%s', but Jev judged this task '%s', which '%s' "
+        "covers. Next time use subagent_type=%s.\n"
+        "Advice only -- nothing was blocked and this call ran as you wrote it."
+        % (chosen, entry.get("task_kind", "?"), entry.get("suggestion", "?"), suggested)
+    )
+
+
+def _agent_rewrite_text(entry, target):
+    return (
+        "airlock tier rewrite: subagent_type changed from '%s' to '%s' -- Jev judged this "
+        "task '%s', which '%s' covers.\n"
+        "To keep your own choice, put `[airlock-ok: <reason>]` in the Agent description "
+        "and dispatch again."
+        % (entry.get("chosen_type", "?"), target, entry.get("task_kind", "?"),
+           entry.get("suggestion", "?"))
+    )
+
+
+def _rule_deny_reason(rule_id, detail, suggestion, action="deny"):
+    lead = "NEEDS APPROVAL" if action == "ask" else "BLOCKED"
+    return (
+        "%s (airlock %s): %s\n%s\n"
+        "Wrong call? Add `[airlock-ok: <reason>]` to this call's description to override."
+        % (lead, rule_id, detail, suggestion)
+    )
+
+
+def _rule_warn_text(rule_id, detail, suggestion):
+    return "airlock %s: %s\n%s" % (rule_id, detail, suggestion)
+
+
+def effective_block_action(action):
+    """`ask` is only a real outcome when somebody is there to answer it.
+
+    In an unattended session an ask blocks the call exactly as a deny does
+    (measured -- see emit_ask), with no route to approval, so it is reported
+    and logged as the deny it actually is rather than dressed up as a
+    question.
+    """
+    if action != "ask":
+        return action
+    try:
+        from . import context
+        return "ask" if context.session_is_attended() else "deny"
+    except Exception:
+        return "deny"
+
+
+def user_requested_score(data, ctx, b_ms, entry):
+    """Ask Jev whether the user's own recent words asked for this action.
+
+    Returns a float in [0, 1], or None when the question could not be asked at
+    all -- no transcript, no recent user prompts, no key, an error, or the
+    budget blown. None and 0.0 mean the same thing to the caller (no
+    softening); they are kept distinct only so the log says which happened.
+
+    This answer can ONLY soften a deny. It is never consulted for a rule that
+    was not already going to deny, and it can never turn a warn into a deny.
+    """
+    try:
+        from . import context
+        uctx = context.user_context(data)
+    except Exception:
+        return None
+    if not uctx.get("have_prompts"):
+        entry["user_requested_skipped"] = "no_user_prompts"
+        return None
+
+    start = time.monotonic()
+    try:
+        from . import client, questions
+        state = questions.user_requested_state(_input_summary(ctx), uctx["recent_user_prompts"])
+        result, _latency = client.ask(
+            {"state": state, "model": client.MODEL,
+             "questions": questions.user_requested_question()},
+            timeout_s=b_ms / 1000.0,
+        )
+    except Exception as exc:
+        entry["user_requested_error"] = str(exc)[:200]
+        return None
+    elapsed_ms = int((time.monotonic() - start) * 1000)
+    if elapsed_ms > b_ms:
+        entry["user_requested_error"] = "budget exceeded (%dms > %dms)" % (elapsed_ms, b_ms)
+        return None
+    try:
+        answer = ((result or {}).get("answers") or {}).get("user_requested") or {}
+        score = float(answer.get("noul") or 0.0)
+    except Exception:
+        return None
+    entry["user_requested"] = score
+    return score
+
+
+def handle(data, tool_name, mode="enforce"):
+    """Top-level dispatch for one PreToolUse call.
+
+    Returns True if a deny was emitted to stdout, False otherwise. Never
+    raises -- every branch is wrapped so a bug here can only ever fail open.
+    """
+    try:
+        return _handle(data, tool_name, mode)
+    except Exception:
+        return False
+
+
+def _handle(data, tool_name, mode="enforce"):
+    b_ms = budget_ms()
+    session_id = data.get("session_id") or ""
+    ctx = rules_mod.build_ctx(data, tool_name)
+
+    overrides = rules_mod.load_action_overrides()
+    matches = rules_mod.prefilter_matches(ctx, overrides)
+    if not matches:
+        # Nothing any rule covers: no Jev call, no log row, no output.
+        return False
+
+    matches.sort(key=lambda rm: _ACTION_RANK.get(overrides.get(rm[0].id, rm[0].action), 9))
+    override_reason = find_override(*_override_texts(ctx))
+
+    base = {
+        "ts": _now_iso(),
+        "session_id": session_id,
+        "cwd": ctx.get("cwd"),
+        "tool_name": tool_name,
+        "mode": mode,
+        "budget_ms": b_ms,
+    }
+
+    advice = []
+    for rule, match in matches:
+        eff = overrides.get(rule.id, rule.action)
+        if eff == "off":
+            continue
+        if rule.legacy:
+            denied = _run_legacy(data, tool_name, rule, eff, base, override_reason,
+                                 b_ms, session_id, mode, advice)
+        else:
+            denied = _run_rule(ctx, rule, match, eff, base, override_reason,
+                               b_ms, session_id, mode, advice, data)
+        if denied and mode == "enforce":
+            return True
+
+    if advice and mode == "enforce":
+        emit_warn(advice)
+    return False
+
+
+def _run_rule(ctx, rule, match, eff, base, override_reason, b_ms, session_id, mode, advice, data=None):
+    """Evaluate one non-legacy rule. Returns True if it emitted a deny."""
+    entry = dict(base)
+    entry.update({
+        "guard": "rules",
+        "rule_id": rule.id,
+        "action": eff,
+        "detail": match.detail,
+        "input_summary": _input_summary(ctx),
+    })
+
+    if eff == "deny" and match.extra.get("downgrade_to") in ("warn", "log"):
+        eff = match.extra["downgrade_to"]
+        entry["action"] = eff
+        entry["downgraded"] = True
+
+    fires = True
+    if match.ask and eff != "log":
+        start = time.monotonic()
+        try:
+            from . import client
+            state, qs = rule.questions(ctx, match)
+            result, latency_ms = client.ask(
+                {"state": state, "model": client.MODEL, "questions": qs},
+                timeout_s=b_ms / 1000.0,
+            )
+        except Exception as exc:
+            entry["error"] = str(exc)[:300]
+            entry["elapsed_ms"] = int((time.monotonic() - start) * 1000)
+            entry["fires"] = False
+            entry["enforced"] = False
+            log.append(entry)
+            return False
+        elapsed_ms = int((time.monotonic() - start) * 1000)
+        entry["elapsed_ms"] = elapsed_ms
+        entry["answers"] = (result or {}).get("answers")
+        entry["latency_ms"] = latency_ms
+        entry["usage"] = (result or {}).get("usage")
+        entry["jev_model"] = (result or {}).get("model")
+        answers = (result or {}).get("answers") or {}
+        fires = bool(rule.deny_when(answers)) if rule.deny_when else False
+        conf, margin = _confidence_and_margin(answers)
+        entry["confidence"] = conf
+        entry["margin"] = margin
+        if eff == "deny" and conf is not None:
+            # A Choice-backed deny must clear the shared bar; a Noul answer
+            # carries no margin and is never used for a deny action.
+            if not policy.meets_deny_bar(conf, margin):
+                fires = False
+                entry.setdefault("gated", "below_deny_bar")
+        if elapsed_ms > b_ms:
+            fires = False
+            entry.setdefault("error", "budget exceeded (%dms > %dms)" % (elapsed_ms, b_ms))
+        if not fires:
+            # A rule that can explain its own silence says so on the row. R10
+            # withholding an earned warn because the human already asked for
+            # this is not the same event as Jev scoring the command low, and
+            # tuning cannot tell them apart without the field.
+            reason = rules_mod.suppression_reason(rule.id, answers)
+            if reason:
+                entry["suppressed"] = reason
+    else:
+        entry["elapsed_ms"] = 0
+
+    entry["fires"] = fires
+    if not fires:
+        entry["enforced"] = False
+        log.append(entry)
+        return False
+
+    if eff == "log":
+        entry["enforced"] = False
+        log.append(entry)
+        return False
+
+    if eff == "warn":
+        entry["enforced"] = False
+        entry["warned"] = True
+        log.append(entry)
+        advice.append(_rule_warn_text(rule.id, match.detail, match.suggestion))
+        return False
+
+    # deny (or ask). Softening comes first: an explicit override stamp and a
+    # user_requested hit are both "the human already said so", and neither
+    # should cost a state write or an emitted block.
+    if eff in ("deny", "ask") and mode == "enforce":
+        score = user_requested_score(data or {}, ctx, b_ms, entry)
+        if score is not None and score >= USER_REQUESTED_SOFTEN_AT:
+            entry["softened"] = "user_requested"
+            entry["action"] = "warn"
+            entry["enforced"] = False
+            entry["warned"] = True
+            log.append(entry)
+            advice.append(_rule_warn_text(rule.id, match.detail, match.suggestion))
+            return False
+
+    if override_reason is not None:
+        entry["override"] = True
+        entry["override_reason"] = override_reason[:300]
+        entry["enforced"] = False
+        log.append(entry)
+        return False
+
+    key = (rule.id, (ctx.get("command") or json.dumps(ctx.get("tool_input"), default=str, sort_keys=True)).strip())
+    if state_mod.was_recently_denied(session_id, key, LOOP_WINDOW_S):
+        entry["enforced"] = False
+        entry["loop_allow"] = True
+        log.append(entry)
+        return False
+
+    if mode != "enforce":
+        entry["enforced"] = False
+        entry["would_enforce"] = True
+        log.append(entry)
+        return False
+
+    emitted = effective_block_action(eff)
+    if emitted != eff:
+        entry["downgraded_from"] = eff
+    entry["action"] = emitted
+    state_mod.record_denial(session_id, key)
+    entry["enforced"] = True
+    entry["loop_allow"] = False
+    log.append(entry)
+    reason = _rule_deny_reason(rule.id, match.detail, match.suggestion, emitted)
+    if emitted == "ask":
+        emit_ask(reason)
+    else:
+        emit_deny(reason)
+    return True
+
+
+def _input_summary(ctx):
+    from . import redact
+    ti = ctx.get("tool_input") or {}
+    summary = {}
+    if ctx.get("command"):
+        summary["command"] = redact.redact_and_truncate_command(ctx["command"])[:300]
+    for k in ("file_path", "skill", "subagent_type", "description"):
+        if ti.get(k):
+            summary[k] = redact.redact(str(ti[k]))[:300]
+    return summary
+
+
+def _confidence_and_margin(answers):
+    for a in (answers or {}).values():
+        if not isinstance(a, dict):
+            continue
+        if "choice" in a:
+            return a.get("confidence"), policy.compute_margin(a.get("probabilities"))
+    return None, None
+
+
+def _surface_tier(entry, data, surface, session_id, mode, advice):
+    """Non-blocking outcome for an over-tiered Agent dispatch. Returns True
+    only when it wrote to stdout itself (a rewrite), which ends the rule loop
+    -- one hook invocation produces at most one JSON document."""
+    entry["enforced"] = False
+    entry["loop_allow"] = False
+    entry["surfaced"] = surface
+
+    if mode != "enforce":
+        # Dry run: record what would have happened, emit nothing.
+        entry["surfaced"] = None
+        entry["would_surface"] = surface
+        log.append(entry)
+        return False
+
+    if surface == "rewrite":
+        target = policy.tier_rewrite_target(entry)
+        if not target:
+            entry["surfaced"] = None
+            log.append(entry)
+            return False
+        original = (data.get("tool_input") or {})
+        # Every other field byte-identical: only subagent_type is touched.
+        updated = dict(original)
+        updated["subagent_type"] = target
+        entry["action"] = "rewrite"
+        entry["rewrote_from"] = entry.get("chosen_type")
+        entry["rewrote_to"] = target
+        text = _agent_rewrite_text(entry, target)
+        log.append(entry)
+        emit_rewrite(updated, text)
+        return True
+
+    entry["action"] = "warn"
+    entry["warned"] = True
+    log.append(entry)
+    advice.append(_agent_warn_text(entry))
+    return False
+
+
+def _run_legacy(data, tool_name, rule, eff, base, override_reason, b_ms, session_id, mode, advice):
+    """The two original guards, behaviour unchanged for action=deny. `warn`
+    and `log` downgrade them to a logged row without any block."""
+    guard_name = rule.legacy
+    if tool_name == "Bash":
+        key = ("bash", str((data.get("tool_input") or {}).get("command") or "").strip())
+    else:
+        key = ("agent", str((data.get("tool_input") or {}).get("description") or "").strip())
+
+    lbase = dict(base)
+    lbase.update({"guard": guard_name, "rule_id": rule.id, "action": eff})
+
+    if override_reason is not None and eff in ("deny", "ask"):
+        entry = dict(lbase)
+        entry.update({
+            "override": True,
+            "override_reason": override_reason[:300],
+            "enforced": False,
+            "loop_allow": False,
+            "elapsed_ms": 0,
+        })
+        log.append(entry)
+        return False
+
+    start = time.monotonic()
+    try:
+        from . import guards
+        if tool_name == "Agent":
+            entry = guards.compute_tier_entry(data, timeout_s=b_ms / 1000.0)
+        else:
+            entry = guards.compute_search_entry(data, timeout_s=b_ms / 1000.0)
+    except Exception as exc:
+        entry = dict(lbase)
+        entry.update({
+            "error": str(exc)[:300],
+            "override": False,
+            "loop_allow": False,
+            "enforced": False,
+            "elapsed_ms": int((time.monotonic() - start) * 1000),
+        })
+        log.append(entry)
+        return False
+
+    elapsed_ms = int((time.monotonic() - start) * 1000)
+    if entry is None:
+        return False
+
+    entry.update(lbase)
+    entry["elapsed_ms"] = elapsed_ms
+    entry["override"] = False
+
+    should_deny = False
+    surface = None
+    if "error" not in entry:
+        if tool_name == "Bash":
+            should_deny = policy.enforce_deny_search(entry)
+        else:
+            surface = policy.tier_surface(entry)
+            should_deny = surface == "block"
+        if elapsed_ms > b_ms:
+            should_deny = False
+            surface = None
+            entry.setdefault("error", "budget exceeded (%dms > %dms)" % (elapsed_ms, b_ms))
+
+    # An over-tiered dispatch too small to block used to end here as a log row
+    # nobody ever saw. Now it comes back as advice, or -- only when the machine
+    # has opted in -- as an edited subagent_type.
+    if surface in ("warn", "rewrite") and eff in ("deny", "ask", "warn"):
+        return _surface_tier(entry, data, surface, session_id, mode, advice)
+
+    if not should_deny:
+        entry["enforced"] = False
+        entry["loop_allow"] = False
+        log.append(entry)
+        return False
+
+    reason = _bash_deny_reason(entry) if tool_name == "Bash" else _agent_deny_reason(entry)
+
+    if eff not in ("deny", "ask"):
+        entry["enforced"] = False
+        entry["loop_allow"] = False
+        log.append(entry)
+        if eff == "warn":
+            advice.append(reason)
+        return False
+
+    if mode == "enforce":
+        score = user_requested_score(data, rules_mod.build_ctx(data, tool_name), b_ms, entry)
+        if score is not None and score >= USER_REQUESTED_SOFTEN_AT:
+            entry["softened"] = "user_requested"
+            entry["action"] = "warn"
+            entry["enforced"] = False
+            entry["warned"] = True
+            log.append(entry)
+            advice.append(reason)
+            return False
+
+    if state_mod.was_recently_denied(session_id, key, LOOP_WINDOW_S):
+        entry["enforced"] = False
+        entry["loop_allow"] = True
+        log.append(entry)
+        return False
+
+    if mode != "enforce":
+        entry["enforced"] = False
+        entry["would_enforce"] = True
+        log.append(entry)
+        return False
+
+    emitted = effective_block_action(eff)
+    if emitted != eff:
+        entry["downgraded_from"] = eff
+    entry["action"] = emitted
+    state_mod.record_denial(session_id, key)
+    entry["enforced"] = True
+    entry["loop_allow"] = False
+    log.append(entry)
+    if emitted == "ask":
+        emit_ask(reason.replace("BLOCKED (airlock", "NEEDS APPROVAL (airlock", 1))
+    else:
+        emit_deny(reason)
+    return True

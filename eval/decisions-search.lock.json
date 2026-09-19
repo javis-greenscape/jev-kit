@@ -1,0 +1,60 @@
+{
+  "jevcal_version": "0.1.0",
+  "created": "2026-09-19T13:31:17+00:00",
+  "provider": "typesafe",
+  "model_requested": "jev-latest",
+  "model_observed": [
+    "jev-1.13.0"
+  ],
+  "questions_sha": "9f8b05f322c89c23bdfd80a0c63331fc43c318482af48c69cb43669280d9dfca",
+  "dataset_sha": "fb4b07fa5aab9e4b53b639267e0e9e3d75ecfbcb23aaf25d7e5ccb960d7195bf",
+  "n_rows": 32,
+  "holdout": 0.5,
+  "seed": 7,
+  "questions": {
+    "search_intent": {
+      "type": "choice",
+      "instructions": "Classify what the PATTERN this command searches for is looking for, based on the command, its description, and the state given. The test is what the pattern itself represents, not which program is used. A pattern shaped like source code syntax (a definition, a call, an import, a type) is a code-structure search even when run with grep. A pattern that is an exact human-facing string (an error message, a log line, a config key or value, a version number) is a literal-text search even when run with rg.",
+      "criteria": {
+        "filename_search": "Looking for files BY NAME or extension -- the pattern matches a filename or glob, not file contents. Scope (disk-wide vs. one repo vs. one directory) is already given as a fact in the state; do not re-derive it here, just recognise that this is a name search. Not for: Any command whose pattern is matched against file CONTENTS -- that is one of the search-content options below, whichever fits the pattern's shape. Examples: find /home/user/logs/jev -name '*.rc'; fd '.*\\.py$' src/; locate httpd.conf",
+        "code_structure_search": "Searching source code CONTENT for a symbol's definition, its call sites, an import/usage, or how a flow moves through the code. The giveaway is the SHAPE of the pattern: it looks like code syntax --a keyword plus a name (def foo, function foo, class Foo, interface Foo), a call shape (foo(), .foo(), new Foo), or an import/reference to a symbol -- even when the command is grep/rg/ag rather than a dedicated code-search tool. Looking for a DEFINITION is a structure question, not a literal one, no matter which program runs it. Not for: A pattern that is an exact error message, a config key/value, a plain English phrase, or output text being filtered -- those are literal_text_search even if the command also happens to be grep/rg. Examples: grep -rn \"def main\" .  (looking for where main is DEFINED, not the literal text); rg 'class UserSession' src/; ag 'import scope' airlock/; grep -rn 'policy\\.evaluate_search(' .  (call sites of a function)",
+        "literal_text_search": "Looking for an EXACT string that is not code syntax: an error message, a log line, a config key or value, a version string, a piece of human prose, or filtering the piped stdout of another command. Not for: A pattern shaped like a code definition, call, or type reference -- even if it is technically an exact string being matched, its shape makes it a code_structure_search instead. Examples: grep 'ERROR 500' app.log; grep -rn 'TYPESAFE_API_KEY=' ~/.config/; npm test | grep pass; rg '404 Not Found' access.log",
+        "not_a_search": "The program is being used for something other than searching: find -delete, du for disk usage sizes, tree just to print a directory listing with no pattern, grep filtering the stdin of an unrelated pipeline where the match itself isn't the point (e.g. grep -c just counting lines for a status check). Not for: Any command where the pattern match itself is the point of running it -- that belongs in one of the three search options above. Examples: find /tmp -name '*.tmp' -delete; du -sh /var/log; tree -L 2",
+        "unclear": "The command or description doesn't give enough to classify confidently into any option above. Not for: Use this only when truly stuck, not as a default."
+      },
+      "target": 0.99,
+      "measure": "top_prob",
+      "threshold": null,
+      "status": "no_threshold",
+      "baseline": {
+        "accuracy_all": 0.84375,
+        "accepted_accuracy": null,
+        "coverage": 0.0,
+        "holdout_accepted_accuracy": null,
+        "holdout_coverage": 0.0,
+        "ece": 0.12562500000000001
+      }
+    }
+  },
+  "cost": {
+    "escalation_rate": 1.0,
+    "per_1k": {
+      "jev_only": 0.0477343125,
+      "llm_only": 7.18265625,
+      "cascade": 7.230390562499999
+    },
+    "savings_vs_llm_only": -0.006645774326176301,
+    "latency_ms": {
+      "jev": 887.4525811843341,
+      "llm": 2500.0,
+      "cascade": 3387.452581184334
+    },
+    "assumptions": {
+      "jev_price_per_mtok": 0.042,
+      "fallback_price_in": 5.0,
+      "fallback_price_out": 25.0,
+      "fallback_out_tokens": 60,
+      "fallback_latency_ms": 2500.0
+    }
+  }
+}

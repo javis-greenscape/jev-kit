@@ -1,0 +1,146 @@
+jev-kit
+Copyright (c) 2026 Jonathan Avis
+
+This product includes software and wording developed by third parties.
+Licence identifiers below were verified against the GitHub API on 2026-09-19
+(`gh api repos/<owner>/<repo>/license`), not written from memory.
+
+===============================================================================
+1. Code and wording ported into this repository
+===============================================================================
+
+The MIT licence requires that its copyright notice be reproduced wherever
+substantial portions of the software are redistributed. Two upstreams are in
+that category, and their notices are reproduced in full below.
+
+-------------------------------------------------------------------------------
+valentynkit/jev-commit -- MIT
+-------------------------------------------------------------------------------
+Ported into `airlock/belt.py`: roughly 50 lines of secret-shaped patterns and
+the placeholder-suppression logic, adapted from `jev_commit/belt.py`.
+
+    MIT License
+
+    Copyright (c) 2026 Valentyn Kit
+
+    Permission is hereby granted, free of charge, to any person obtaining a
+    copy of this software and associated documentation files (the "Software"),
+    to deal in the Software without restriction, including without limitation
+    the rights to use, copy, modify, merge, publish, distribute, sublicense,
+    and/or sell copies of the Software, and to permit persons to whom the
+    Software is furnished to do so, subject to the following conditions:
+
+    The above copyright notice and this permission notice shall be included in
+    all copies or substantial portions of the Software.
+
+    THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+    IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+    FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL
+    THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+    LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
+    FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+    DEALINGS IN THE SOFTWARE.
+
+-------------------------------------------------------------------------------
+leepokai/jev-guard -- MIT
+-------------------------------------------------------------------------------
+Question wording ported into `airlock/questions.py` (the `user_requested`
+question, from `src/context.js`), `airlock/context.py`, and R10's risk score
+in `airlock/rules.py`, ported in spirit from that project's
+`ACTION_QUESTIONS`.
+
+    MIT License
+
+    Copyright (c) 2026 leepokai
+
+    Permission is hereby granted, free of charge, to any person obtaining a
+    copy of this software and associated documentation files (the "Software"),
+    to deal in the Software without restriction, including without limitation
+    the rights to use, copy, modify, merge, publish, distribute, sublicense,
+    and/or sell copies of the Software, and to permit persons to whom the
+    Software is furnished to do so, subject to the following conditions:
+
+    The above copyright notice and this permission notice shall be included in
+    all copies or substantial portions of the Software.
+
+    THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+    IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+    FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL
+    THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+    LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
+    FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+    DEALINGS IN THE SOFTWARE.
+
+-------------------------------------------------------------------------------
+kyotofin/tax-doc-classifier -- Apache-2.0
+-------------------------------------------------------------------------------
+Design ported into `docclass/`: the two-stage choice, the `not_in_this_list`
+escape hatch, and the confidence gate. No source file was copied.
+
+Apache-2.0 requires that any upstream NOTICE file be carried forward. That
+repository ships no NOTICE file: `gh api
+repos/kyotofin/tax-doc-classifier/contents/NOTICE` returned HTTP 404 on
+2026-09-19, so there is nothing to carry forward. Its LICENSE is the
+unmodified Apache-2.0 text, whose copyright line is the unfilled boilerplate
+placeholder `Copyright [yyyy] [name of copyright owner]`.
+
+Statement of changes, as Apache-2.0 section 4(b) requires: `docclass/` is an
+independent reimplementation in Python of the two-stage classification
+approach described above. It shares no code with the upstream project, targets
+a different document domain, and ships its own generic example taxonomy. The
+upstream project's data is under a separate DATA-LICENSE and none of it is
+included here.
+
+A copy of the Apache License, Version 2.0 is available at
+https://www.apache.org/licenses/LICENSE-2.0
+
+===============================================================================
+2. Design and findings cited, with no code copied
+===============================================================================
+
+reachjalil/jevlogs -- MIT
+    The redact-first ordering in `logtriage/` follows this project's design.
+    No code copied.
+
+RINNECODER/jev-behavior-study -- MIT
+    Findings cited in `docs/community-vetting.md` and `eval/README.md`.
+    No code copied.
+
+===============================================================================
+3. Third-party repositories the installers clone or invoke
+===============================================================================
+
+None of these are vendored in this repository. Each installer clones or
+installs from upstream, at the pin shown, at install time. Their licences
+govern their own code.
+
+    browser-use/jev-ultrafast          MIT           pin 1231850
+        Cloned by `browser/install.sh`. The six files in `browser/patches/`
+        are this project's own diffs against that pin, so they contain
+        upstream context lines and are derivative of it.
+
+    devagrawal09/jev-review            MIT           pin 31f8960
+        Cloned by `review/install.sh`. No code copied.
+
+    valentynkit/jev-belay              MIT           pin 98f39e0
+        Cloned by `belay/install.sh`. `belay/run.sh` is this project's own
+        wrapper.
+
+    tamaratran/fast-jev-compaction     MIT
+        Installed by `compaction/install.sh` as a Claude Code plugin.
+        No code copied.
+
+    abhixhek/jevcal                    MIT
+        Invoked as a binary by `tuning/calibrate.sh`. No code copied.
+
+===============================================================================
+4. Deliberately not used
+===============================================================================
+
+Dicklesworthstone/skillranker
+    MIT plus a rider excluding Anthropic and anyone acting under their
+    direction. Not used, by decision recorded in `docs/community-vetting.md`.
+
+GiesN/typesafe-jev-workflow
+    No LICENSE file, so no grant of permission. Two ideas were noted in
+    `docs/community-vetting.md`; no code was copied and none should be.

@@ -1,0 +1,61 @@
+{
+  "jevcal_version": "0.1.0",
+  "created": "2026-09-19T13:32:04+00:00",
+  "provider": "typesafe",
+  "model_requested": "jev-latest",
+  "model_observed": [
+    "jev-1.13.0"
+  ],
+  "questions_sha": "d78357f8d5eeb811b43f790d878c06320f85118fcaf8eb4b2486954dd3313e66",
+  "dataset_sha": "7b0bc92a44a4771429fb3151927b26eb534291bf47ab54c9803b111f3c422e47",
+  "n_rows": 50,
+  "holdout": 0.5,
+  "seed": 7,
+  "questions": {
+    "task_kind": {
+      "type": "choice",
+      "instructions": "A director/orchestrator session is about to dispatch an Agent tool call to a sub-agent. Classify what KIND of task the sub-agent is being asked to do, based on the subagent_type, description and prompt given in the state. Judge the actual work being asked for, not the subagent_type chosen -- the whole point of this question is to check whether the chosen type matches the work. A prompt asking a 'scout' to redesign an architecture is still judgement, not mechanical_edit.",
+      "criteria": {
+        "lookup": "A fact that already exists somewhere on disk and just needs finding, with no editing and no judgement calls: where is X defined, list every call site of Y, read a file and return specific values, confirm whether a string exists. Not for: Anything that also asks for a change to be made, however small -- that is mechanical_edit at minimum. Examples: Where is the AIRLOCK_DISABLE env var checked?; List every call site of policy.evaluate_search.; Read airlock/client.py and tell me the API URL and default timeout.",
+        "mechanical_edit": "A rename, a formatting pass, boilerplate generated from a clear template, extracting or listing data into a new file, a one-line fix with zero ambiguity about what the right change is. Not for: A change where more than one reasonable implementation exists, or where the prompt itself is the spec for a new behaviour rather than a mechanical transformation of existing text -- that is scoped_implementation. Examples: Rename every use of `foo_bar` to `fooBar` in src/.; Reformat this JSON file with 2-space indentation.; Generate a boilerplate test file from tests/template_test.py for module baz.",
+        "scoped_implementation": "A specified feature, tests for already-defined behaviour, a routine refactor, a bug fix whose root cause is already known and stated in the prompt, docs, or a format conversion. Not for: A prompt that leaves the requirements ambiguous, asks for an architectural decision to be made, or says the root cause is still unknown -- that is judgement, even if the resulting diff would look similar. Examples: Add a --json flag to airlock/report.py that writes the same summary as JSON.; Write unit tests for policy.evaluate_search covering every branch.; Fix the off-by-one in _percentile(); the bug is that `hi` can exceed len(values)-1.",
+        "judgement": "Ambiguous requirements, an architectural decision, a multi-module refactor with real design options to weigh, an unknown root cause still to be diagnosed, or reviewing another agent's work for correctness. Not for: A task where the prompt already states the root cause and the fix approach, or already names the one acceptable design -- that only needs execution, which is scoped_implementation. Examples: The daemon sometimes deadlocks under load; find out why and fix it.; Decide how the tuning loop should gate a commit and design the mechanism.; Review this worker's diff for correctness before it merges.",
+        "hard_problem": "The prompt explicitly states that one or more prior attempts at this exact task were already made and failed, naming what was tried and what broke or was ruled out. Not for: A task that merely sounds hard, or vaguely asserts difficulty without naming a specific prior attempt -- that is judgement instead. Examples: Opus already tried caching the socket and it still leaks fds under load; find the real cause.; Two attempts to fix the race in daemon.py failed (locking, then a queue); go deeper.",
+        "unclear": "The prompt does not give enough information to classify confidently into any of the other options. Not for: Use this only when truly stuck, not as a default. Examples: fix it; look into the thing from earlier"
+      },
+      "target": 0.99,
+      "measure": "top_prob",
+      "threshold": null,
+      "status": "no_threshold",
+      "baseline": {
+        "accuracy_all": 0.98,
+        "accepted_accuracy": null,
+        "coverage": 0.0,
+        "holdout_accepted_accuracy": null,
+        "holdout_coverage": 0.0,
+        "ece": 0.018800000000000032
+      }
+    }
+  },
+  "cost": {
+    "escalation_rate": 1.0,
+    "per_1k": {
+      "jev_only": 0.05778276,
+      "llm_only": 8.3789,
+      "cascade": 8.43668276
+    },
+    "savings_vs_llm_only": -0.006896222654525053,
+    "latency_ms": {
+      "jev": 890.2613394404761,
+      "llm": 2500.0,
+      "cascade": 3390.261339440476
+    },
+    "assumptions": {
+      "jev_price_per_mtok": 0.042,
+      "fallback_price_in": 5.0,
+      "fallback_price_out": 25.0,
+      "fallback_out_tokens": 60,
+      "fallback_latency_ms": 2500.0
+    }
+  }
+}

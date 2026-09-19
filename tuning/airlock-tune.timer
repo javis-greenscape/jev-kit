@@ -1,0 +1,13 @@
+[Unit]
+Description=Run airlock tuning periodically
+
+[Timer]
+# Fires every 30 minutes; tune.sh's own backoff state (interval_min in
+# tune_state.json) decides whether a run actually does anything, so the
+# timer itself never needs to change as the backoff grows.
+OnBootSec=5min
+OnUnitActiveSec=30min
+Persistent=true
+
+[Install]
+WantedBy=timers.target

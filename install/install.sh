@@ -1,0 +1,531 @@
+#!/usr/bin/env bash
+# airlock: one entry point to install this repository onto a machine.
+#
+#   install/install.sh                       # guard + daemon + monitoring + filesearch
+#   install/install.sh --all                 # everything
+#   install/install.sh --guard --tuning      # just those two
+#   install/install.sh --wire ~/.claude/settings.json
+#
+# What it does NOT do unless you ask:
+#   - it never edits a settings.json without --wire (it prints the edit
+#     instead, via install/wire.sh --print)
+#   - it never installs the components that send more off the machine, or that
+#     need a system package or a second toolchain, by default: browser,
+#     review, shim, tuning and compaction are all opt-in
+#   - the DEFAULT set is: guard, daemon, monitoring, filesearch, claude-update,
+#     belay. `--belay` clones a pinned third-party repository (jev-belay), so a
+#     default run does reach the network; use explicit component flags to avoid
+#     that
+#   - it never runs sudo, and never writes outside $HOME
+set -uo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+
+# Machine-specific values live in install/config.env (gitignored). Nothing in
+# this repository hard-codes a home directory or an account name.
+if [ -f "$SCRIPT_DIR/config.env" ]; then
+  set -a
+  # shellcheck disable=SC1091
+  . "$SCRIPT_DIR/config.env"
+  set +a
+  CONFIG_SOURCED="$SCRIPT_DIR/config.env"
+else
+  CONFIG_SOURCED=""
+fi
+
+AIRLOCK_HOME="${AIRLOCK_HOME:-${PLUMBLINE_HOME:-${JEV_HOME:-$HOME/.local/share/airlock}}}"
+UNIT_DIR="$HOME/.config/systemd/user"
+
+usage() {
+  cat <<EOF
+airlock installer
+
+usage: $0 [components] [options]
+
+Components (default: --guard --daemon --monitoring --filesearch
+            --claude-update --belay):
+  --guard        the PreToolUse guard itself: deploy a release, create the
+                 config directory, print the settings.json edit
+  --daemon       the warm-connection daemon (systemd user unit)
+  --tuning       the unattended tuning timer
+  --monitoring   the five-minute health check timer
+  --filesearch   the per-user plocate index and its hourly timer
+  --browser      clone browser-use/jev-ultrafast at a pin and patch it
+  --review       clone devagrawal09/jev-review at a pin (needs Node 24)
+  --shim         the OpenAI-shaped shim over the claude CLI
+  --claude-update  the idle-only Claude Code auto-updater and its timer
+  --belay        clone valentynkit/jev-belay at a pin, install the wrapper,
+                 and print (never apply) the Stop-hook settings.json block
+  --compaction   tamaratran/fast-jev-compaction -- reads compaction/README.md
+                 first: it sends far more off the machine than anything else
+                 here
+  --all          every component above
+
+Options:
+  --wire <settings.json> [...]  actually apply the hook edit to those files
+                                (each is backed up first). Without this, the
+                                edit is only printed.
+  --no-systemd   skip every timer and unit; the hook still works, and the
+                 client falls back to a direct HTTPS call with no daemon
+  --check-only   check prerequisites and print the plan, install nothing
+  -h, --help     this
+
+On WSL without systemd, --no-systemd is selected automatically and the script
+prints how to turn systemd on if you want the timers.
+EOF
+  exit "${1:-0}"
+}
+
+# --- argument parsing -------------------------------------------------------
+WANT_GUARD=0; WANT_DAEMON=0; WANT_TUNING=0; WANT_MONITORING=0
+WANT_FILESEARCH=0; WANT_BROWSER=0; WANT_REVIEW=0; WANT_SHIM=0
+WANT_CLAUDE_UPDATE=0; WANT_BELAY=0; WANT_COMPACTION=0
+ANY_COMPONENT=0
+# Whether filesearch was asked for BY NAME. A missing `plocate` is a hard
+# failure only then: aborting a whole default install over one optional
+# component would leave a cold agent with nothing at all installed.
+FILESEARCH_EXPLICIT=0
+NO_SYSTEMD=0
+CHECK_ONLY=0
+WIRE_FILES=()
+
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --guard) WANT_GUARD=1; ANY_COMPONENT=1; shift ;;
+    --daemon) WANT_DAEMON=1; ANY_COMPONENT=1; shift ;;
+    --tuning) WANT_TUNING=1; ANY_COMPONENT=1; shift ;;
+    --monitoring) WANT_MONITORING=1; ANY_COMPONENT=1; shift ;;
+    --filesearch) WANT_FILESEARCH=1; FILESEARCH_EXPLICIT=1; ANY_COMPONENT=1; shift ;;
+    --browser) WANT_BROWSER=1; ANY_COMPONENT=1; shift ;;
+    --review) WANT_REVIEW=1; ANY_COMPONENT=1; shift ;;
+    --shim) WANT_SHIM=1; ANY_COMPONENT=1; shift ;;
+    --claude-update) WANT_CLAUDE_UPDATE=1; ANY_COMPONENT=1; shift ;;
+    --belay) WANT_BELAY=1; ANY_COMPONENT=1; shift ;;
+    --compaction) WANT_COMPACTION=1; ANY_COMPONENT=1; shift ;;
+    --all)
+      WANT_GUARD=1; WANT_DAEMON=1; WANT_TUNING=1; WANT_MONITORING=1
+      WANT_FILESEARCH=1; WANT_BROWSER=1; WANT_REVIEW=1; WANT_SHIM=1
+      WANT_CLAUDE_UPDATE=1; WANT_BELAY=1; WANT_COMPACTION=1
+      FILESEARCH_EXPLICIT=1; ANY_COMPONENT=1; shift ;;
+    --no-systemd) NO_SYSTEMD=1; shift ;;
+    --check-only) CHECK_ONLY=1; shift ;;
+    --wire)
+      shift
+      while [ "$#" -gt 0 ] && [ "${1#--}" = "$1" ]; do
+        WIRE_FILES+=("$1"); shift
+      done
+      [ "${#WIRE_FILES[@]}" -gt 0 ] || { echo "--wire needs at least one settings.json path" >&2; exit 2; }
+      ;;
+    -h|--help) usage 0 ;;
+    *) echo "unknown argument: $1" >&2; usage 2 ;;
+  esac
+done
+
+if [ "$ANY_COMPONENT" = "0" ]; then
+  WANT_GUARD=1; WANT_DAEMON=1; WANT_MONITORING=1; WANT_FILESEARCH=1
+  WANT_CLAUDE_UPDATE=1; WANT_BELAY=1
+fi
+
+# --- output helpers ---------------------------------------------------------
+PROBLEMS=0
+step()  { printf '\n== %s\n' "$*"; }
+ok()    { printf '   ok    %s\n' "$*"; }
+warn()  { printf '   warn  %s\n' "$*"; }
+fail()  { printf '   FAIL  %s\n' "$*"; PROBLEMS=$((PROBLEMS + 1)); }
+
+# --- prerequisites ----------------------------------------------------------
+step "Prerequisites"
+
+if [ -n "$CONFIG_SOURCED" ]; then
+  ok "config: $CONFIG_SOURCED"
+else
+  warn "no install/config.env (copy install/config.env.example if this machine needs one)"
+fi
+
+PY=""
+for candidate in python3 python3.14 python3.13 python3.12 python3.11 python3.10; do
+  if command -v "$candidate" >/dev/null 2>&1; then
+    if "$candidate" -c 'import sys; sys.exit(0 if sys.version_info >= (3,10) else 1)' 2>/dev/null; then
+      PY="$(command -v "$candidate")"
+      break
+    fi
+  fi
+done
+if [ -n "$PY" ]; then
+  ok "python3 $("$PY" -c 'import sys;print("%d.%d.%d"%sys.version_info[:3])') at $PY"
+else
+  fail "python3 >= 3.10 not found; the guard is pure stdlib Python and needs it"
+fi
+
+# systemd user session
+SYSTEMD_OK=0
+: "${XDG_RUNTIME_DIR:=/run/user/$(id -u)}"
+export XDG_RUNTIME_DIR
+if [ "$NO_SYSTEMD" = "1" ]; then
+  warn "systemd: skipped (--no-systemd)"
+elif command -v systemctl >/dev/null 2>&1 && systemctl --user show-environment >/dev/null 2>&1; then
+  SYSTEMD_OK=1
+  ok "systemd user session reachable (XDG_RUNTIME_DIR=$XDG_RUNTIME_DIR)"
+else
+  NO_SYSTEMD=1
+  warn "no systemd user session; degrading to no-systemd mode"
+  if grep -qi microsoft /proc/version 2>/dev/null; then
+    cat <<'EOF'
+
+   This looks like WSL. WSL does not run systemd unless you turn it on.
+   To get the daemon and the timers, add this to /etc/wsl.conf INSIDE the
+   distribution, then shut the distribution down from Windows and start it
+   again:
+
+       [boot]
+       systemd=true
+
+   Then, from Windows:   wsl --shutdown
+
+   Without systemd, airlock still works, with three differences:
+     - no warm daemon, so airlock/client.py makes a direct HTTPS call per
+       judgement (roughly 0.9s instead of 0.3s; the enforce-mode budget
+       still applies and it still fails open)
+     - no health-check timer and no tuning timer; run
+       monitoring/run_health_check.sh and tuning/tune.sh by hand or from cron
+     - no hourly plocate refresh; rebuild the index with
+       filesearch/install.sh --no-systemd
+
+EOF
+  fi
+fi
+
+if command -v plocate >/dev/null 2>&1 && command -v updatedb >/dev/null 2>&1; then
+  ok "plocate present"
+elif [ "$FILESEARCH_EXPLICIT" = "1" ]; then
+  fail "plocate not installed (sudo apt install plocate) -- needed for --filesearch"
+elif [ "$WANT_FILESEARCH" = "1" ]; then
+  # Part of the DEFAULT set, not asked for by name. Drop it and carry on: the
+  # guard, the daemon and the rest are what a first install is actually for.
+  WANT_FILESEARCH=0
+  warn "plocate not installed; skipping filesearch (install it and re-run with"
+  warn "  --filesearch to add the index later: sudo apt install plocate)"
+else
+  warn "plocate not installed (only needed for --filesearch)"
+fi
+
+if command -v node >/dev/null 2>&1; then
+  ok "node $(node --version)"
+else
+  if [ "$WANT_REVIEW" = "1" ] || [ "$WANT_BROWSER" = "1" ]; then
+    fail "node not found -- needed for --review and for --browser's Chromium launcher"
+  else
+    warn "node not found (only needed for --browser and --review)"
+  fi
+fi
+
+if command -v uv >/dev/null 2>&1; then
+  ok "uv $(uv --version 2>/dev/null | head -1)"
+else
+  if [ "$WANT_BROWSER" = "1" ]; then
+    warn "uv not found; --browser will clone and patch but not sync dependencies"
+  else
+    warn "uv not found (only needed for --browser)"
+  fi
+fi
+
+if command -v git >/dev/null 2>&1; then
+  ok "git $(git --version | awk '{print $3}')"
+else
+  fail "git not found"
+fi
+
+# The key: checked for presence only. Its value is never read, printed or
+# logged here.
+# The key file: AIRLOCK_KEY_FILE if set, else the generic ~/.config/airlock/env,
+# else the path earlier installs of this project used. Nothing here reads the
+# VALUE of anything in it onto a command line.
+airlock_key_file() {
+  local f="${AIRLOCK_KEY_FILE:-}"
+  if [ -n "$f" ]; then
+    printf '%s\n' "${f/#\~/$HOME}"
+  elif [ -r "$HOME/.config/airlock/env" ]; then
+    printf '%s\n' "$HOME/.config/airlock/env"
+  else
+    # Any extra path this machine's install/config.env names, in order.
+    # Nothing is hard-coded here: on a fresh machine the loop is empty.
+    local IFS=:
+    local candidate
+    for candidate in ${AIRLOCK_LEGACY_KEY_FILES:-}; do
+      [ -n "$candidate" ] || continue
+      candidate="${candidate/#\~/$HOME}"
+      if [ -r "$candidate" ]; then
+        printf '%s\n' "$candidate"
+        return 0
+      fi
+    done
+    printf '%s\n' "$HOME/.config/airlock/env"
+  fi
+}
+KEY_FILE_EXPANDED="$(airlock_key_file)"
+KEY_FILE="$KEY_FILE_EXPANDED"
+if [ -n "${TYPESAFE_API_KEY:-}" ]; then
+  ok "TYPESAFE_API_KEY is set in this environment"
+elif [ -r "$KEY_FILE_EXPANDED" ] && grep -q '^ *\(export \)\?TYPESAFE_API_KEY=' "$KEY_FILE_EXPANDED" 2>/dev/null; then
+  ok "key file $KEY_FILE_EXPANDED contains a TYPESAFE_API_KEY line"
+else
+  warn "no TYPESAFE_API_KEY found (env, or $KEY_FILE_EXPANDED)."
+  warn "  the guard still installs and still fails open; it just judges nothing."
+fi
+
+if [ "$PROBLEMS" -gt 0 ]; then
+  echo
+  echo "$PROBLEMS prerequisite problem(s). Nothing was installed." >&2
+  exit 1
+fi
+
+# --- plan -------------------------------------------------------------------
+step "Plan"
+plan() { [ "$1" = "1" ] && echo "   install  $2" || true; }
+plan "$WANT_GUARD" "guard"
+plan "$WANT_DAEMON" "daemon"
+plan "$WANT_TUNING" "tuning"
+plan "$WANT_MONITORING" "monitoring"
+plan "$WANT_FILESEARCH" "filesearch"
+plan "$WANT_BROWSER" "browser"
+plan "$WANT_REVIEW" "review"
+plan "$WANT_SHIM" "shim"
+plan "$WANT_CLAUDE_UPDATE" "claude-update"
+plan "$WANT_BELAY" "belay"
+plan "$WANT_COMPACTION" "compaction"
+echo "   AIRLOCK_HOME=$AIRLOCK_HOME"
+echo "   systemd: $([ "$NO_SYSTEMD" = "1" ] && echo "no (timers and units skipped)" || echo yes)"
+
+if [ "$CHECK_ONLY" = "1" ]; then
+  echo
+  echo "--check-only: nothing installed."
+  exit 0
+fi
+
+# --- helpers ----------------------------------------------------------------
+install_unit() {
+  local src="$1" name="$2"
+  mkdir -p "$UNIT_DIR"
+  install -m 644 "$src" "$UNIT_DIR/$name"
+  ok "unit $name -> $UNIT_DIR"
+}
+
+enable_unit() {
+  local name="$1"
+  if [ "$NO_SYSTEMD" = "1" ]; then
+    warn "not enabling $name (no systemd)"
+    return 0
+  fi
+  systemctl --user daemon-reload
+  if systemctl --user enable --now "$name" >/dev/null 2>&1; then
+    ok "enabled $name"
+  else
+    warn "could not enable $name; try: systemctl --user enable --now $name"
+  fi
+}
+
+# --- guard ------------------------------------------------------------------
+if [ "$WANT_GUARD" = "1" ]; then
+  step "Guard"
+
+  if [ -d "$HOME/.config/jev-guard" ] || [ -d "$HOME/.local/state/jev-guard" ]; then
+    warn "this machine still has jev-guard directories."
+    warn "  airlock reads them as-is for now (see airlock/paths.py)."
+    warn "  To rename them:  install/migrate-from-jev-guard.sh --dry-run"
+  fi
+
+  CONFIG_DIR="$("$PY" -c "import sys;sys.path.insert(0,'$REPO_ROOT');from airlock import paths;print(paths.config_dir())")"
+  STATE_DIR="$("$PY" -c "import sys;sys.path.insert(0,'$REPO_ROOT');from airlock import paths;print(paths.state_dir())")"
+  mkdir -p "$CONFIG_DIR" "$STATE_DIR"
+  chmod 700 "$STATE_DIR" 2>/dev/null || true
+  ok "config dir $CONFIG_DIR"
+  ok "state dir  $STATE_DIR (mode 700)"
+
+  # Record WHERE the key file is, never what is in it. A Claude Code hook runs
+  # with a minimal environment and never sources install/config.env, so a
+  # machine that keeps its key anywhere other than the default needs the path
+  # persisted somewhere airlock/keyfile.py can read it. This is that file.
+  # It holds a path and nothing else; `install/config.env` remains the only
+  # place a human edits.
+  if [ "$KEY_FILE_EXPANDED" != "$HOME/.config/airlock/env" ]; then
+    printf '%s\n' "$KEY_FILE_EXPANDED" > "$CONFIG_DIR/keyfile.path"
+    chmod 600 "$CONFIG_DIR/keyfile.path" 2>/dev/null || true
+    ok "recorded key-file path in $CONFIG_DIR/keyfile.path (path only, no value)"
+  elif [ -f "$CONFIG_DIR/keyfile.path" ]; then
+    rm -f "$CONFIG_DIR/keyfile.path"
+    ok "removed $CONFIG_DIR/keyfile.path (the default path is in use)"
+  fi
+
+  if [ ! -f "$CONFIG_DIR/mode" ]; then
+    echo "shadow" > "$CONFIG_DIR/mode"
+    ok "mode set to shadow (log only). Change it with: echo enforce > $CONFIG_DIR/mode"
+  else
+    ok "mode left as '$(head -1 "$CONFIG_DIR/mode" | awk '{print $1}')' (not overwritten)"
+  fi
+
+  echo "   running the unit tests before deploying..."
+  if ( cd "$REPO_ROOT" && "$PY" -m unittest discover -s tests >/dev/null 2>&1 ); then
+    ok "unit tests pass"
+  else
+    fail "unit tests fail in this checkout; refusing to deploy it"
+    exit 1
+  fi
+
+  if AIRLOCK_HOME="$AIRLOCK_HOME" JEV_HOME="$AIRLOCK_HOME" "$SCRIPT_DIR/deploy.sh" >/dev/null 2>&1; then
+    ok "deployed: $AIRLOCK_HOME/current -> $(readlink -f "$AIRLOCK_HOME/current" 2>/dev/null)"
+  else
+    warn "deploy.sh did not complete (it needs a committed 'main' in the main checkout)."
+    warn "  falling back to pointing 'current' at this checkout, which is fine for a"
+    warn "  first install but means a git operation here changes what is live."
+    mkdir -p "$AIRLOCK_HOME"
+    ln -sfn "$REPO_ROOT" "$AIRLOCK_HOME/.current.tmp.$$"
+    mv -T "$AIRLOCK_HOME/.current.tmp.$$" "$AIRLOCK_HOME/current"
+    ok "current -> $REPO_ROOT"
+  fi
+
+  HOOK="$AIRLOCK_HOME/current/hooks/airlock.py"
+  echo
+  echo "   The settings.json edit. Register this ONE entry, matcher \"*\" -- the"
+  echo "   rules table filters in code, far more cheaply than a regex matcher:"
+  echo
+  cat <<EOF
+     {
+       "hooks": {
+         "PreToolUse": [
+           {
+             "matcher": "*",
+             "hooks": [
+               { "type": "command",
+                 "command": "$PY $HOOK",
+                 "timeout": 5 }
+             ]
+           }
+         ]
+       }
+     }
+EOF
+  echo
+  if [ "${#WIRE_FILES[@]}" -gt 0 ]; then
+    echo "   --wire given; applying to ${#WIRE_FILES[@]} file(s) (each backed up first):"
+    WIRE_EXTRA_FLAGS=()
+    [ "$WANT_BELAY" = "1" ] && WIRE_EXTRA_FLAGS+=("--belay")
+    AIRLOCK_HOME="$AIRLOCK_HOME" JEV_HOME="$AIRLOCK_HOME" AIRLOCK_PYTHON3="$PY" \
+      "$SCRIPT_DIR/wire.sh" --apply "${WIRE_EXTRA_FLAGS[@]}" "${WIRE_FILES[@]}"
+  else
+    echo "   No --wire given, so no settings.json was touched. To preview an edit"
+    echo "   to an existing entry:"
+    echo "       install/wire.sh --print <settings.json> [...]"
+    echo "   and to apply it:"
+    echo "       install/install.sh --guard --wire <settings.json> [...]"
+  fi
+fi
+
+# --- daemon -----------------------------------------------------------------
+if [ "$WANT_DAEMON" = "1" ]; then
+  step "Daemon"
+  if [ "$NO_SYSTEMD" = "1" ]; then
+    warn "skipped: no systemd."
+    warn "  airlock/client.py falls back to a direct HTTPS call automatically,"
+    warn "  so every judgement still works -- it just costs ~0.9s instead of ~0.3s."
+  else
+    install_unit "$REPO_ROOT/deploy/airlock-daemon.service" "airlock-daemon.service"
+    enable_unit "airlock-daemon.service"
+  fi
+fi
+
+# --- tuning -----------------------------------------------------------------
+if [ "$WANT_TUNING" = "1" ]; then
+  step "Tuning"
+  if [ "$NO_SYSTEMD" = "1" ]; then
+    warn "skipped: no systemd. Run tuning/tune.sh by hand or from cron."
+  else
+    install_unit "$REPO_ROOT/tuning/airlock-tune.service" "airlock-tune.service"
+    install_unit "$REPO_ROOT/tuning/airlock-tune.timer" "airlock-tune.timer"
+    enable_unit "airlock-tune.timer"
+    warn "auto-promotion stays OFF unless \$AIRLOCK_CONFIG_DIR/auto-promote exists."
+  fi
+fi
+
+# --- monitoring -------------------------------------------------------------
+if [ "$WANT_MONITORING" = "1" ]; then
+  step "Monitoring"
+  if [ "$NO_SYSTEMD" = "1" ]; then
+    warn "skipped: no systemd. Run monitoring/run_health_check.sh by hand or from cron."
+  else
+    install_unit "$REPO_ROOT/monitoring/airlock-health.service" "airlock-health.service"
+    install_unit "$REPO_ROOT/monitoring/airlock-health.timer" "airlock-health.timer"
+    enable_unit "airlock-health.timer"
+    if [ -z "${AIRLOCK_KUMA_PUSH_URL:-}" ] && [ -z "${GS_KUMA_AIRLOCK_PUSH_URL:-}" ] \
+       && [ -z "${GS_KUMA_JEV_PUSH_URL:-}" ]; then
+      warn "AIRLOCK_KUMA_PUSH_URL is not set, so nothing is pushed to Uptime Kuma."
+      warn "  Create the push monitor, then put the URL in the key file (it is a"
+      warn "  capability token, so it is treated as a secret). The health check"
+      warn "  still runs and still writes health.jsonl without it."
+    fi
+  fi
+fi
+
+# --- filesearch -------------------------------------------------------------
+if [ "$WANT_FILESEARCH" = "1" ]; then
+  step "Filesearch"
+  if [ "$NO_SYSTEMD" = "1" ]; then
+    "$REPO_ROOT/filesearch/install.sh" --no-systemd || warn "filesearch/install.sh reported a problem"
+  else
+    "$REPO_ROOT/filesearch/install.sh" || warn "filesearch/install.sh reported a problem"
+  fi
+fi
+
+# --- optional components ----------------------------------------------------
+if [ "$WANT_BROWSER" = "1" ]; then
+  step "Browser"
+  "$REPO_ROOT/browser/install.sh" || warn "browser/install.sh reported a problem"
+fi
+
+if [ "$WANT_REVIEW" = "1" ]; then
+  step "Review"
+  "$REPO_ROOT/review/install.sh" || warn "review/install.sh reported a problem"
+fi
+
+if [ "$WANT_SHIM" = "1" ]; then
+  step "Shim"
+  ok "shim/shim.py is stdlib-only Python; there is nothing to install."
+  echo "   Run it in the foreground (or in tmux) when something needs it:"
+  echo "       python3 $REPO_ROOT/shim/shim.py"
+  echo "   See shim/README.md -- PageIndex local indexing works through it,"
+  echo "   chat does not."
+fi
+
+if [ "$WANT_CLAUDE_UPDATE" = "1" ]; then
+  step "claude-update"
+  if [ "$NO_SYSTEMD" = "1" ]; then
+    "$REPO_ROOT/claude-update/install.sh" --no-systemd || warn "claude-update/install.sh reported a problem"
+  else
+    "$REPO_ROOT/claude-update/install.sh" || warn "claude-update/install.sh reported a problem"
+  fi
+fi
+
+if [ "$WANT_BELAY" = "1" ]; then
+  step "Belay"
+  "$REPO_ROOT/belay/install.sh" || warn "belay/install.sh reported a problem"
+fi
+
+if [ "$WANT_COMPACTION" = "1" ]; then
+  step "Compaction"
+  warn "compaction/README.md first: it sends far more off the machine than"
+  warn "  anything else in this repository (up to ~25,000 tokens of raw tool"
+  warn "  inputs/results per request, unredacted). Not run automatically here;"
+  warn "  install it yourself once you have read that and loaded the key:"
+  warn "      compaction/install.sh"
+fi
+
+# --- done -------------------------------------------------------------------
+step "Done"
+echo "   Prove it actually runs:"
+echo "       install/doctor.sh"
+if [ "$NO_SYSTEMD" = "1" ]; then
+  echo
+  echo "   Installed in no-systemd mode. Nothing is scheduled; the hook still"
+  echo "   works and still fails open."
+fi
+exit 0

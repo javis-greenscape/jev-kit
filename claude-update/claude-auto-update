@@ -1,0 +1,71 @@
+#!/usr/bin/env bash
+# Update Claude Code only when nobody is using it on this machine.
+# "In use" means: a headless `claude -p` run is alive, or any session transcript
+# under the shared projects directory changed in the last IDLE_MIN minutes.
+# Interactive sessions that are merely open but idle do not block the update;
+# replacing the package on disk does not disturb a process already running.
+set -u
+IDLE_MIN="${CLAUDE_UPDATE_IDLE_MIN:-30}"
+PROJECTS="${CLAUDE_UPDATE_PROJECTS:-$HOME/.claude/projects}"
+LOG_DIR="$HOME/logs/claude-update"; mkdir -p "$LOG_DIR"
+LOG="$LOG_DIR/auto.log"
+say() { printf '%s %s\n' "$(date -u +%FT%TZ)" "$*" >> "$LOG"; }
+
+# --- find the npm-global prefix this install actually lives under ----------
+# 1. CLAUDE_UPDATE_PREFIX, if the operator set it.
+# 2. $HOME/.npm-global, if a claude binary is there (the common case on this
+#    fleet).
+# 3. whatever `npm config get prefix` says, as a last resort.
+detect_prefix() {
+  if [ -n "${CLAUDE_UPDATE_PREFIX:-}" ]; then
+    printf '%s\n' "$CLAUDE_UPDATE_PREFIX"
+    return 0
+  fi
+  if [ -x "$HOME/.npm-global/bin/claude" ]; then
+    printf '%s\n' "$HOME/.npm-global"
+    return 0
+  fi
+  if command -v npm >/dev/null 2>&1; then
+    npm config get prefix 2>/dev/null
+    return 0
+  fi
+  return 1
+}
+
+PREFIX="$(detect_prefix)"
+if [ -z "$PREFIX" ]; then
+  say "skip: could not determine an npm prefix (no npm on PATH, no ~/.npm-global/bin/claude)"
+  exit 0
+fi
+
+# --- a native (non-npm) install does not work with this script -------------
+# The standalone/native installer (curl | bash, or the platform package) does
+# not live under an npm prefix and updates itself a different way. Detect it:
+# the resolved `claude` binary exists but is not inside $PREFIX.
+RESOLVED_CLAUDE="$(command -v claude 2>/dev/null || true)"
+if [ -n "$RESOLVED_CLAUDE" ]; then
+  case "$(readlink -f "$RESOLVED_CLAUDE" 2>/dev/null || printf '%s' "$RESOLVED_CLAUDE")" in
+    "$PREFIX"/*) : ;;  # npm-managed, as expected
+    *)
+      say "skip: claude at $RESOLVED_CLAUDE is not under npm prefix $PREFIX -- looks like a native install; this script does not apply, use the CLI's own update mechanism instead"
+      exit 0
+      ;;
+  esac
+elif [ ! -x "$PREFIX/bin/claude" ]; then
+  say "skip: no claude binary found under $PREFIX or on PATH"
+  exit 0
+fi
+
+if pgrep -f 'claude(\.exe)? .*(-p|--print)( |$)' >/dev/null 2>&1; then say "skip: headless run alive"; exit 0; fi
+if [ -d "$PROJECTS" ] && [ -n "$(find -L "$PROJECTS" -name '*.jsonl' -mmin "-$IDLE_MIN" -print -quit 2>/dev/null)" ]; then
+  say "skip: a session was active in the last ${IDLE_MIN} min"; exit 0
+fi
+cur="$("$PREFIX/bin/claude" --version 2>/dev/null | awk '{print $1}')"
+new="$(npm view @anthropic-ai/claude-code version 2>/dev/null)"
+[ -n "$new" ] || { say "skip: could not read latest version"; exit 0; }
+[ "$cur" = "$new" ] && { say "ok: already $cur"; exit 0; }
+if nice -n 10 npm install -g --prefix "$PREFIX" "@anthropic-ai/claude-code@$new" >>"$LOG" 2>&1; then
+  say "updated: $cur -> $("$PREFIX/bin/claude" --version 2>/dev/null | awk '{print $1}')  (roll back: npm install -g --prefix $PREFIX @anthropic-ai/claude-code@$cur)"
+else
+  say "FAILED: update $cur -> $new; see above"; exit 1
+fi

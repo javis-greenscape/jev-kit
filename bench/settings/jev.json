@@ -1,0 +1,32 @@
+{
+  "_comment": [
+    "Template, not a usable settings file: __HOOK__ is substituted with this",
+    "checkout's absolute hooks/airlock.py by bench/run.py, which writes the",
+    "rendered copy to a temp file and points --settings at that. No path here",
+    "is tied to a particular user or worktree."
+  ],
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "__HOOK__",
+            "timeout": 5
+          }
+        ]
+      },
+      {
+        "matcher": "Agent",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "__HOOK__",
+            "timeout": 5
+          }
+        ]
+      }
+    ]
+  }
+}

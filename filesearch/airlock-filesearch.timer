@@ -1,0 +1,10 @@
+[Unit]
+Description=Hourly refresh of the per-user plocate index
+
+[Timer]
+OnCalendar=hourly
+RandomizedDelaySec=120
+Persistent=true
+
+[Install]
+WantedBy=timers.target

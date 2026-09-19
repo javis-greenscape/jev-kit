@@ -1,0 +1,11 @@
+[Unit]
+Description=Refresh the per-user plocate index of $HOME
+
+[Service]
+Type=oneshot
+Nice=15
+IOSchedulingClass=idle
+# %h is the unit's own home directory, so this unit file is identical on every
+# machine and carries no user name. ExecStart cannot use a shell, so the whole
+# command is run through sh -c to let $HOME expand.
+ExecStart=/bin/sh -c 'mkdir -p "$HOME/.cache/plocate" && exec /usr/bin/updatedb -l 0 -U "$HOME" -o "$HOME/.cache/plocate/home.db" --prunenames ".git node_modules .pnpm-store __pycache__ .venv" --prunepaths ""'

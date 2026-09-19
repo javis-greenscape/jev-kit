@@ -1,0 +1,73 @@
+{
+  "name": "example taxonomy",
+  "_comment": [
+    "A deliberately small, generic example so the library and its tests have",
+    "something to run against. It is not a real taxonomy for any particular",
+    "organisation.",
+    "",
+    "When you write a real one: key off document KIND only. Do not encode a",
+    "document store's folder tree here. Such a tree gets restructured, and a",
+    "taxonomy that mirrors it would be wrong the week after it was written."
+  ],
+  "confidence_gate": 0.8,
+  "families": {
+    "letter": {
+      "what": "A piece of correspondence addressed from one party to another: a letter, a memo, or a printed email.",
+      "not_for": "A form, an invoice, or a report that merely happens to be attached to a letter.",
+      "examples": [
+        "Dear Mr Smith, further to our meeting on the 14th...",
+        "a printed email chain with From/To/Subject headers"
+      ],
+      "members": {
+        "covering_letter": {
+          "what": "A short letter whose purpose is to introduce or transmit something enclosed with it.",
+          "not_for": "A letter that makes its own substantive point rather than introducing an enclosure.",
+          "examples": ["Please find enclosed the signed contract.", "I attach the report you requested."]
+        },
+        "chasing_letter": {
+          "what": "A letter asking for something that is late or outstanding.",
+          "not_for": "A first request; this is specifically a follow-up.",
+          "examples": ["We wrote to you on 3 March and have not yet had a reply.", "This account is now 60 days overdue."]
+        }
+      }
+    },
+    "financial_document": {
+      "what": "A document stating amounts of money owed, paid or quoted: an invoice, a credit note, a quotation or a statement.",
+      "not_for": "A letter that discusses money without itself being the financial record.",
+      "examples": [
+        "Invoice No. 10432  Net 1,240.00  VAT 248.00  Total 1,488.00",
+        "Statement of account as at 31 March"
+      ],
+      "members": {
+        "invoice": {
+          "what": "A demand for payment for goods or services already supplied.",
+          "not_for": "A quotation, which offers a price for work not yet done.",
+          "examples": ["Invoice number, invoice date, payment terms, a total due"]
+        },
+        "quotation": {
+          "what": "An offer of a price for work not yet carried out.",
+          "not_for": "An invoice, which bills for work already done.",
+          "examples": ["Quotation ref Q-2291, valid for 30 days"]
+        },
+        "credit_note": {
+          "what": "A document reducing or cancelling an amount previously invoiced.",
+          "not_for": "An invoice, which increases what is owed.",
+          "examples": ["Credit note against invoice 10432"]
+        }
+      }
+    },
+    "technical_record": {
+      "what": "A record of technical work, equipment or measurements: a test sheet, a schedule of equipment, a commissioning record, a set of readings.",
+      "not_for": "A narrative report about technical work; this is the record itself, usually tabular or form-shaped.",
+      "examples": [
+        "a table of set points and measured values with pass/fail columns",
+        "a schedule of equipment with model numbers and serial numbers"
+      ]
+    },
+    "form": {
+      "what": "A blank or filled-in form: labelled fields, boxes, or a printed template to be completed.",
+      "not_for": "A table of results, which is a technical_record.",
+      "examples": ["Name: ________   Date: ________", "a printed application form with tick boxes"]
+    }
+  }
+}
