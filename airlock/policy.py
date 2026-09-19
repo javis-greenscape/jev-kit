@@ -553,8 +553,79 @@ _LOCATE_RE = re.compile(r"(?<![A-Za-z0-9_])(plocate|locate)(?![A-Za-z0-9_])")
 # a shell separator. Two letters would otherwise match inside any word, and a
 # plain-whitespace prefix was too loose -- it also matched `es` as an argument,
 # so `find / -name es` read as "already using the indexed tool" and suppressed
-# the very deny it should have triggered.
+# the very deny it should have triggered. This raw regex still does not know
+# about quoting, so it is now only a fallback (see _command_position_is_es)
+# for a segment shlex itself cannot parse.
 _ES_RE = re.compile(r"(?:^|[\n;&|(])\s*es(?:\.exe)?(?=\s|$)", re.I)
+
+# Separators _ES_RE treats as starting a new shell command. Split on these
+# OUTSIDE quotes before token-matching `es`, so a quoted argument that merely
+# CONTAINS one of them -- `find /mnt/c -name "foo; es bar"` -- is never read
+# as two commands (Codex P2, PR #1: the raw regex ignored quoting entirely
+# and treated that `;` as a real separator, misreading the filename argument
+# as an invocation of `es`).
+_CMD_SEPARATOR_OPS = ("&&", "||", ";", "&", "|", "\n")
+
+
+def _split_command_segments(command):
+    """Split `command` on shell statement/pipe separators that fall OUTSIDE
+    single/double quotes, longest operator first so '&&' isn't split as two
+    '&'. Never raises: an unterminated quote just keeps everything collected
+    so far as the trailing segment."""
+    ops = sorted(_CMD_SEPARATOR_OPS, key=len, reverse=True)
+    parts = []
+    current = []
+    i = 0
+    n = len(command)
+    quote = None
+    while i < n:
+        c = command[i]
+        if quote:
+            current.append(c)
+            if c == quote:
+                quote = None
+            i += 1
+            continue
+        if c in ("'", '"'):
+            quote = c
+            current.append(c)
+            i += 1
+            continue
+        matched = None
+        for op in ops:
+            if command.startswith(op, i):
+                matched = op
+                break
+        if matched:
+            parts.append("".join(current))
+            current = []
+            i += len(matched)
+            continue
+        current.append(c)
+        i += 1
+    parts.append("".join(current))
+    return parts
+
+
+def _command_position_is_es(command):
+    """Quote-aware: is `es`/`es.exe` actually the program invoked somewhere
+    in `command`, rather than text that merely follows a ;/&/| which turned
+    out to sit inside a quoted argument?"""
+    for segment in _split_command_segments(command):
+        segment = segment.strip()
+        if not segment:
+            continue
+        try:
+            tokens = shlex.split(segment)
+        except ValueError:
+            # Unterminated quote in this segment: fall back to the raw regex
+            # rather than silently skipping it.
+            if _ES_RE.search(segment):
+                return True
+            continue
+        if tokens and tokens[0].lower() in ("es", "es.exe"):
+            return True
+    return False
 
 
 def command_already_uses_locate(command):
@@ -572,7 +643,7 @@ def command_already_uses_indexed_search(command, windows=None, wsl=None):
     if _LOCATE_RE.search(command):
         return True
     if is_windows(windows):
-        if _ES_RE.search(command):
+        if _command_position_is_es(command):
             return True
         return False
     if wsl is None:
@@ -581,7 +652,7 @@ def command_already_uses_indexed_search(command, windows=None, wsl=None):
             wsl = headless.is_wsl()
         except Exception:
             wsl = False
-    if wsl and _ES_RE.search(command):
+    if wsl and _command_position_is_es(command):
         return True
     return False
 

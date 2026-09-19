@@ -369,3 +369,25 @@ class WslDriveRootScopeTests(unittest.TestCase):
         with mock.patch("airlock.headless.is_wsl", return_value=False):
             result = scope.classify_command("find /mnt/c -name x", "/mnt/c")
             self.assertNotEqual(result["scope"], "disk_wide")
+
+    def test_two_disk_wide_stages_report_both_sides_roots(self):
+        # Codex, PR #1: a compound command searching both filesystems kept
+        # only the widest single stage's roots, so the WSL suggestion saw one
+        # side and would have replaced a two-sided search with a one-sided
+        # index.
+        from unittest import mock
+        from airlock import scope
+        with mock.patch("airlock.headless.is_wsl", return_value=True):
+            result = scope.classify_command(
+                'find "$HOME" -name x; find /mnt/c -name x', "/home/alice")
+            self.assertEqual(result["scope"], "disk_wide")
+            self.assertIn("/mnt/c", result["roots"])
+            self.assertEqual(len(result["roots"]), 2)
+
+    def test_roots_are_deduplicated_across_stages(self):
+        from unittest import mock
+        from airlock import scope
+        with mock.patch("airlock.headless.is_wsl", return_value=True):
+            result = scope.classify_command(
+                "find /mnt/c -name x; find /mnt/c -name y", "/mnt/c")
+            self.assertEqual(result["roots"], ["/mnt/c"])

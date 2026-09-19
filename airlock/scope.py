@@ -645,6 +645,22 @@ def classify_command(command, cwd=None, windows=None, _depth=0):
     current_cwd = cwd or ""
     last = {"scope": "unknown", "program": None, "roots": []}
     found_any = False
+    # `last` only ever carries ONE stage's roots -- the widest-scoped one --
+    # so a compound command with two disk-wide search stages
+    # (`find "$HOME" -name x; find /mnt/c/Users -name x`) previously reported
+    # only one side's roots. That's fine for scope/program (only the widest
+    # stage matters there), but the WSL index-suggestion logic needs every
+    # root that actually got searched, on both sides of the filesystem, or it
+    # silently drops half the search when replacing it with a suggestion
+    # (Codex, PR #1). This accumulates roots from every disk-wide stage seen,
+    # in order, deduplicated, and is substituted in at the end only when the
+    # final verdict is itself disk_wide.
+    disk_wide_roots = []
+
+    def _extend_disk_wide_roots(roots):
+        for r in roots or []:
+            if r not in disk_wide_roots:
+                disk_wide_roots.append(r)
 
     for statement in statements:
         statement = statement.strip()
@@ -681,6 +697,8 @@ def classify_command(command, cwd=None, windows=None, _depth=0):
                                               _depth=_depth + 1)
                     if nested.get("program"):
                         found_any = True
+                        if nested.get("scope") == "disk_wide":
+                            _extend_disk_wide_roots(nested.get("roots"))
                         last = _widest(last, nested)
                 continue
 
@@ -750,15 +768,21 @@ def classify_command(command, cwd=None, windows=None, _depth=0):
             if forced_scope == "stdin":
                 candidate = {"scope": "stdin", "program": program, "roots": []}
             else:
+                candidate_scope = _scope_for_roots(roots, windows)
                 candidate = {
-                    "scope": _scope_for_roots(roots, windows),
+                    "scope": candidate_scope,
                     "program": program,
                     "roots": roots,
                 }
+                if candidate_scope == "disk_wide":
+                    _extend_disk_wide_roots(roots)
             last = _widest(last, candidate)
 
     if not found_any:
         return {"scope": "unknown", "program": None, "roots": []}
+    if last.get("scope") == "disk_wide" and disk_wide_roots:
+        last = dict(last)
+        last["roots"] = disk_wide_roots
     return last
 
 
