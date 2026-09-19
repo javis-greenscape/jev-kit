@@ -12,8 +12,8 @@ pinned commit and applies our own work on top as patches.
 
 Why not a fork in-tree: upstream is active, and a vendored copy means carrying
 every future merge conflict here. A pin plus patches makes "move to a newer
-upstream" a deliberate act -- change `UPSTREAM_COMMIT` in `install.sh`,
-re-apply, regenerate the patches -- rather than a drift nobody notices.
+upstream" an explicit act: change `UPSTREAM_COMMIT` in `install.sh`, re-apply,
+regenerate the patches. The alternative is a drift nobody notices.
 
 ## Install
 
@@ -31,7 +31,7 @@ not). It refuses to touch a destination that already exists.
    we launched rather than launching its own.
 2. **A Claude text-model adapter** for `TYPE_TEXT` fields, per-call
    (`claude-cli`) and as a standing child process (`claude-standing`), going
-   through the local `claude` CLI -- this box has OAuth, not an API key.
+   through the local `claude` CLI, because this box has OAuth, not an API key.
 3. **Thinking off and a trimmed context**, the two changes that made the
    standing child the fastest path measured.
 4. **Claude as a pluggable decision-maker**, so Jev, Haiku and Sonnet can be
@@ -43,7 +43,7 @@ not). It refuses to touch a destination that already exists.
 From the upstream clone's own `SPIKE-NOTES.md`, measured on this box on
 **2026-09-19**. Three goals, three arms, three repetitions each: 27 runs,
 strictly sequential, arms interleaved, one shared headless Chromium.
-**n=3 per cell -- these are directional, not statistically significant.**
+**n=3 per cell, so read every cell as directional rather than significant.**
 
 ### Decision-maker: Jev versus Claude
 
@@ -54,16 +54,16 @@ strictly sequential, arms interleaved, one shared headless Chromium.
 | Claude Haiku | **4/9** | 0.76-2.8 s |
 
 Jev was faster on every goal, by roughly 2-9x. Haiku's failures were
-instruction-following, not speed: it returned unparseable non-JSON against a
-large element table (0/3 on the search goal, 1/3 on the multi-step goal), and
-succeeded reliably only on the single click-only goal with the smallest
+instruction-following rather than speed. It returned unparseable non-JSON
+against a large element table: 0/3 on the search goal, 1/3 on the multi-step
+goal. It succeeded reliably only on the click-only goal, which has the smallest
 element table. Sonnet was accurate but 2-3x slower than Jev.
 
 ### The text-model fix
 
 Two levers, stacked, on the standing-child adapter:
 
-- `MAX_THINKING_TOKENS=0` -- Claude Code honours it even though no CLI flag
+- `MAX_THINKING_TOKENS=0`, which Claude Code honours even though no CLI flag
   exposes it. Latency on a realistic full context went from 2.3-6.2 s to
   **0.6-1.2 s**, with `thinking_tokens` reported as 0 on every call and the
   correct value returned every time.
@@ -72,9 +72,9 @@ Two levers, stacked, on the standing-child adapter:
   rows, the page title and URL. No page body text.
 
 End to end on the README Wikipedia goal with both live: **7.5 s wall** and a
-**739 ms** `TYPE_TEXT` fill, against a previous best of 9.3-9.8 s wall and
-4761 ms fill, and against the standing-child regression they replaced
-(11.0-12.6 s wall, 6.55 s fill).
+**739 ms** `TYPE_TEXT` fill. The previous best was 9.3-9.8 s wall and 4761 ms
+fill, and the standing-child regression they replaced ran 11.0-12.6 s wall with
+a 6.55 s fill.
 
 One caveat recorded rather than hidden: with thinking off, sending the *exact
 same* ambiguous prompt repeatedly through one long-lived child degraded (the
@@ -86,7 +86,7 @@ was not treated as a correctness failure.
 ### Claude token cost, with Jev and without
 
 Per-run medians, n=3, from the same sweep. "Claude cost" is the CLI's own
-`total_cost_usd` -- never tokens multiplied by a price.
+`total_cost_usd`, never tokens multiplied by a price.
 
 **G1, find and open the Gödel's incompleteness theorems article**
 
@@ -118,9 +118,9 @@ Per-run medians, n=3, from the same sweep. "Claude cost" is the CLI's own
 Reading it: with Jev, the Claude bill for the decision loop is close to zero,
 because the only Claude calls left are the cheap `TYPE_TEXT` fills. Without
 Jev, every decision is itself a Claude call. Note also that the plain
-Playwright-MCP arm is the most Claude-token-hungry of all by cache-read tokens
-(136k-184k per run) while reporting a *lower* cost than Sonnet-as-decider,
-because cache reads are cheap per token -- a token count is not a cost.
+Playwright-MCP arm is the most Claude-token-hungry of all by cache-read tokens,
+at 136k-184k per run, while reporting a *lower* cost than Sonnet-as-decider.
+Cache reads are cheap per token, and a token count is not a cost.
 
 Jev's own usage is denominated in TypeSafe tokens, not Claude's. TypeSafe's
 published price, quoted as-is from <https://docs.typesafe.ai/models.md>:
@@ -130,7 +130,7 @@ token. Output tokens are free." The arithmetic is left to the reader.
 ## Launching headless Chromium
 
 There is no desktop on this kind of box: Chromium runs headless or not at all,
-and only Chromium (Firefox and WebKit were removed deliberately). Run **one
+and only Chromium (Firefox and WebKit were removed on purpose). Run **one
 instance at a time** and close it afterwards.
 
 ```bash

@@ -14,9 +14,9 @@ follows.
 
 ## Three steps, in this order, structurally
 
-1. **Redact.** `airlock/redact.py` runs before anything else. Every later
-   step -- the local rules, the cache key, the model state, the emitted record
-   -- takes the redacted text as its only input. This is not a convention
+1. **Redact.** `airlock/redact.py` runs before anything else. Every later step
+   takes the redacted text as its only input: the local rules, the cache key,
+   the model state, the emitted record. This is not a convention
    someone has to remember: there is no code path in `logtriage/triage.py` that
    can reach a model call holding raw text, and `tests/test_logtriage.py`
    asserts it against the actual request body rather than by reading the source.
@@ -26,8 +26,8 @@ follows.
    debug line. Anything a rule settles never reaches the model.
 
 3. **The model, on what is left.** One `Choice` over five labels with the log
-   line as state, and the instruction says plainly that the line is untrusted
-   data and never instructions.
+   line as state, and the instruction states that the line is untrusted data
+   and never instructions.
 
 Plus jevlogs' **`protected`**: a line matching a protected pattern is never
 sent anywhere at all, whatever else is true of it. The defaults cover
@@ -77,8 +77,8 @@ rule set would send lines to a model that a rule was meant to keep back.
 An identical redacted line is asked about once. The cache is keyed on the
 redacted text, so two lines differing only in a secret share an entry, which is
 correct: they are the same operational event. The cached value is the model's
-**answer**, not a verdict, which is jevlogs' trick -- changing a threshold
-later re-decides old lines correctly instead of replaying a stale conclusion.
+**answer**, not a verdict, which is jevlogs' trick. Changing a threshold later
+re-decides old lines correctly instead of replaying a stale conclusion.
 
 ## Tests
 

@@ -2,7 +2,7 @@
 
 `airlock/daemon.py` keeps a warm HTTPS connection to TypeSafe so a
 judgement on this box costs ~0.3s instead of ~0.9s. This is not installed or
-enabled automatically -- do it by hand:
+enabled automatically. Do it by hand:
 
 ```bash
 mkdir -p ~/.config/systemd/user
@@ -39,9 +39,9 @@ The daemon logs one line per request to stderr, which journald captures:
 journalctl --user -u airlock-daemon.service -f
 ```
 
-Log lines never contain the API key, the request body, or Jev's answers --
-just the request id, HTTP status, latency, whether the connection was
-reused, and token counts.
+Log lines never contain the API key, the request body, or Jev's answers. They
+carry the request id, HTTP status, latency, whether the connection was reused,
+and token counts.
 
 ## Stopping / restarting
 
@@ -65,5 +65,5 @@ Environment=AIRLOCK_DAEMON_POOL=3
 The daemon reads `TYPESAFE_API_KEY` the same way `airlock/keyfile.py`
 does: the environment first, then `~/.config/jev-kit/env` (and, for an
 install that never moved it, `~/.config/airlock/env`). Nothing needs
-to be added to the unit file for this -- the file is mode 600 and owned by
-this user, and the daemon runs as this user under systemd `--user`.
+to be added to the unit file for this. The file is mode 600 and owned by this
+user, and the daemon runs as this user under systemd `--user`.
