@@ -679,3 +679,95 @@ class TestExtraSecretPaths(unittest.TestCase):
     def test_a_broken_value_never_raises(self):
         with mock.patch.dict(os.environ, {"AIRLOCK_EXTRA_SECRET_PATHS": ":::"}):
             self.assertEqual(rules._extra_secret_path_res(), [])
+
+
+class TestR1ProtectsTheKeyFilePointer(unittest.TestCase):
+    """R1 must protect BOTH the pointer file and whatever it names, and must
+    read the pointer at HOOK time: install/install.sh writes it AFTER a release
+    is deployed, so a table frozen at import would never see it."""
+
+    def setUp(self):
+        from airlock import keyfile
+        self.keyfile = keyfile
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.config = os.path.join(self.tmp.name, ".config", "airlock")
+        os.makedirs(self.config)
+        os.chmod(self.config, 0o700)
+        self.pointer = os.path.join(self.config, "keyfile.path")
+        self.target = os.path.join(self.tmp.name, "secrets", "typesafe.env")
+        os.makedirs(os.path.dirname(self.target))
+        open(self.target, "w").close()
+        os.chmod(self.target, 0o600)
+        self._patch = mock.patch.object(
+            self.keyfile.paths, "config_file",
+            lambda name: __import__("pathlib").Path(self.config) / name)
+        self._patch.start()
+        self.addCleanup(self._patch.stop)
+        rules._POINTER_CACHE["stamp"] = None
+        rules._POINTER_CACHE["res"] = ()
+        self.addCleanup(lambda: rules._POINTER_CACHE.update({"stamp": None, "res": ()}))
+
+    def _write_pointer(self, value=None):
+        with open(self.pointer, "w") as f:
+            f.write((value if value is not None else self.target) + "\n")
+        os.chmod(self.pointer, 0o600)
+
+    def test_the_pointer_file_itself_is_protected(self):
+        self._write_pointer()
+        self.assertTrue(fired(ctx_bash("cat %s" % self.pointer), "R1-secret-exposure")[0]["fires"])
+
+    def test_the_pointer_is_protected_even_before_it_exists(self):
+        """Nothing has written it yet: printing it is still not something to do,
+        and the path is known from the config dir alone."""
+        self.assertTrue(fired(ctx_bash("cat %s" % self.pointer), "R1-secret-exposure")[0]["fires"])
+
+    def test_the_target_is_protected(self):
+        self._write_pointer()
+        self.assertTrue(fired(ctx_bash("cat %s" % self.target), "R1-secret-exposure")[0]["fires"])
+
+    def test_the_target_is_protected_for_read_too(self):
+        self._write_pointer()
+        c = rules.build_ctx({"tool_name": "Read", "tool_input": {"file_path": self.target}}, "Read")
+        self.assertTrue(fired(c, "R1-secret-exposure")[0]["fires"])
+
+    def test_a_pointer_written_after_the_first_call_is_picked_up(self):
+        """The cache keys on the pointer's stat, not on process lifetime."""
+        before = fired(ctx_bash("cat %s" % self.target), "R1-secret-exposure")
+        self.assertFalse(any(r["fires"] for r in before))
+        self._write_pointer()
+        after = fired(ctx_bash("cat %s" % self.target), "R1-secret-exposure")
+        self.assertTrue(after[0]["fires"])
+
+    def test_a_repointed_pointer_protects_the_new_target(self):
+        self._write_pointer()
+        self.assertTrue(fired(ctx_bash("cat %s" % self.target), "R1-secret-exposure")[0]["fires"])
+        moved = os.path.join(self.tmp.name, "secrets", "moved.env")
+        open(moved, "w").close()
+        os.chmod(moved, 0o600)
+        self._write_pointer(moved)
+        self.assertTrue(fired(ctx_bash("cat %s" % moved), "R1-secret-exposure")[0]["fires"])
+
+    def test_an_untrusted_pointer_still_protects_its_target(self):
+        """keyfile.py refuses to FOLLOW a group-writable pointer, but the path
+        it names is still the next file a transcript would be told to read."""
+        self._write_pointer()
+        os.chmod(self.pointer, 0o660)
+        self.assertIsNone(self.keyfile.pointer_target())
+        self.assertTrue(fired(ctx_bash("cat %s" % self.target), "R1-secret-exposure")[0]["fires"])
+
+    def test_an_ordinary_file_beside_the_target_is_not_protected(self):
+        self._write_pointer()
+        other = os.path.join(self.tmp.name, "secrets", "notes.md")
+        open(other, "w").close()
+        rows = fired(ctx_bash("cat %s" % other), "R1-secret-exposure")
+        self.assertFalse(any(r["fires"] for r in rows))
+
+    def test_a_broken_pointer_read_does_not_break_r1(self):
+        """Fail open to the static table rather than raising in the hot path."""
+        with mock.patch.object(rules.keyfile, "pointer_file_path",
+                               side_effect=OSError("boom")):
+            rules._POINTER_CACHE["stamp"] = None
+            self.assertEqual(rules.secret_path_res(), tuple(rules.SECRET_PATH_RES))
+            self.assertTrue(fired(ctx_bash("cat ~/.config/airlock/env"),
+                                  "R1-secret-exposure")[0]["fires"])

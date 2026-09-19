@@ -78,31 +78,14 @@ install -m 755 "$SCRIPT_DIR/run.sh" "$WRAPPER"
 # in $BIN_DIR.
 echo "belay: wrapper -> $WRAPPER (uses $BELAY_HOME/current)"
 
-# The key file: AIRLOCK_KEY_FILE if set, else the generic ~/.config/airlock/env,
-# else the path earlier installs of this project used. Nothing here reads the
-# VALUE of anything in it onto a command line.
-airlock_key_file() {
-  local f="${AIRLOCK_KEY_FILE:-}"
-  if [ -n "$f" ]; then
-    printf '%s\n' "${f/#\~/$HOME}"
-  elif [ -r "$HOME/.config/airlock/env" ]; then
-    printf '%s\n' "$HOME/.config/airlock/env"
-  else
-    # Any extra path this machine's install/config.env names, in order.
-    # Nothing is hard-coded here: on a fresh machine the loop is empty.
-    local IFS=:
-    local candidate
-    for candidate in ${AIRLOCK_LEGACY_KEY_FILES:-}; do
-      [ -n "$candidate" ] || continue
-      candidate="${candidate/#\~/$HOME}"
-      if [ -r "$candidate" ]; then
-        printf '%s\n' "$candidate"
-        return 0
-      fi
-    done
-    printf '%s\n' "$HOME/.config/airlock/env"
-  fi
-}
+# Key-file resolution: the ONE shell implementation, shared with every other
+# component here. The order and the pointer-file trust rules are documented in
+# airlock/keyfile.py's module docstring. Fails open if the helper is missing.
+if [ -r "$SCRIPT_DIR/../install/keyfile.sh" ]; then
+  . "$SCRIPT_DIR/../install/keyfile.sh"
+else
+  airlock_key_file() { printf '%s\n' "${AIRLOCK_KEY_FILE:-$HOME/.config/airlock/env}"; }
+fi
 KEY_FILE="$(airlock_key_file)"
 if [ -r "$KEY_FILE" ]; then
   echo "belay: key file $KEY_FILE is readable"

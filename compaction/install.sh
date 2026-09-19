@@ -75,8 +75,16 @@ EOF
 fi
 
 # --- the key: read into a shell variable, never echoed ---------------------
+# Key-file resolution: the ONE shell implementation, shared with every other
+# component here. The order and the pointer-file trust rules are documented in
+# airlock/keyfile.py's module docstring. Fails open if the helper is missing.
+if [ -r "$SCRIPT_DIR/../install/keyfile.sh" ]; then
+  . "$SCRIPT_DIR/../install/keyfile.sh"
+else
+  airlock_key_file() { printf '%s\n' "${AIRLOCK_KEY_FILE:-$HOME/.config/airlock/env}"; }
+fi
 if [ -z "${TYPESAFE_API_KEY:-}" ]; then
-  KEY_FILE="${AIRLOCK_KEY_FILE:-$HOME/.config/airlock/env}"
+  KEY_FILE="$(airlock_key_file)"
   if [ -r "$KEY_FILE" ]; then
     TYPESAFE_API_KEY="$(sed -n 's/^ *\(export \)\?TYPESAFE_API_KEY=//p' "$KEY_FILE" | head -1)"
   fi

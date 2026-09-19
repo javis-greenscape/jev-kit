@@ -238,31 +238,14 @@ fi
 
 # The key: checked for presence only. Its value is never read, printed or
 # logged here.
-# The key file: AIRLOCK_KEY_FILE if set, else the generic ~/.config/airlock/env,
-# else the path earlier installs of this project used. Nothing here reads the
-# VALUE of anything in it onto a command line.
-airlock_key_file() {
-  local f="${AIRLOCK_KEY_FILE:-}"
-  if [ -n "$f" ]; then
-    printf '%s\n' "${f/#\~/$HOME}"
-  elif [ -r "$HOME/.config/airlock/env" ]; then
-    printf '%s\n' "$HOME/.config/airlock/env"
-  else
-    # Any extra path this machine's install/config.env names, in order.
-    # Nothing is hard-coded here: on a fresh machine the loop is empty.
-    local IFS=:
-    local candidate
-    for candidate in ${AIRLOCK_LEGACY_KEY_FILES:-}; do
-      [ -n "$candidate" ] || continue
-      candidate="${candidate/#\~/$HOME}"
-      if [ -r "$candidate" ]; then
-        printf '%s\n' "$candidate"
-        return 0
-      fi
-    done
-    printf '%s\n' "$HOME/.config/airlock/env"
-  fi
-}
+# Key-file resolution: the ONE shell implementation, shared with every other
+# component here. The order and the pointer-file trust rules are documented in
+# airlock/keyfile.py's module docstring. Fails open if the helper is missing.
+if [ -r "$SCRIPT_DIR/keyfile.sh" ]; then
+  . "$SCRIPT_DIR/keyfile.sh"
+else
+  airlock_key_file() { printf '%s\n' "${AIRLOCK_KEY_FILE:-$HOME/.config/airlock/env}"; }
+fi
 KEY_FILE_EXPANDED="$(airlock_key_file)"
 KEY_FILE="$KEY_FILE_EXPANDED"
 if [ -n "${TYPESAFE_API_KEY:-}" ]; then
@@ -339,7 +322,12 @@ if [ "$WANT_GUARD" = "1" ]; then
   STATE_DIR="$("$PY" -c "import sys;sys.path.insert(0,'$REPO_ROOT');from airlock import paths;print(paths.state_dir())")"
   mkdir -p "$CONFIG_DIR" "$STATE_DIR"
   chmod 700 "$STATE_DIR" 2>/dev/null || true
-  ok "config dir $CONFIG_DIR"
+  # 700 on the config dir is not tidiness: airlock/keyfile.py REFUSES to follow
+  # the pointer file below out of a group- or world-writable directory, because
+  # anyone who can write that directory chooses which file the hook parses for a
+  # secret. A machine with umask 002 creates 775 dirs by default, so say it.
+  chmod 700 "$CONFIG_DIR" 2>/dev/null || true
+  ok "config dir $CONFIG_DIR (mode 700)"
   ok "state dir  $STATE_DIR (mode 700)"
 
   # Record WHERE the key file is, never what is in it. A Claude Code hook runs
@@ -348,10 +336,25 @@ if [ "$WANT_GUARD" = "1" ]; then
   # persisted somewhere airlock/keyfile.py can read it. This is that file.
   # It holds a path and nothing else; `install/config.env` remains the only
   # place a human edits.
-  if [ "$KEY_FILE_EXPANDED" != "$HOME/.config/airlock/env" ]; then
-    printf '%s\n' "$KEY_FILE_EXPANDED" > "$CONFIG_DIR/keyfile.path"
+  # The pointer is only ever followed when it names an ABSOLUTE path, so refuse
+  # to write anything else rather than leave a pointer that silently does
+  # nothing (see airlock/keyfile.py for the full list of trust checks).
+  POINTER_TARGET="$KEY_FILE_EXPANDED"
+  if [ "$POINTER_TARGET" != "$HOME/.config/airlock/env" ]; then
+    case "$POINTER_TARGET" in
+      /*) ;;
+      *) fail "key-file path '$POINTER_TARGET' is not absolute; not recording a pointer"
+         POINTER_TARGET="$HOME/.config/airlock/env" ;;
+    esac
+  fi
+  if [ "$POINTER_TARGET" != "$HOME/.config/airlock/env" ]; then
+    ( umask 077; printf '%s\n' "$POINTER_TARGET" > "$CONFIG_DIR/keyfile.path" )
     chmod 600 "$CONFIG_DIR/keyfile.path" 2>/dev/null || true
     ok "recorded key-file path in $CONFIG_DIR/keyfile.path (path only, no value)"
+    if [ ! -e "$POINTER_TARGET" ]; then
+      warn "  $POINTER_TARGET does not exist yet; until it does the pointer is"
+      warn "  ignored and the guard judges nothing (it still fails open)."
+    fi
   elif [ -f "$CONFIG_DIR/keyfile.path" ]; then
     rm -f "$CONFIG_DIR/keyfile.path"
     ok "removed $CONFIG_DIR/keyfile.path (the default path is in use)"

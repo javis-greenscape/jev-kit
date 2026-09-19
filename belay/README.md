@@ -38,10 +38,12 @@ before adding it to any other account.
 
 ## The key
 
-`run.sh` never hard-codes a key-file path: it reads `AIRLOCK_KEY_FILE`, the
-same variable `install/config.env` sets for every other component in this
-repository, defaulting to `~/.config/airlock/env`. With no key loadable it
-fails open -- exits 0, does nothing -- exactly like the guard.
+`run.sh` never hard-codes a key-file path and never keeps its own copy of the
+lookup: it sources `install/keyfile.sh`, the one shell implementation of the
+resolution order every component here shares, so the wrapper and the hook can
+never end up reading different files. The order itself is documented in
+`airlock/keyfile.py`'s module docstring. With no key loadable it fails open --
+exits 0, does nothing -- exactly like the guard.
 
 ## Absolute paths, always
 

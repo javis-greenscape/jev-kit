@@ -137,7 +137,27 @@ fi
 
 # ---------------------------------------------------------------------------
 head_ "The API key"
-# Presence only. The value is never read into a variable, never printed.
+# Presence and PATHS only. The value is never read into a variable, never
+# printed. Which file is in use matters when the answer is surprising -- the
+# resolution order (and why a pointer file can be refused) is documented in
+# airlock/keyfile.py's module docstring, which is the only place it lives.
+if (cd "$LIVE" && "$PY" -c '
+import os
+from airlock import keyfile
+print("in use:  %s" % keyfile.key_file())
+pointer = keyfile.pointer_file_path()
+if pointer and os.path.exists(pointer):
+    target = keyfile.pointer_target()
+    print("pointer: %s -> %s" % (pointer, target or "(not honoured)"))
+else:
+    print("pointer: %s (absent; the default path is in use)" % pointer)
+for note in keyfile.pointer_diagnostics():
+    print("note:    %s" % note)
+' 2>/dev/null | sed "s/^/        /"); then
+  :
+else
+  fail "could not resolve the key-file path"
+fi
 if (cd "$LIVE" && "$PY" -c '
 import sys
 from airlock import keyfile

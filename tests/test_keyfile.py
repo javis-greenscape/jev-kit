@@ -28,7 +28,7 @@ class TestKeyfile(unittest.TestCase):
         try:
             with mock.patch.dict(os.environ, {}, clear=False):
                 os.environ.pop("TYPESAFE_API_KEY", None)
-                with mock.patch.object(keyfile, "ENV_FILE", path):
+                with mock.patch.object(keyfile, "key_file", return_value=path):
                     self.assertEqual(keyfile.get_api_key(), "from-file-secret")
         finally:
             os.remove(path)
@@ -39,14 +39,15 @@ class TestKeyfile(unittest.TestCase):
             path = f.name
         try:
             os.environ.pop("TYPESAFE_API_KEY", None)
-            with mock.patch.object(keyfile, "ENV_FILE", path):
+            with mock.patch.object(keyfile, "key_file", return_value=path):
                 self.assertEqual(keyfile.get_api_key(), "quoted-secret")
         finally:
             os.remove(path)
 
     def test_missing_file_returns_none(self):
         os.environ.pop("TYPESAFE_API_KEY", None)
-        with mock.patch.object(keyfile, "ENV_FILE", "/nonexistent/path/env"):
+        with mock.patch.object(keyfile, "key_file",
+                                return_value="/nonexistent/path/env"):
             self.assertIsNone(keyfile.get_api_key())
 
     def test_no_key_line_returns_none(self):
@@ -55,7 +56,7 @@ class TestKeyfile(unittest.TestCase):
             path = f.name
         try:
             os.environ.pop("TYPESAFE_API_KEY", None)
-            with mock.patch.object(keyfile, "ENV_FILE", path):
+            with mock.patch.object(keyfile, "key_file", return_value=path):
                 self.assertIsNone(keyfile.get_api_key())
         finally:
             os.remove(path)
@@ -121,7 +122,9 @@ class TestDefaultEnvFile(unittest.TestCase):
             open(recorded, "w").close()
             config = pathlib.Path(home) / ".config" / "airlock"
             config.mkdir(parents=True)
+            config.chmod(0o700)
             (config / "keyfile.path").write_text(recorded + "\n")
+            (config / "keyfile.path").chmod(0o600)
             with self._with_home(home), \
                     mock.patch.object(keyfile.paths, "config_file",
                                       lambda name: config / name):
@@ -130,6 +133,171 @@ class TestDefaultEnvFile(unittest.TestCase):
     def test_it_never_raises(self):
         with mock.patch.object(os.path, "isfile", side_effect=OSError("boom")):
             self.assertTrue(keyfile.default_env_file())
+
+
+class TestPointerTrust(unittest.TestCase):
+    """The pointer file chooses which file this process parses for a secret, so
+    it is followed only when its own permissions say the owner wrote it. Every
+    refusal falls back to the next step of the resolution order (which on these
+    fixtures is the non-existent generic default) and records WHY."""
+
+    def setUp(self):
+        keyfile.reset_diagnostics()
+
+    def _fixture(self, home, recorded=None, pointer_mode=0o600,
+                 dir_mode=0o700, target_mode=0o600, make_target=True):
+        """A config dir with a pointer in it, and (optionally) its target."""
+        config = pathlib.Path(home) / ".config" / "airlock"
+        config.mkdir(parents=True)
+        target = os.path.join(home, ".config/elsewhere/env")
+        if make_target:
+            os.makedirs(os.path.dirname(target), exist_ok=True)
+            open(target, "w").close()
+            os.chmod(target, target_mode)
+        pointer = config / "keyfile.path"
+        pointer.write_text((recorded if recorded is not None else target) + "\n")
+        pointer.chmod(pointer_mode)
+        config.chmod(dir_mode)
+        return config, target
+
+    def _patched(self, home, config):
+        return (mock.patch.object(os.path, "expanduser",
+                                  lambda p: p.replace("~", home, 1)),
+                mock.patch.object(keyfile.paths, "config_file",
+                                  lambda name: config / name))
+
+    def _target(self, home, **kw):
+        config, target = self._fixture(home, **kw)
+        expanduser, config_file = self._patched(home, config)
+        with expanduser, config_file:
+            return keyfile.pointer_target(), target
+
+    def test_good_pointer_is_followed(self):
+        with tempfile.TemporaryDirectory() as home:
+            got, target = self._target(home)
+            self.assertEqual(got, target)
+            self.assertEqual(keyfile.pointer_diagnostics(), ())
+
+    def test_group_writable_pointer_is_ignored(self):
+        with tempfile.TemporaryDirectory() as home:
+            got, _ = self._target(home, pointer_mode=0o660)
+            self.assertIsNone(got)
+            self.assertTrue(any("group- or world-writable" in d
+                                for d in keyfile.pointer_diagnostics()))
+
+    def test_world_writable_pointer_is_ignored(self):
+        with tempfile.TemporaryDirectory() as home:
+            got, _ = self._target(home, pointer_mode=0o606)
+            self.assertIsNone(got)
+
+    def test_group_writable_directory_is_ignored(self):
+        """A writable directory means the pointer can be replaced wholesale, so
+        the pointer's own mode proves nothing."""
+        with tempfile.TemporaryDirectory() as home:
+            got, _ = self._target(home, dir_mode=0o770)
+            self.assertIsNone(got)
+            self.assertTrue(any("pointer directory" in d
+                                for d in keyfile.pointer_diagnostics()))
+
+    def test_world_writable_directory_is_ignored(self):
+        with tempfile.TemporaryDirectory() as home:
+            got, _ = self._target(home, dir_mode=0o707)
+            self.assertIsNone(got)
+
+    def test_symlinked_pointer_is_ignored(self):
+        with tempfile.TemporaryDirectory() as home:
+            config = pathlib.Path(home) / ".config" / "airlock"
+            config.mkdir(parents=True)
+            real = pathlib.Path(home) / "elsewhere.path"
+            real.write_text("/etc/passwd\n")
+            (config / "keyfile.path").symlink_to(real)
+            config.chmod(0o700)
+            expanduser, config_file = self._patched(home, config)
+            with expanduser, config_file:
+                self.assertIsNone(keyfile.pointer_target())
+            self.assertTrue(any("not a regular file" in d
+                                for d in keyfile.pointer_diagnostics()))
+
+    def test_relative_recorded_path_is_ignored(self):
+        with tempfile.TemporaryDirectory() as home:
+            got, _ = self._target(home, recorded=".config/elsewhere/env")
+            self.assertIsNone(got)
+            self.assertTrue(any("not absolute" in d
+                                for d in keyfile.pointer_diagnostics()))
+
+    def test_missing_target_falls_back_cleanly(self):
+        with tempfile.TemporaryDirectory() as home:
+            got, _ = self._target(home, make_target=False)
+            self.assertIsNone(got)
+            self.assertTrue(any("does not exist" in d
+                                for d in keyfile.pointer_diagnostics()))
+
+    def test_directory_target_is_ignored(self):
+        with tempfile.TemporaryDirectory() as home:
+            got, _ = self._target(home, recorded=home, make_target=False)
+            self.assertIsNone(got)
+
+    def test_world_readable_target_warns_but_is_used(self):
+        """Refusing it would take the guard offline over a permission the human
+        can fix in one command, so this is a warning, not a rejection."""
+        with tempfile.TemporaryDirectory() as home:
+            got, target = self._target(home, target_mode=0o644)
+            self.assertEqual(got, target)
+            self.assertTrue(any("world-readable" in d
+                                for d in keyfile.pointer_diagnostics()))
+
+    def test_commented_pointer_is_ignored(self):
+        with tempfile.TemporaryDirectory() as home:
+            got, _ = self._target(home, recorded="# nothing here")
+            self.assertIsNone(got)
+
+    def test_unchecked_read_still_returns_an_untrusted_target(self):
+        """R1 must protect what an UNTRUSTED pointer names: we refuse to follow
+        it, but printing that path still hands a transcript the next file to
+        read."""
+        with tempfile.TemporaryDirectory() as home:
+            config, target = self._fixture(home, dir_mode=0o777)
+            expanduser, config_file = self._patched(home, config)
+            with expanduser, config_file:
+                self.assertIsNone(keyfile.pointer_target())
+                self.assertEqual(keyfile.pointer_target(check=False), target)
+
+    def test_a_missing_pointer_is_not_a_diagnostic(self):
+        with tempfile.TemporaryDirectory() as home:
+            config = pathlib.Path(home) / ".config" / "airlock"
+            config.mkdir(parents=True)
+            expanduser, config_file = self._patched(home, config)
+            with expanduser, config_file:
+                self.assertIsNone(keyfile.pointer_target())
+            self.assertEqual(keyfile.pointer_diagnostics(), ())
+
+    def test_pointer_target_never_raises(self):
+        with mock.patch.object(keyfile, "pointer_file_path",
+                               side_effect=OSError("boom")):
+            self.assertIsNone(keyfile.pointer_target())
+
+    def test_key_file_resolves_per_call(self):
+        """ENV_FILE froze the answer at import, which a long-lived daemon
+        outlives; key_file() is what makes a pointer written after deploy
+        take effect."""
+        with tempfile.TemporaryDirectory() as home:
+            config, target = self._fixture(home)
+            expanduser, config_file = self._patched(home, config)
+            env = {k: v for k, v in os.environ.items()
+                   if k not in ("AIRLOCK_KEY_FILE", "PLUMBLINE_KEY_FILE",
+                                "JEV_GUARD_KEY_FILE", "AIRLOCK_LEGACY_KEY_FILES")}
+            with expanduser, config_file, \
+                    mock.patch.dict(os.environ, env, clear=True):
+                self.assertEqual(keyfile.key_file(), target)
+
+    def test_explicit_override_beats_the_pointer(self):
+        with tempfile.TemporaryDirectory() as home:
+            config, _target = self._fixture(home)
+            expanduser, config_file = self._patched(home, config)
+            with expanduser, config_file, \
+                    mock.patch.dict(os.environ,
+                                    {"AIRLOCK_KEY_FILE": "/explicit/env"}):
+                self.assertEqual(keyfile.key_file(), "/explicit/env")
 
 
 if __name__ == "__main__":

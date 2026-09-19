@@ -1,8 +1,9 @@
 """The rules table: one entry per kind of genuinely-wrong tool use.
 
-This module is PURE (no network, no logging, and no filesystem access beyond
-the cheap upward walk the legacy tool-choice rule already did). It answers, in
-microseconds, one question for a PreToolUse payload:
+This module has no network and no logging, and its only filesystem access is
+the cheap upward walk the legacy tool-choice rule already did plus one stat of
+the key-file pointer for R1 (see `_pointer_secret_path_res`, which caches on
+that stat). It answers, in microseconds, one question for a PreToolUse payload:
 
     could any rule possibly fire for this call?
 
@@ -46,7 +47,7 @@ import json
 import os
 import re
 
-from . import paths
+from . import keyfile, paths
 
 HOME = os.path.expanduser("~")
 CONFIG_FILE = str(paths.config_file("rules.json"))
@@ -278,6 +279,70 @@ def _extra_secret_path_res():
 
 SECRET_PATH_RES.extend(_extra_secret_path_res())
 
+
+# The key-file POINTER, and whatever file it names, are both protected paths.
+#
+# The pointer (`$AIRLOCK_CONFIG_DIR/keyfile.path`) holds only a path, never a
+# key -- but printing it tells a transcript exactly which file on this machine
+# to go and read next, and it is written by install/install.sh AFTER a release
+# is deployed, so a table built once at deploy time would miss it. Both are
+# therefore resolved at HOOK time, and the pointer's target is read with
+# `check=False`: a pointer whose permissions mean keyfile.py refuses to FOLLOW
+# it still names a file that must not land in a transcript.
+#
+# Cost is one lstat of a small file per judged call, cached on that stat, so a
+# pointer written or repointed between two tool calls is picked up on the next
+# one without re-reading the file every time.
+_POINTER_CACHE = {"stamp": None, "res": ()}
+
+
+def _literal_path_re(path):
+    """A regex matching `path` as it could appear in a command: the absolute
+    form, and the home-relative tail (`_expand` has already turned `~` and
+    `$HOME` into HOME, so the tail alone covers both)."""
+    out = []
+    for form in (path, path[len(HOME) + 1:] if path.startswith(HOME + "/") else None):
+        if not form:
+            continue
+        try:
+            out.append(re.compile(re.escape(form) + r"(\b|$)"))
+        except Exception:
+            continue
+    return out
+
+
+def _pointer_secret_path_res():
+    """Protected-path regexes for the pointer file and its target, refreshed
+    whenever the pointer's stat changes. Never raises: on any error R1 falls
+    back to the static table, which is the fail-open direction."""
+    try:
+        pointer = keyfile.pointer_file_path()
+        if not pointer:
+            return ()
+        try:
+            st = os.stat(pointer)
+            stamp = (pointer, st.st_mtime_ns, st.st_size, st.st_ino)
+        except Exception:
+            stamp = (pointer, None, None, None)
+        if _POINTER_CACHE["stamp"] == stamp:
+            return _POINTER_CACHE["res"]
+        res = list(_literal_path_re(pointer))
+        target = keyfile.pointer_target(check=False)
+        if target:
+            res.extend(_literal_path_re(target))
+        res = tuple(res)
+        _POINTER_CACHE["stamp"] = stamp
+        _POINTER_CACHE["res"] = res
+        return res
+    except Exception:
+        return ()
+
+
+def secret_path_res():
+    """Every protected-path regex R1 should test: the static table, plus the
+    pointer pair resolved now. Use this, never SECRET_PATH_RES directly."""
+    return tuple(SECRET_PATH_RES) + _pointer_secret_path_res()
+
 # Paths that look secret-ish but are fine, so the code pre-filter must not hit.
 SAFE_PATH_RES = [
     re.compile(r"\.(example|sample|template|dist|md|rst|txt\.example)$"),
@@ -318,7 +383,7 @@ def _secret_path_in(tokens):
         if _is_safe_path(tok):
             continue
         p = _expand(tok)
-        for r in SECRET_PATH_RES:
+        for r in secret_path_res():
             if r.search(p):
                 return tok
     return None
@@ -354,7 +419,7 @@ def prefilter_secret(ctx):
         fp = str((ctx["tool_input"] or {}).get("file_path") or "")
         if fp and not _is_safe_path(fp):
             p = _expand(fp)
-            for r in SECRET_PATH_RES:
+            for r in secret_path_res():
                 if r.search(p):
                     return Match(
                         "Read of a secret store (%s): its contents would land in the transcript" % fp,

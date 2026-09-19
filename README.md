@@ -646,11 +646,30 @@ python3 -m airlock.report                  # summarise the shadow log
 
 ## The API key
 
-Read by `airlock/keyfile.py`: `TYPESAFE_API_KEY` from the environment if
-present, otherwise parsed out of the file named by `AIRLOCK_KEY_FILE`
-(default `~/.config/airlock/env`, falling back to a path an earlier install
-of this project used when that exists and the generic one does not) with
-plain Python file I/O -- never
-shelled out, never put on a command line. It is never logged, printed, or
-written anywhere. Nothing in this repository contains a key, and nothing here
-should ever be made to print one.
+Read by `airlock/keyfile.py` with plain Python file I/O -- never shelled out,
+never put on a command line. It is never logged, printed, or written anywhere.
+Nothing in this repository contains a key, and nothing here should ever be made
+to print one.
+
+**The resolution order lives in exactly one place: the module docstring of
+`airlock/keyfile.py`.** In outline: the environment, then `AIRLOCK_KEY_FILE`,
+then the default `~/.config/airlock/env`, then the path recorded in the pointer
+file `~/.config/airlock/keyfile.path`, then `AIRLOCK_LEGACY_KEY_FILES`. Do not
+restate the order anywhere else; read it there.
+
+There are two implementations of that order and no third: `airlock/keyfile.py`
+for Python (the guard, the daemon, the health check, the eval) and
+`install/keyfile.sh` for the shell, which `install/install.sh`, `belay/run.sh`,
+`belay/install.sh`, `monitoring/run_health_check.sh` and
+`compaction/install.sh` all source rather than each keeping a copy.
+
+`install/install.sh` writes the pointer file because a Claude Code hook runs
+with a bare environment and never sources `install/config.env`, so on a machine
+whose key is not at the default path there is otherwise no way to tell the hook
+where it is. The pointer holds a path and never a value. Because whoever can
+write it chooses which file the hook parses for a secret, it is followed only
+when it and its directory are owned by you and are not group- or
+world-writable, and when it names an absolute path to an existing regular file;
+otherwise it is ignored, resolution carries on, and `install/doctor.sh` says
+why. R1 protects both the pointer and whatever it names, resolved at hook time
+so a pointer written after a release was deployed is still covered.
