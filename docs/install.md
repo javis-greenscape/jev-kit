@@ -19,13 +19,14 @@ install/doctor.sh                   # prove each piece actually runs
 ```
 
 Three platform guides live beside this one:
-[INSTALL-WSL.md](INSTALL-WSL.md) (a Windows PC running WSL2 Ubuntu, and the
-closest thing to a step-by-step for a Linux server too),
-[INSTALL-WINDOWS.md](INSTALL-WINDOWS.md) (native Windows, no WSL: the core of
-the kit, with Everything instead of `plocate` and no daemon) and
-[INSTALL-SECOND-MACHINE.md](INSTALL-SECOND-MACHINE.md) (installing on a
-machine that belongs to somebody else, kept in shadow mode for a week before
-arming anything).
+
+- [INSTALL-WSL.md](INSTALL-WSL.md): a Windows PC running WSL2 Ubuntu. It is
+  also the closest thing here to a step-by-step for a Linux server.
+- [INSTALL-WINDOWS.md](INSTALL-WINDOWS.md): native Windows, no WSL. The core of
+  the kit, with Everything in place of `plocate` and no daemon.
+- [INSTALL-SECOND-MACHINE.md](INSTALL-SECOND-MACHINE.md): a machine that
+  belongs to somebody else, kept in shadow mode for a week before anything is
+  armed.
 
 `install.sh` checks its prerequisites before touching anything (Python >= 3.10,
 a reachable systemd user session, `plocate`, `node`, `uv`, `git`), runs the unit
@@ -46,9 +47,9 @@ Components are flags: `--guard --daemon --tuning --monitoring --filesearch
 The **session check** rides with the guard and is on by default on every
 platform (`--no-session-check` leaves it out). It is a `SessionStart` hook
 that reads local state and tells you, at the moment you start a session, when
-the guard has stopped judging -- and prints nothing at all when it has not.
-The guard fails open, so without it a dead guard is silent, and on a
-workstation nothing outside the machine can notice. To add it to an install
+the guard has stopped judging. It prints nothing at all when it has not. The
+guard fails open, so without it a dead guard is silent, and on a workstation
+nothing outside the machine can notice. To add it to an install
 that predates it, re-run the wire step:
 
 ```bash
@@ -106,14 +107,17 @@ for Python (the guard, the daemon, the health check, the eval) and
 `compaction/install.sh` all source rather than each keeping a copy.
 
 `install/install.sh` writes the pointer file because a Claude Code hook runs
-with a bare environment and never sources `install/config.env`, so on a machine
-whose key is not at either default path there is otherwise no way to tell the
-hook where it is. The pointer holds a path and never a value. Because whoever
-can write it chooses which file the hook parses for a secret, it is followed
-only when it and its directory are owned by you and are not group- or
-world-writable, and when it names an absolute path to an existing regular file;
-otherwise it is ignored, resolution carries on, and `install/doctor.sh` says
-why. R1 protects both defaults, the pointer, and whatever it names, resolved at
+with a bare environment and never sources `install/config.env`. On a machine
+whose key is not at either default path, there is otherwise no way to tell the
+hook where it is. The pointer holds a path, never a value.
+
+Whoever can write that pointer chooses which file the hook parses for a secret,
+so it is followed only under four conditions. It and its directory must be
+owned by you, must not be group- or world-writable, and it must name an
+absolute path to an existing regular file. Otherwise it is ignored, resolution
+carries on, and `install/doctor.sh` says why.
+
+R1 protects both defaults, the pointer, and whatever it names, resolved at
 hook time so a pointer written after a release was deployed is still covered.
 
 ## Verify
@@ -129,7 +133,7 @@ to end. A component that is not installed is reported `skip`, not `FAIL`.
 
 To prove a deny with your own hands, pipe a fake PreToolUse event at the hook.
 R5 (`sudo`) is used here rather than R6 (`xdg-open`) because R5 is on by
-default everywhere, and R6 is not (see the next section):
+default everywhere and R6 is not. The next section covers R6:
 
 ```bash
 printf '%s' '{"session_id":"t","cwd":"/tmp","tool_name":"Bash","tool_input":{"command":"sudo systemctl restart nginx"}}' \
@@ -149,9 +153,9 @@ printf '%s' '{"session_id":"t","cwd":"/tmp","tool_name":"Bash","tool_input":{"co
 **R6 (`R6-gui-or-browser`) is off by default on every platform.** It blocks
 `xdg-open`, `wslview`, `explorer.exe`, `open`, `start` and the browser
 binaries, and tells the agent to print the URL or use Playwright headless
-instead. That is exactly right on a server with no desktop and exactly wrong
-on a laptop, and most people run Claude Code on a laptop, so it ships off and
-a headless machine turns it on.
+instead. That is right on a server with no desktop and wrong on a laptop. Most
+people run Claude Code on a laptop, so it ships off, and a headless machine
+turns it on.
 
 There are three ways to turn it on, and they all write the same one entry:
 
@@ -160,7 +164,7 @@ There are three ways to turn it on, and they all write the same one entry:
    `{"R6-gui-or-browser": "deny"}` into `$AIRLOCK_CONFIG_DIR/rules.json` and
    says so in one line. The existing file is backed up first, every other
    entry in it is preserved, and **an R6 value you have already set is never
-   overwritten** -- including an explicit `"off"`.
+   overwritten**, an explicit `"off"` included.
 2. **Force it either way:** `install/install.sh --headless` turns it on
    without consulting the detection; `--no-headless` never touches R6 at all.
 3. **On an existing install, one command:**
@@ -173,17 +177,16 @@ There are three ways to turn it on, and they all write the same one entry:
    idempotent. To turn R6 back off, set it to `"off"` in the same file (or
    delete the entry).
 
-The detection is in `airlock/headless.py` and is deliberately **conservative**,
-because the two errors are not symmetric: a false "headless" arms a rule
-against something the user can legitimately do, while a false "desktop" just
-leaves the shipped default in place, which one documented command corrects.
-All of this has to be true:
+The detection in `airlock/headless.py` is **conservative**, because the two
+errors are not symmetric. A false "headless" arms a rule against something the
+user can legitimately do. A false "desktop" only leaves the shipped default in
+place, and one documented command corrects that. All of this has to be true:
 
 - the platform is Linux (macOS is a desktop system; native Windows says
   nothing useful in these variables);
 - `$DISPLAY` and `$WAYLAND_DISPLAY` are both unset or empty;
-- it is not WSL -- a WSL distribution reaches a Windows desktop through WSLg
-  or `explorer.exe`, so it counts as a desktop machine;
+- it is not WSL, because a WSL distribution reaches a Windows desktop through
+  WSLg or `explorer.exe` and so counts as a desktop machine;
 - `$XDG_SESSION_TYPE` does not say `x11` or `wayland`;
 - if `loginctl` exists **and answers**, it reports no graphical or seated
   session. A `loginctl` that is missing, errors or prints nothing is no
@@ -247,8 +250,8 @@ in order:
    shapes and the installer picks between them by detecting Git for Windows,
    so do not hand-write it; the warm daemon does not exist there, and a doctor
    reporting it as `skip` is correct rather than a fault; `es.exe` (voidtools
-   Everything) replaces `plocate` for file search -- **detect it, never install
-   it**, and if it is missing say so and let the human decide; and the deny you
+   Everything) replaces `plocate` for file search, so **detect it, never
+   install it**, and if it is missing say so and let the human decide; and the deny you
    prove is R1 (an attempt to print the key file), because R6 (GUI/browser) is
    `off` by default everywhere. Inside WSL, this list applies unchanged.
 1. Read this file and `install/README.md`. Do not start by reading the whole
@@ -257,8 +260,8 @@ in order:
    prerequisite warnings to the human before installing anything.
 3. **Ask the human for the `TYPESAFE_API_KEY`** and tell them where to put it
    (above). Do not ask them to paste it into your session. If they do anyway,
-   do not echo it back, do not write it into a file you then display, and say
-   plainly that it should be rotated.
+   do not echo it back, do not write it into a file you then display, and tell
+   them it should be rotated.
 4. Run `install/install.sh`, then `install/doctor.sh`, and report the real
    output. A download that succeeded is not a capability that works.
 5. **Before wiring, back up every `settings.json` you are about to touch**, to
@@ -267,10 +270,10 @@ in order:
 6. Use **absolute paths** in the hook command: `python3
    /home/<user>/.local/share/airlock/current/hooks/airlock.py`, never
    `python3 hooks/airlock.py`. A leading `~` in a hook command IS expanded
-   (Claude Code runs hook commands through a shell) -- but a hook invoked
+   (Claude Code runs hook commands through a shell). But a hook invoked
    without a shell, or with a different `$HOME`, has nothing to expand
    against, and `$HOME`/`$AIRLOCK_HOME`-style variables in the JSON are not
-   reliably expanded either way, so write the path out in full regardless.
+   reliably expanded either way. Write the path out in full regardless.
 7. **Prove a deny works** with the piped fake event above before telling
    anyone the install is done.
 8. Leave it in `shadow`. Arming it is the human's decision.
@@ -324,10 +327,10 @@ arming anything, see [INSTALL-SECOND-MACHINE.md](INSTALL-SECOND-MACHINE.md).
 
 ## Tuning and promotion
 
-`tuning/tune.py` runs on a timer, reads recent rows out of the shadow log,
-has a judge model score whether the guard's verdict was right, rewrites the
-criteria in `airlock/questions.py` where it was not, runs the eval, and
-commits the result to an `auto-tune` branch **in its own git worktree**. It
+`tuning/tune.py` runs on a timer and reads recent rows out of the shadow log.
+A judge model scores whether the guard's verdict was right, and the criteria in
+`airlock/questions.py` are rewritten where it was not. It then runs the eval
+and commits the result to an `auto-tune` branch **in its own git worktree**. It
 never touches the main working tree and never merges.
 
 Promotion to `main` is a separate, deliberate step:
@@ -354,7 +357,8 @@ python3 -m unittest discover -s tests
 
 The HTTP call is fully mocked, so this needs no key and makes no network calls.
 
-Not part of `discover`, and deliberately so:
+Not part of `discover`, because each of these makes real calls or real
+processes:
 
 ```bash
 python3 tests/latency_hook.py 200            # real hook processes, timed

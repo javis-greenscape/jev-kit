@@ -10,7 +10,7 @@ requires it. This file is the readable version: who to thank, and for what.
 
 ## Ported into this repository
 
-### [valentynkit/jev-commit](https://github.com/valentynkit/jev-commit) -- MIT
+### [valentynkit/jev-commit](https://github.com/valentynkit/jev-commit), MIT
 
 The local credential belt. Roughly 50 lines of secret-shaped patterns, and the
 placeholder-suppression logic that stops `API_KEY=xxx` in an example from being
@@ -20,7 +20,7 @@ treated as a real finding, adapted from `jev_commit/belt.py` into
 Also the idea `airlock/belt.py` is built on: check locally first, and only spend
 a model call on what local rules could not settle.
 
-### [leepokai/jev-guard](https://github.com/leepokai/jev-guard) -- MIT
+### [leepokai/jev-guard](https://github.com/leepokai/jev-guard), MIT
 
 Question wording. The `user_requested` question in `airlock/questions.py` and
 the transcript reading behind it in `airlock/context.py` come from that
@@ -32,7 +32,7 @@ question.
 That project also had the name `jev-guard` first, which is why the guard
 component here is called `airlock`.
 
-### [kyotofin/tax-doc-classifier](https://github.com/kyotofin/tax-doc-classifier) -- Apache-2.0
+### [kyotofin/tax-doc-classifier](https://github.com/kyotofin/tax-doc-classifier), Apache-2.0
 
 The shape of `docclass/`: a first `choice` over broad families with an explicit
 `not_in_this_list` escape hatch, a second narrowing pass inside the family the
@@ -41,14 +41,14 @@ copied; `docclass/` is an independent Python reimplementation targeting a
 different document domain, with its own generic example taxonomy. Upstream's
 data is under a separate DATA-LICENSE and none of it is here.
 
-### [reachjalil/jevlogs](https://github.com/reachjalil/jevlogs) -- MIT
+### [reachjalil/jevlogs](https://github.com/reachjalil/jevlogs), MIT
 
 The privacy architecture of `logtriage/`: redact first, then let local rules
 answer everything they can, and send a model only the lines that are left. No
 code copied. Its treatment of a log line as untrusted data rather than as
 instructions is also carried across into the question wording here.
 
-### [RINNECODER/jev-behavior-study](https://github.com/RINNECODER/jev-behavior-study) -- MIT
+### [RINNECODER/jev-behavior-study](https://github.com/RINNECODER/jev-behavior-study), MIT
 
 Published measurements, not code. Four of its findings shape the design here,
 and they are cited by name where they do:
