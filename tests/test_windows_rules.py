@@ -96,27 +96,34 @@ class TestR1AdviceIsRunnableOnThePlatform(unittest.TestCase):
             _ctx("set -a; . ~/.config/jev-kit/env; set +a")))
 
 
-class TestR6DefaultsOffOnWindows(unittest.TestCase):
-    """A Windows desktop is not a headless server."""
+class TestR6DefaultsOffEverywhere(unittest.TestCase):
+    """Most machines running Claude Code have a desktop, so R6 ships off.
+
+    The owner's decision: R6 is OFF BY DEFAULT FOR EVERYONE, and a headless
+    machine turns it on with one entry in rules.json -- which
+    install/install.sh writes for itself when it detects one. See
+    airlock/headless.py and TestHeadlessDetection in test_headless.py."""
 
     RULE = rules.RULES_BY_ID["R6-gui-or-browser"]
 
-    def test_the_default_is_deny_on_posix_and_off_on_windows(self):
-        self.assertEqual(rules.default_action(self.RULE, windows=False), "deny")
+    def test_the_default_is_off_on_both_platforms(self):
+        self.assertEqual(self.RULE.action, "off")
+        self.assertEqual(rules.default_action(self.RULE, windows=False), "off")
         self.assertEqual(rules.default_action(self.RULE, windows=True), "off")
 
-    def test_no_other_rule_changes_action_by_platform(self):
+    def test_no_rule_changes_action_by_platform_any_more(self):
+        """The per-platform mechanism is KEPT (a future rule may be genuinely
+        platform-shaped) but nothing uses it now that R6 is off everywhere."""
         changed = [r.id for r in rules.RULES if r.windows_action is not None]
-        self.assertEqual(changed, ["R6-gui-or-browser"])
+        self.assertEqual(changed, [])
+        self.assertIn("windows_action", rules.Rule.__slots__)
 
-    def test_it_does_not_even_run_on_windows_by_default(self):
+    def test_it_does_not_even_run_by_default_on_either_platform(self):
         ctx = _ctx("xdg-open https://example.com")
-        self.assertEqual(
-            [r.id for r, _ in rules.prefilter_matches(ctx, {}, windows=False)],
-            ["R6-gui-or-browser"])
-        self.assertEqual(
-            [r.id for r, _ in rules.prefilter_matches(ctx, {}, windows=True)],
-            [])
+        for win in (False, True):
+            self.assertEqual(
+                [r.id for r, _ in rules.prefilter_matches(ctx, {}, windows=win)],
+                [], win)
 
     def test_rules_json_turns_it_back_on_for_a_headless_windows_box(self):
         ctx = _ctx("xdg-open https://example.com")
@@ -147,12 +154,14 @@ class TestR6DefaultsOffOnWindows(unittest.TestCase):
             "`xdg-open` tries to open a GUI or browser on a headless server")
         self.assertIs(match.suggestion, rules.R6_SUGGESTION)
 
-    def test_dry_run_reports_the_platform_default(self):
+    def test_dry_run_is_silent_by_default_and_denies_once_turned_on(self):
         ctx = _ctx("xdg-open https://example.com")
-        self.assertEqual(rules.dry_run(ctx, overrides={}, windows=True), [])
-        rows = rules.dry_run(ctx, overrides={}, windows=False)
-        self.assertEqual([r["rule_id"] for r in rows], ["R6-gui-or-browser"])
-        self.assertEqual(rows[0]["action"], "deny")
+        for win in (False, True):
+            self.assertEqual(rules.dry_run(ctx, overrides={}, windows=win), [], win)
+            rows = rules.dry_run(ctx, overrides={"R6-gui-or-browser": "deny"},
+                                 windows=win)
+            self.assertEqual([r["rule_id"] for r in rows], ["R6-gui-or-browser"])
+            self.assertEqual(rows[0]["action"], "deny")
 
 
 if __name__ == "__main__":

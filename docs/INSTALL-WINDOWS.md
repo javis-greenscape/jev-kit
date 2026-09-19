@@ -200,12 +200,12 @@ the string and blocks it, so this proof is safe to run on a machine that does
 have a key. R1 is a code-only decision, so it denies with no key and no
 network.
 
-Do **not** use `xdg-open` as the Windows deny proof. That is R6, and **R6's
-default action on native Windows is `off`**: it encodes "this box is a
-headless server with no desktop", which is a fact about a Linux server and not
-about a Windows workstation, where opening a browser is an ordinary thing to
-do. A Windows machine that really is headless (Server Core, a build agent)
-turns it back on:
+Do **not** use `xdg-open` as the Windows deny proof. That is R6, and **R6 is
+`off` by default on every platform**, Windows included -- it encodes "this box
+is a headless server with no desktop", and most machines running Claude Code
+have one. This is no longer a Windows exception; it is the shipped default
+everywhere. A machine that really is headless (a Server Core box, a build
+agent, a cloud server) turns it on:
 
 ```json
 {"R6-gui-or-browser": "deny"}
@@ -342,10 +342,10 @@ Honesty about coverage, because "it should work" is not verification.
 | An allow works | Same, with an ordinary command: zero bytes on stdout and stderr, exit 0. |
 | Fail-open works | A malformed payload: zero bytes, exit 0. The kill switch: zero bytes, exit 0. |
 | The install works | Ran the real installer into a scratch directory: release copy, directory junction (it succeeded), `current.txt`, launcher, mode file, and a `settings.json` written with a backup. Re-running reported "already wired" and changed nothing. |
-| The doctor works | 11 passed, 0 failed, 2 skipped (the daemon, and the key file, which was deliberately absent). |
+| The doctor works | With no key: 11 passed, 0 failed, 2 skipped (the daemon, and the key file, deliberately absent). **With a real key, 2026-09-19: 13 passed, 0 failed, 2 skipped** (the daemon, and `settings.json`, deliberately not wired) -- including the key check, the `es.exe` and index checks, and the health check reporting `status=healthy`. |
 | Everything detection works | `es.exe` found at a real path and reported; the running index detected; `es.exe -path "C:\Windows\System32" -n 3 notepad.exe` returned three real results in the expected shape. ES version 1.1.0.38. |
 | The file-search steer is right | `dir /s C:\ *.xlsm` classified `disk_wide`, program `dir`, root `C:\`, and the deny text names `es.exe` with the flags above. A command already using `es` was allowed. |
-| **A Jev-judged deny** | **Verified on Linux only.** The Windows machine was tested **keyless on purpose** — no API key was copied to it — so every judged path there fail-opened, which is what the fail-open evidence above shows. The code-only rules (R1, R3, R5, R7, R9) need no key and no network, and R1 is what the Windows deny proof uses. R6 is code-only too, but is `off` by default on Windows. |
+| **A Jev-judged deny** | **Verified on Windows, 2026-09-19**, Windows Python 3.11.9 on Windows 11, with a real key placed in a scratch profile and destroyed afterwards. In enforce mode, piped at the installed launcher: a judged search deny through the Bash tool (`dir /s C:\ *.xlsm` and the Git Bash `find /c -name '*.xlsm'`) and through the PowerShell tool (`Get-ChildItem -Path C:\ -Recurse -Filter *.xlsm`), each returning the `es.exe` steer as deny JSON; a judged **allow** for a path-scoped search; the tier guard blocking two rungs over and warning one rung over; and the `AIRLOCK_TIER_REWRITE=1` rewrite. Measured judged latency over 32 calls: median **1030 ms**, max **1359 ms**, one TLS handshake timeout that fail-opened (3.1%). See [native-windows.md](native-windows.md) for the budget question that raises. |
 | The daemon | **Not tested and not present.** It does not run on Windows at all. |
 
 The hook entry point takes roughly **450 ms** on that Windows machine against

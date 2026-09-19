@@ -56,7 +56,30 @@ _PATH_OVERRIDE_VARS = (
 )
 
 
+def _pin_r6_on(home):
+    """Write {"R6-gui-or-browser": "deny"} into the config dir THIS home
+    resolves to.
+
+    R6 is off by default on every platform now, so the shim tests -- which use
+    `xdg-open` as a convenient code-only deny that needs no key and no network
+    -- have to turn it on. It must go in the SAME directory airlock/paths.py
+    would pick for this home, or a test that pre-created a legacy config dir
+    (the kill-switch one) would find its `disabled` file in a directory the
+    hook no longer resolves to."""
+    base = Path(home) / ".config"
+    cfg = None
+    for app in ("airlock", "plumbline", "jev-guard"):
+        if (base / app).is_dir():
+            cfg = base / app
+            break
+    if cfg is None:
+        cfg = base / "airlock"
+    cfg.mkdir(parents=True, exist_ok=True)
+    (cfg / "rules.json").write_text('{"R6-gui-or-browser": "deny"}\n')
+
+
 def _run_hook(path, payload, home, session_id, extra_env=None):
+    _pin_r6_on(home)
     env = dict(os.environ)
     for var in _PATH_OVERRIDE_VARS:
         env.pop(var, None)

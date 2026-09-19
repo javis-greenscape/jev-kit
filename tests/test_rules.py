@@ -195,17 +195,28 @@ class TestOtherRules(unittest.TestCase):
                   "apt-cache policy ripgrep", "chmod 600 ~/.config/airlock/env"):
             self.assertEqual(fired(ctx_bash(c), "R5-sudo"), [], c)
 
+    R6_ON = {"R6-gui-or-browser": "deny"}
+
     def test_r6_gui(self):
-        """R6's DEFAULT action is `off` on native Windows (a workstation with a
-        desktop opening a browser is ordinary), so the platform is injected
-        here rather than inherited from whichever machine runs the suite.
-        TestR6DefaultsOffOnWindows in test_windows_rules.py owns the
-        per-platform default itself."""
+        """R6's DEFAULT action is `off` on EVERY platform, because most people
+        run Claude Code where there is a desktop. It is pinned on here because
+        this test is about which commands the pre-filter matches, not about
+        whether the machine running the suite has a screen.
+        TestR6DefaultsOffEverywhere in test_windows_rules.py owns the default
+        itself, and TestHeadlessDetection owns who turns it on."""
         for c in ("xdg-open https://x", "sensible-browser http://localhost:3000", "firefox a.html"):
-            self.assertTrue(fired(ctx_bash(c), "R6-gui-or-browser", windows=False), c)
+            self.assertTrue(
+                fired(ctx_bash(c), "R6-gui-or-browser", overrides=self.R6_ON, windows=False), c)
         for c in ("chromium --headless=new --dump-dom https://x", "openssl rand -hex 16",
                   "echo 'open http://localhost:3000 yourself'"):
-            self.assertEqual(fired(ctx_bash(c), "R6-gui-or-browser", windows=False), [], c)
+            self.assertEqual(
+                fired(ctx_bash(c), "R6-gui-or-browser", overrides=self.R6_ON, windows=False), [], c)
+
+    def test_r6_is_off_by_default_so_nothing_fires(self):
+        for c in ("xdg-open https://x", "firefox a.html", "wslview https://x"):
+            for win in (False, True):
+                self.assertEqual(
+                    fired(ctx_bash(c), "R6-gui-or-browser", windows=win), [], (c, win))
 
     def test_r7_destructive(self):
         for c in ("git push --force origin harden", "git reset --hard origin/main",
@@ -259,9 +270,9 @@ class TestEnforcePath(unittest.TestCase):
         patcher.start()
         self.addCleanup(patcher.stop)
         # R6 is pinned ON rather than left at its default, because its default
-        # is `off` on native Windows and several tests below use `xdg-open` as
-        # a convenient code-only deny. Pinning keeps them about the ENFORCE
-        # path rather than about which platform runs the suite.
+        # is `off` on EVERY platform now and several tests below use `xdg-open`
+        # as a convenient code-only deny. Pinning keeps them about the ENFORCE
+        # path rather than about this machine's R6 policy.
         ov = mock.patch("airlock.rules.load_action_overrides",
                         return_value={"R6-gui-or-browser": "deny"})
         ov.start()

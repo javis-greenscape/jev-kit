@@ -24,7 +24,7 @@ INSTALL-WINDOWS.md is the one being followed and this one is stale.
 | **File permissions** | `chmod 0o600` only toggles the read-only attribute on Windows and says nothing about who may read a file, so `platform_compat.restrict_path` skips it and `describe_permissions` reports the honest thing: privacy comes from the per-user ACL on `%APPDATA%`, not from a mode. |
 | **File locking** | `fcntl.flock` has no Windows equivalent, so the log and the loop-protection state use `msvcrt.locking` on a byte range **past end of file**: Windows byte-range locks are mandatory, and a lock over live data would make an unrelated read in another process fail rather than wait. |
 | **File search** | The suggestion comes from one platform-neutral function, `policy.filename_search_suggestion()`: `plocate` on Linux, `es.exe` on Windows. `es` joins the indexed-tool family, so a command already using Everything is never told to use Everything. `airlock/everything.py` detects `es.exe` and the running index and **never installs** either. |
-| **R6 on a desktop** | R6 denies opening a GUI or a browser because *this* box is a headless server. A Windows workstation is not, so **R6's default action is `off` on native Windows**, overridable with `{"R6-gui-or-browser": "deny"}` in `rules.json`; when it is turned back on there, the deny text drops the "headless server" and "$DISPLAY unset" wording, neither of which is true on that platform. The per-platform value is a default, never a ceiling. |
+| **R6 on a desktop** | No longer a Windows question. R6 (opening a GUI or a browser) is **`off` by default on every platform**, because most machines running Claude Code have a desktop; a headless machine of any kind turns it on with `{"R6-gui-or-browser": "deny"}` in `rules.json`. What remains Windows-specific is only the deny **text**: when R6 is turned on there it drops the "headless server" and "$DISPLAY unset" wording, neither of which is true on that platform. See `airlock/headless.py` and the FAQ entry "I run this on a headless server". |
 | **No systemd** | The health check can be registered with Task Scheduler, but **only** behind an explicit `--schedule-health` flag. Nothing else is scheduled. |
 | **The daemon's transport** | **Skipped, as recommended.** `client.ask()` checks up front that the platform has Unix sockets and goes straight to the direct HTTPS call, rather than letting `socket.AF_UNIX` raise into a blanket `except`. `python -m airlock.daemon` says so and exits 0 on Windows. |
 | **`current` without symlink privilege** | `os.symlink` fails for an ordinary Windows user with *WinError 1314: A required privilege is not held by the client* -- measured on the test machine, not assumed. Instead: a **directory junction** (`mklink /J`, which needs no privilege) when the volume allows one; a one-line **`current.txt`** text pointer, written always, which cannot fail; and a stable **`airlock-hook.py`** launcher in the install root that `settings.json` points at, which resolves `current` and runs the real hook **in the same process**. `settings.json` never changes again, and a rollback is one line of `current.txt`. |
@@ -52,6 +52,26 @@ directory under the Windows `%TEMP%` and removed afterwards.
   using `es` is not steered at `es`.
 - **Keyless fail-open**: with no key loadable, a malformed payload and the
   kill switch (`AIRLOCK_DISABLE=1`) both exit 0 with no output.
+- **The Jev-judged path, with a real key** (2026-09-19, Windows Python
+  **3.11.9**, Windows 11, key present in the scratch profile only and
+  destroyed afterwards). All of it in **enforce** mode, piped at the installed
+  launcher:
+  - a **judged search deny** through the **Bash tool**, both spellings --
+    `dir /s C:\ *.xlsm` and the Git Bash form `find /c -name '*.xlsm'` --
+    each returning the `es.exe` steer as deny JSON;
+  - the same through the **PowerShell tool**:
+    `Get-ChildItem -Path C:\ -Recurse -Filter *.xlsm`;
+  - a **judged ALLOW**: `dir /s /b C:\proj\src\*.xlsm`, path-scoped inside a
+    project folder, judged in 1032 ms and not blocked;
+  - the **tier guard** on an `Agent` call two rungs over (blocked) and one
+    rung over (the warn `additionalContext`, nothing blocked);
+  - the **rewrite** output with `AIRLOCK_TIER_REWRITE=1`:
+    `subagent_type` changed `fable` -> `scout-find`, every other field
+    byte-identical;
+  - the **doctor with a key present**: 13 passed, 0 failed, 2 skipped (the
+    daemon, and `settings.json`, deliberately not wired);
+  - the **health check's direct HTTPS probe**: `status=healthy`,
+    `direct_ask {ok: true, latency_ms: 1125}`.
 - **Install then uninstall**, for real: release copy, junction created,
   `current.txt`, launcher, mode file `shadow`, `settings.json` written with a
   timestamped backup; re-running reported `already wired ... no change`; and
@@ -69,11 +89,15 @@ directory under the Windows `%TEMP%` and removed afterwards.
   and steers, and never installs.
 - `deploy.sh`, `rollback.sh` and `wire.sh` stay bash and Linux-only. Their
   Windows jobs are done by `windows_install.py` and `current.txt`.
-- **The Jev-judged deny path is verified on Linux only.** The Windows machine
-  was kept keyless on purpose -- no key was ever copied to it -- so every
-  judged path there fail-opened, which is what the fail-open evidence above
-  is. The search deny is proved as far as `evaluate_search(...)` returning
-  would-deny true plus the exact deny text.
+- **The enforce-mode budget on Windows is tight, and this is unresolved.**
+  32 judged calls on that machine: median **1030 ms**, min 953, p95 1092,
+  max **1359 ms** -- and **one** of the 32 died on a TLS handshake timeout
+  (`_ssl.c:989: The handshake operation timed out`) and **fail-opened**, a
+  3.1% fail-open rate. Windows has no warm daemon, so every judgement pays a
+  fresh TLS handshake against a 1500 ms budget that was chosen for a Linux box
+  with a daemon in front of it. A Windows-specific budget of about 2500 ms is
+  **proposed, not applied** -- it trades a slower worst case for fewer silent
+  allows, and that is the owner's call, not a change to slip in.
 - **macOS is still untested**, and its row in the README is unchanged.
 
 ## One number worth knowing before you measure anything there

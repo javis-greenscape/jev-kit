@@ -9,7 +9,9 @@ Not part of `unittest discover`. Run it directly:
 
 Three payload shapes:
   1. no rule matches      -- the common case; cost is Python start-up only
-  2. code-only rule (deny) -- R6 (xdg-open): matches, decides in code, emits
+  2. code-only rule (deny) -- R6 (xdg-open): matches, decides in code, emits.
+     R6 is off by default on every platform, so the temp HOME below gets a
+     rules.json pinning it on; this measures the deny PATH, not the policy.
   3. code-only rule (warn) -- R3 (bare pytest): matches, decides in code
 
 HOME is pointed at a temp dir and AIRLOCK_MODE is pinned to enforce, so the
@@ -52,6 +54,10 @@ def main():
         env = dict(os.environ)
         env["HOME"] = home
         env["AIRLOCK_MODE"] = "enforce"
+        cfg = os.path.join(home, ".config", "airlock")
+        os.makedirs(cfg, exist_ok=True)
+        with open(os.path.join(cfg, "rules.json"), "w") as f:
+            f.write('{"R6-gui-or-browser": "deny"}\n')
         env.pop("TYPESAFE_API_KEY", None)
         env.pop("AIRLOCK_DISABLE", None)
 

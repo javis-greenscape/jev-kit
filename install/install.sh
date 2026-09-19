@@ -66,6 +66,10 @@ Options:
   --wire <settings.json> [...]  actually apply the hook edit to those files
                                 (each is backed up first). Without this, the
                                 edit is only printed.
+  --headless     treat this machine as headless: turn rule R6 (opening a GUI
+                 or a browser) on in rules.json. Detected automatically on a
+                 Linux box with no display; this forces it
+  --no-headless  never touch R6, whatever the detection says
   --no-systemd   skip every timer and unit; the hook still works, and the
                  client falls back to a direct HTTPS call with no daemon
   --check-only   check prerequisites and print the plan, install nothing
@@ -88,6 +92,9 @@ ANY_COMPONENT=0
 FILESEARCH_EXPLICIT=0
 NO_SYSTEMD=0
 CHECK_ONLY=0
+# R6 (GUI/browser) is off by default on every platform. "auto" means detect;
+# "yes"/"no" are --headless / --no-headless and skip detection entirely.
+HEADLESS_CHOICE=auto
 WIRE_FILES=()
 
 while [ "$#" -gt 0 ]; do
@@ -108,6 +115,8 @@ while [ "$#" -gt 0 ]; do
       WANT_FILESEARCH=1; WANT_BROWSER=1; WANT_REVIEW=1; WANT_SHIM=1
       WANT_CLAUDE_UPDATE=1; WANT_BELAY=1; WANT_COMPACTION=1
       FILESEARCH_EXPLICIT=1; ANY_COMPONENT=1; shift ;;
+    --headless) HEADLESS_CHOICE=yes; shift ;;
+    --no-headless) HEADLESS_CHOICE=no; shift ;;
     --no-systemd) NO_SYSTEMD=1; shift ;;
     --check-only) CHECK_ONLY=1; shift ;;
     --wire)
@@ -378,6 +387,52 @@ if [ "$WANT_GUARD" = "1" ]; then
     rm -f "$CONFIG_DIR/keyfile.path"
     ok "removed $CONFIG_DIR/keyfile.path (a default path is in use)"
   fi
+
+  # --- R6: is this a headless machine? -------------------------------------
+  # R6 blocks xdg-open, wslview, explorer.exe and the browser binaries. It
+  # ships OFF on every platform, because most people run Claude Code where
+  # there IS a desktop. A machine with no display wants it on, and this is the
+  # first-class way to say so: one entry merged into rules.json, the existing
+  # file backed up first, and an explicit R6 value in it NEVER overwritten.
+  # Detection is conservative on purpose (see airlock/headless.py): a false
+  # "headless" arms a rule against something the user can legitimately do,
+  # while a false "desktop" just leaves the shipped default in place.
+  RULES_JSON="$CONFIG_DIR/rules.json"
+  case "$HEADLESS_CHOICE" in
+    no)
+      ok "R6 (GUI/browser): left off (--no-headless)" ;;
+    yes|auto)
+      HEADLESS=0
+      HEADLESS_WHY=""
+      if [ "$HEADLESS_CHOICE" = "yes" ]; then
+        HEADLESS=1
+        HEADLESS_WHY="--headless was given"
+      else
+        if HEADLESS_WHY="$(cd "$REPO_ROOT" && "$PY" -m airlock.headless detect 2>/dev/null)"; then
+          HEADLESS=1
+        else
+          HEADLESS=0
+        fi
+      fi
+      if [ "$HEADLESS" = "1" ]; then
+        MERGE_OUT="$(cd "$REPO_ROOT" && "$PY" -m airlock.headless merge "$RULES_JSON" 2>&1)"
+        MERGE_STATUS="${MERGE_OUT%%	*}"
+        MERGE_DETAIL="${MERGE_OUT#*	}"
+        case "$MERGE_STATUS" in
+          written)
+            ok "R6 (GUI/browser) turned ON: headless machine, so {\"R6-gui-or-browser\": \"deny\"} was merged into $RULES_JSON (${HEADLESS_WHY}${MERGE_DETAIL:+; backup $MERGE_DETAIL})" ;;
+          already)
+            ok "R6 (GUI/browser): $MERGE_DETAIL -- your value wins, nothing written" ;;
+          *)
+            warn "R6 (GUI/browser): headless detected but rules.json was not written: $MERGE_DETAIL"
+            warn "  turn it on by hand with:  (cd $REPO_ROOT && $PY -m airlock.headless merge \"$RULES_JSON\")" ;;
+        esac
+      else
+        ok "R6 (GUI/browser): left off -- ${HEADLESS_WHY:-this machine looks like it has a desktop}"
+        printf '         turn it on later with:  (cd %s && %s -m airlock.headless merge "%s")\n' \
+          "$REPO_ROOT" "$PY" "$RULES_JSON"
+      fi ;;
+  esac
 
   if [ ! -f "$CONFIG_DIR/mode" ]; then
     echo "shadow" > "$CONFIG_DIR/mode"

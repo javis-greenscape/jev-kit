@@ -114,10 +114,12 @@ real allow through the actual hook process against a throwaway `HOME`, pings
 the daemon socket, queries the `plocate` index, and runs the health check end
 to end. A component that is not installed is reported `skip`, not `FAIL`.
 
-To prove a deny with your own hands, pipe a fake PreToolUse event at the hook:
+To prove a deny with your own hands, pipe a fake PreToolUse event at the hook.
+R5 (`sudo`) is used here rather than R6 (`xdg-open`) because R5 is on by
+default everywhere, and R6 is not (see the next section):
 
 ```bash
-printf '%s' '{"session_id":"t","cwd":"/tmp","tool_name":"Bash","tool_input":{"command":"xdg-open https://example.com"}}' \
+printf '%s' '{"session_id":"t","cwd":"/tmp","tool_name":"Bash","tool_input":{"command":"sudo systemctl restart nginx"}}' \
   | AIRLOCK_MODE=enforce python3 ~/.local/share/airlock/current/hooks/airlock.py
 ```
 
@@ -128,6 +130,55 @@ command must print **nothing at all**:
 printf '%s' '{"session_id":"t","cwd":"/tmp","tool_name":"Bash","tool_input":{"command":"echo hello"}}' \
   | AIRLOCK_MODE=enforce python3 ~/.local/share/airlock/current/hooks/airlock.py
 ```
+
+## Headless machines, and rule R6
+
+**R6 (`R6-gui-or-browser`) is off by default on every platform.** It blocks
+`xdg-open`, `wslview`, `explorer.exe`, `open`, `start` and the browser
+binaries, and tells the agent to print the URL or use Playwright headless
+instead. That is exactly right on a server with no desktop and exactly wrong
+on a laptop, and most people run Claude Code on a laptop, so it ships off and
+a headless machine turns it on.
+
+There are three ways to turn it on, and they all write the same one entry:
+
+1. **The installer detects it.** `install/install.sh --guard` calls
+   `airlock/headless.py`, and when the machine is headless it merges
+   `{"R6-gui-or-browser": "deny"}` into `$AIRLOCK_CONFIG_DIR/rules.json` and
+   says so in one line. The existing file is backed up first, every other
+   entry in it is preserved, and **an R6 value you have already set is never
+   overwritten** -- including an explicit `"off"`.
+2. **Force it either way:** `install/install.sh --headless` turns it on
+   without consulting the detection; `--no-headless` never touches R6 at all.
+3. **On an existing install, one command:**
+
+   ```bash
+   (cd ~/.local/share/airlock/current && python3 -m airlock.headless merge ~/.config/airlock/rules.json)
+   ```
+
+   It prints `written`, `already` or `error` and a detail, and it is
+   idempotent. To turn R6 back off, set it to `"off"` in the same file (or
+   delete the entry).
+
+The detection is in `airlock/headless.py` and is deliberately **conservative**,
+because the two errors are not symmetric: a false "headless" arms a rule
+against something the user can legitimately do, while a false "desktop" just
+leaves the shipped default in place, which one documented command corrects.
+All of this has to be true:
+
+- the platform is Linux (macOS is a desktop system; native Windows says
+  nothing useful in these variables);
+- `$DISPLAY` and `$WAYLAND_DISPLAY` are both unset or empty;
+- it is not WSL -- a WSL distribution reaches a Windows desktop through WSLg
+  or `explorer.exe`, so it counts as a desktop machine;
+- `$XDG_SESSION_TYPE` does not say `x11` or `wayland`;
+- if `loginctl` exists **and answers**, it reports no graphical or seated
+  session. A `loginctl` that is missing, errors or prints nothing is no
+  evidence either way and never on its own makes a machine "headless".
+
+`install/doctor.sh` reports which way R6 is set on this machine, whether that
+came from `rules.json` or from the built-in default, and what the detection
+thinks of the machine.
 
 ## Modes, and how to kill it
 
@@ -186,7 +237,7 @@ in order:
    Everything) replaces `plocate` for file search -- **detect it, never install
    it**, and if it is missing say so and let the human decide; and the deny you
    prove is R1 (an attempt to print the key file), because R6 (GUI/browser) is
-   `off` by default there. Inside WSL, this list applies unchanged.
+   `off` by default everywhere. Inside WSL, this list applies unchanged.
 1. Read this file and `install/README.md`. Do not start by reading the whole
    repository.
 2. Run `install/install.sh --check-only` and report the plan and any

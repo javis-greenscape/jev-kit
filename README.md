@@ -10,7 +10,7 @@
 
 <p>
   <a href="LICENSE"><img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-blue"></a>
-  <img alt="tests" src="https://img.shields.io/badge/tests-805%20passing-brightgreen">
+  <img alt="tests" src="https://img.shields.io/badge/tests-835%20passing-brightgreen">
   <img alt="Python 3.10+" src="https://img.shields.io/badge/python-3.10%2B-blue">
   <img alt="Platforms" src="https://img.shields.io/badge/platforms-Linux%20%7C%20WSL2%20%7C%20Windows-lightgrey">
   <img alt="Claude Code" src="https://img.shields.io/badge/Claude%20Code-PreToolUse%20hook-8A3FFC">
@@ -262,17 +262,18 @@ Full tables, methods and the known limits: **[docs/measurements.md](docs/measure
 | **WSL2** (Ubuntu, systemd on) | Supported. Identical to Linux once `systemd=true` is in `/etc/wsl.conf` and the distribution has been restarted. See [INSTALL-WSL.md](docs/INSTALL-WSL.md). |
 | **WSL2** (systemd off) | Works, degraded, and the installer detects it. No daemon (a direct HTTPS call per judgement, roughly 0.9 s instead of 0.3 s), no timers, no hourly index refresh. The guard itself is unaffected. |
 | **macOS** | Plausible but **untested**. The guard is stdlib Python and should run. There is no systemd, so `--no-systemd` is required, and the daemon, all timers and `plocate` are out. `launchd` equivalents are not written. Nobody has run it. |
-| **Native Windows** (no WSL) | **The core is supported**, and was run on a real Windows 11 machine. Guard in shadow and enforce, the whole rules table, the key file, file search steered at [Everything](https://www.voidtools.com/) (`es.exe`) instead of `plocate`, health check, installer, doctor, uninstaller. **No warm daemon**, and belay, compaction, browser, review and tuning are **not ported**. See [INSTALL-WINDOWS.md](docs/INSTALL-WINDOWS.md), and [native-windows.md](docs/native-windows.md) for what is done and what remains. |
+| **Native Windows** (no WSL) | **The core is supported**, and was run on a real Windows 11 machine, including the Jev-judged path with a real key (2026-09-19). Guard in shadow and enforce, the whole rules table, the key file, file search steered at [Everything](https://www.voidtools.com/) (`es.exe`) instead of `plocate`, health check, installer, doctor, uninstaller. **No warm daemon**, and belay, compaction, browser, review and tuning are **not ported**. See [INSTALL-WINDOWS.md](docs/INSTALL-WINDOWS.md), and [native-windows.md](docs/native-windows.md) for what is done and what remains. |
 
 ### What "supported" means on native Windows
 
 | | |
 |---|---|
-| **Works** | The `PreToolUse` guard in shadow and enforce mode, through the Bash tool and the PowerShell tool alike. The whole rules table, with one per-platform default: **R6 (GUI/browser) is `off` on Windows**, because a workstation with a desktop opening a browser is ordinary rather than wrong; `rules.json` turns it back on. The key file at `%APPDATA%\jev-kit\env`, with `%APPDATA%\airlock\env` still honoured. The file-search rule, steering at `es.exe` with path-scoped, regex and case flags. The health check. `install/windows_install.py`, `windows_doctor.py`, `windows_uninstall.py` and their `.cmd`/`.ps1` launchers. |
+| **Works** | The `PreToolUse` guard in shadow and enforce mode, through the Bash tool and the PowerShell tool alike. The whole rules table, with no per-platform exceptions: R6 (GUI/browser) is `off` by default on every platform, Windows included, and `rules.json` turns it on where the machine really is headless. The key file at `%APPDATA%\jev-kit\env`, with `%APPDATA%\airlock\env` still honoured. The file-search rule, steering at `es.exe` with path-scoped, regex and case flags. The health check. `install/windows_install.py`, `windows_doctor.py`, `windows_uninstall.py` and their `.cmd`/`.ps1` launchers. |
 | **Out of scope, by design** | **The warm daemon.** It listens on a Unix domain socket, which Windows does not have; the client falls back cleanly to a direct HTTPS call per judgement, about **0.9 s** cold against about **0.3 s** warm on Linux. A named pipe is the right analogue but needs a non-stdlib dependency, and a localhost TCP listener is precisely the design this project refuses. |
 | **Out of scope, not ported** | `belay`, `compaction`, `browser`, `review`, `tuning`. Also `filesearch/`: on Linux airlock *builds* the index, and on Windows it deliberately does not. Everything is third-party software with its own installer and service, so airlock only *detects* it and steers at it, and never installs it. |
 | **Tested how** | The unit suite on **Windows Python 3.11.9, Windows 11**. Real `PreToolUse` events piped at the installed hook: a deny through the Bash tool and the same deny through the PowerShell tool (R1, an attempt to print the key file), an allow, the Everything steer classified, a malformed payload and the kill switch. The installer, doctor and uninstaller run for real into a scratch directory. `es.exe` 1.1.0.38 detected and queried. Exact commands and output: [docs/native-windows.md](docs/native-windows.md). |
-| **Not tested there** | **A Jev-judged deny.** The Windows machine was kept keyless on purpose, so every judged path there fail-opened -- which is itself the fail-open evidence. The judged path is verified on Linux only. |
+| **Verified on Windows** | **The Jev-judged path, 2026-09-19**, Windows Python **3.11.9** on Windows 11, with a real key in a throwaway profile that was destroyed afterwards: judged search denies through the Bash tool and the PowerShell tool, a judged allow, the tier guard blocking two rungs over and warning one rung over, the tier rewrite, the doctor and the health check's direct HTTPS probe. Measured judged latency over 32 calls: median **1030 ms**, max **1359 ms** (no warm daemon there). |
+| **Still open there** | **The enforce budget.** One of those 32 calls died on a TLS handshake timeout and fail-opened (3.1%). The 1500 ms budget was chosen for a Linux box with a warm daemon; a Windows-specific budget is proposed in [native-windows.md](docs/native-windows.md) and deliberately not yet applied. |
 <!-- END PLATFORM TABLE -->
 
 ## FAQ
@@ -290,6 +291,34 @@ code-computed facts make a deny unreachable. The browser component's measured
 decision loop came to 0.0008 USD of Claude spend per run against 0.1868 USD
 with Sonnet deciding. Your own bill depends on your traffic, which is why the
 tuning loop reads your shadow log rather than a number we picked.
+
+**I run this on a headless server.**
+Then you want **R6** (`R6-gui-or-browser`), which blocks `xdg-open`, `wslview`,
+`explorer.exe` and the browser binaries and tells the agent to print the URL or
+use Playwright headless instead. It is **off by default on every platform**,
+because most people run Claude Code on a machine that has a desktop, where
+opening a browser is an ordinary thing to do. Turn it on with one entry in
+`~/.config/airlock/rules.json`:
+
+```json
+{"R6-gui-or-browser": "deny"}
+```
+
+`install/install.sh` writes that entry for you when it detects a headless
+machine (Linux, no `$DISPLAY`, no `$WAYLAND_DISPLAY`, not WSL, and no
+graphical or seated session according to `loginctl`). The detection is
+deliberately conservative -- anything uncertain is treated as a desktop -- so
+`--headless` forces it on and `--no-headless` forces it off. On an existing
+install, one command does it, merging into whatever else is already in the
+file and backing that file up first:
+
+```
+(cd ~/.local/share/airlock/current && python3 -m airlock.headless merge ~/.config/airlock/rules.json)
+```
+
+An R6 value you have already set is never overwritten, by the installer or by
+that command. `install/doctor.sh` reports which way R6 is set on this machine
+and why.
 
 **What if TypeSafe is down?**
 Everything fails open. No judgement means the tool call is allowed, and the
