@@ -271,6 +271,15 @@ ground truth on the row: treat it as a fact, never re-derive or argue with it.
 
   There is no "warn" for this guard: it denies with a suggested replacement
   command, or it is silent.
+
+  When a row carries a `root_has_code_graph` field, that IS the
+  graphify-graph-present fact above (the deciding input the code actually
+  used for this call) -- treat it as ground truth, exactly like `scope`,
+  never guess it or re-derive it. A row missing that field never reached the
+  code_structure_search branch (no Jev call was made, or the answer never
+  got that far), so graph-present is simply not part of what happened on
+  that row -- do not guess it, and do not treat its absence as evidence the
+  graph was missing.
 """ % {
         "scopes": ", ".join(scope_names()),
         "intents": ", ".join(search_intent_options()),

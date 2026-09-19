@@ -289,5 +289,122 @@ class TestRunToolChoiceGuard(unittest.TestCase):
         self.assertEqual(entry["suggestion"], policy.filename_search_suggestion())
 
 
+class TestRootHasCodeGraphField(unittest.TestCase):
+    """The log row must carry `root_has_code_graph` -- the value the policy
+    actually used -- ONLY on a row where the code_structure_search branch was
+    actually evaluated (a Jev call was made and evaluate_search ran), and
+    must never stat the filesystem or fill it in any other row."""
+
+    def _fake_code_structure_answer(self, confidence=0.9):
+        return (
+            {
+                "model": "jev-1.13.0",
+                "answers": {
+                    "search_intent": {
+                        "type": "choice",
+                        "choice": "code_structure_search",
+                        "confidence": confidence,
+                        "probabilities": {"code_structure_search": confidence,
+                                          "literal_text_search": 1 - confidence},
+                    }
+                },
+                "usage": {"input_tokens": 100, "output_tokens": 10},
+            },
+            50,
+        )
+
+    def test_present_and_true_when_graph_present_and_branch_evaluated(self):
+        data = {"session_id": "s1", "cwd": "/tmp", "tool_name": "Bash", "tool_input": {"command": "grep -rn foo ."}}
+        with mock.patch("airlock.keyfile.get_api_key", return_value="key"), \
+             mock.patch("airlock.scope.root_has_graphify_graph", return_value=True), \
+             mock.patch("random.random", return_value=0.99), \
+             mock.patch("airlock.client.ask", return_value=self._fake_code_structure_answer()), \
+             mock.patch("airlock.log.append") as append:
+            guards.run_tool_choice_guard(data)
+            entry = append.call_args[0][0]
+            self.assertIn("root_has_code_graph", entry)
+            self.assertIs(entry["root_has_code_graph"], True)
+
+    def test_present_and_false_when_sampled_without_a_graph(self):
+        """Sampled shadow traffic (no deny possible) still evaluates the
+        branch and still records the fact -- would_deny is forced False
+        afterwards, but root_has_code_graph is the real code-side value."""
+        data = {"session_id": "s1", "cwd": "/tmp", "tool_name": "Bash", "tool_input": {"command": "grep -rn foo ."}}
+        with mock.patch("airlock.keyfile.get_api_key", return_value="key"), \
+             mock.patch("airlock.scope.root_has_graphify_graph", return_value=False), \
+             mock.patch("random.random", return_value=0.0), \
+             mock.patch("airlock.client.ask", return_value=self._fake_code_structure_answer()), \
+             mock.patch("airlock.log.append") as append:
+            guards.run_tool_choice_guard(data)
+            entry = append.call_args[0][0]
+            self.assertEqual(entry["skipped"], "sampled_shadow")
+            self.assertIn("root_has_code_graph", entry)
+            self.assertIs(entry["root_has_code_graph"], False)
+
+    def test_absent_on_the_no_deny_possible_skip_row(self):
+        """No Jev call, no evaluate_search call -- never fill the field by
+        statting the filesystem after the fact."""
+        data = {"session_id": "s1", "cwd": "/tmp", "tool_name": "Bash", "tool_input": {"command": "grep -rn foo ."}}
+        with mock.patch("airlock.keyfile.get_api_key", return_value="key"), \
+             mock.patch("airlock.scope.root_has_graphify_graph", return_value=False) as stat_call, \
+             mock.patch("random.random", return_value=0.99), \
+             mock.patch("airlock.client.ask") as ask_call, \
+             mock.patch("airlock.log.append") as append:
+            guards.run_tool_choice_guard(data)
+            entry = append.call_args[0][0]
+            self.assertEqual(entry["skipped"], "no_deny_possible")
+            self.assertNotIn("root_has_code_graph", entry)
+            ask_call.assert_not_called()
+            # root_has_graphify_graph IS still called once, up front, to
+            # decide deny_possible_bash itself -- that is the one legitimate
+            # use, not a fill-in-the-field stat. Assert it is not called
+            # again after the skip decision.
+            stat_call.assert_called_once()
+
+    def test_absent_on_a_disk_wide_filename_search_row(self):
+        """The other deny branch (filename_search on disk_wide scope) never
+        touches root_has_graphify_graph at all."""
+        data = {"session_id": "s1", "cwd": "/tmp", "tool_name": "Bash", "tool_input": {"command": "find / -name '*.xlsm'"}}
+        fake = (
+            {
+                "model": "jev-1.13.0",
+                "answers": {
+                    "search_intent": {
+                        "type": "choice",
+                        "choice": "filename_search",
+                        "confidence": 0.95,
+                        "probabilities": {"filename_search": 0.95, "not_a_search": 0.05},
+                    }
+                },
+                "usage": {"input_tokens": 100, "output_tokens": 10},
+            },
+            50,
+        )
+        with mock.patch("airlock.keyfile.get_api_key", return_value="key"), \
+             mock.patch("airlock.client.ask", return_value=fake), \
+             mock.patch("airlock.log.append") as append:
+            guards.run_tool_choice_guard(data)
+            entry = append.call_args[0][0]
+            self.assertTrue(entry["would_deny"])
+            # A disk_wide `find` is not grep-family, so deny_possible_bash's
+            # graph check never runs, but the branch IS evaluated (a Jev call
+            # happened) -- the field is present, recording that the graph
+            # fact was false/irrelevant for this row's actual deny reason.
+            self.assertIn("root_has_code_graph", entry)
+
+    def test_absent_on_client_ask_exception(self):
+        """The call errored before evaluate_search ever ran."""
+        data = {"session_id": "s1", "cwd": "/tmp", "tool_name": "Bash", "tool_input": {"command": "grep -rn foo ."}}
+        with mock.patch("airlock.keyfile.get_api_key", return_value="key"), \
+             mock.patch("airlock.scope.root_has_graphify_graph", return_value=True), \
+             mock.patch("random.random", return_value=0.99), \
+             mock.patch("airlock.client.ask", side_effect=Exception("boom")), \
+             mock.patch("airlock.log.append") as append:
+            guards.run_tool_choice_guard(data)
+            entry = append.call_args[0][0]
+            self.assertIn("error", entry)
+            self.assertNotIn("root_has_code_graph", entry)
+
+
 if __name__ == "__main__":
     unittest.main()

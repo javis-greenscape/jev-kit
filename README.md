@@ -10,7 +10,7 @@
 
 <p>
   <a href="LICENSE"><img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-blue"></a>
-  <img alt="tests" src="https://img.shields.io/badge/tests-986%20passing-brightgreen">
+  <img alt="tests" src="https://img.shields.io/badge/tests-999%20passing-brightgreen">
   <img alt="Python 3.10+" src="https://img.shields.io/badge/python-3.10%2B-blue">
   <img alt="Platforms" src="https://img.shields.io/badge/platforms-Linux%20%7C%20WSL2%20%7C%20Windows-lightgrey">
   <img alt="Claude Code" src="https://img.shields.io/badge/Claude%20Code-PreToolUse%20hook-8A3FFC">
@@ -151,6 +151,11 @@ numbers and no sustained real use.
 | Monitoring | Five-minute health check and its timer | **yes** | Nothing | exercised |
 | Push monitor | Optional push to a monitor you host, in `heartbeat` or `explicit` mode | no, opt-in | A status word and, in `explicit` mode, which check failed -- redacted and capped | exercised |
 | Tuning loop | Reads the shadow log, has a judge score the verdicts, commits to its own branch | no, opt-in | Real Claude sessions on the account you nominate | exercised |
+
+The guard's tool-choice branch that suggests `graphify query` instead of a raw
+grep only exists when the search root has a graphify graph
+(`graphify-out/graph.json`); with no graph present it is inert, which is most
+users, since most do not use graphify at all.
 | Auto-updater | Idle-only Claude Code updater. Updates only when no run is alive | **yes** | Nothing | exercised |
 
 Per-component detail, exposure and install flags:
@@ -276,7 +281,7 @@ Full tables, methods and the known limits: **[docs/measurements.md](docs/measure
 | **Out of scope, not ported** | `belay`, `compaction`, `browser`, `review`, `tuning`. Also `filesearch/`: on Linux airlock *builds* the index, and on Windows it deliberately does not. Everything is third-party software with its own installer and service, so airlock only *detects* it and steers at it, and never installs it. |
 | **Tested how** | The unit suite on **Windows Python 3.11.9, Windows 11**. Real `PreToolUse` events piped at the installed hook: a deny through the Bash tool and the same deny through the PowerShell tool (R1, an attempt to print the key file), an allow, the Everything steer classified, a malformed payload and the kill switch. The installer, doctor and uninstaller run for real into a scratch directory. `es.exe` 1.1.0.38 detected and queried. Exact commands and output: [docs/native-windows.md](docs/native-windows.md). |
 | **Verified on Windows** | **The Jev-judged path, 2026-09-19**, Windows Python **3.11.9** on Windows 11, with a real key in a throwaway profile that was destroyed afterwards: judged search denies through the Bash tool and the PowerShell tool, a judged allow, the tier guard blocking two rungs over and warning one rung over, the tier rewrite, the doctor and the health check's direct HTTPS probe. Measured judged latency over 32 calls: median **1030 ms**, max **1359 ms** (no warm daemon there). |
-| **Still open there** | **The enforce budget.** One of those 32 calls died on a TLS handshake timeout and fail-opened (3.1%). The 1500 ms budget was chosen for a Linux box with a warm daemon; a Windows-specific budget is proposed in [native-windows.md](docs/native-windows.md) and deliberately not yet applied. |
+| **The enforce budget on Windows** | **2000 ms, decided and applied** (POSIX, WSL and macOS stay at 1500 ms). One of those 32 calls died on a TLS handshake timeout and fail-opened (3.1%) against the then-1500 ms budget; Windows has no warm daemon, so every judgement is a fresh HTTPS connection. 2000 ms clears the measured 1359 ms max with room to spare. Details: [native-windows.md](docs/native-windows.md). |
 <!-- END PLATFORM TABLE -->
 
 ## FAQ

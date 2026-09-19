@@ -24,7 +24,7 @@ import unittest
 from unittest import mock
 
 from tests import posix_only
-from airlock import client, keyfile, paths, platform_compat, winpath
+from airlock import client, enforce, keyfile, paths, platform_compat, winpath
 
 
 def _remove_quietly(path):
@@ -400,6 +400,79 @@ class TestKitConfigDir(unittest.TestCase):
         with mock.patch.dict(os.environ, {"JEVKIT_CONFIG_DIR": "/opt/kit"}, clear=True):
             self.assertEqual(paths.kit_config_dir(windows=False), pathlib.Path("/opt/kit"))
             self.assertEqual(paths.kit_config_dir(windows=True), pathlib.Path("/opt/kit"))
+
+
+class TestBudgetMs(unittest.TestCase):
+    """The enforce-mode judgement budget: 1500ms on POSIX/WSL/macOS, 2000ms
+    on native Windows (no warm daemon there -- see docs/native-windows.md for
+    the measurements that decided it), AIRLOCK_BUDGET_MS and its legacy names
+    overriding on every platform."""
+
+    _BUDGET_VARS = ("AIRLOCK_BUDGET_MS", "PLUMBLINE_BUDGET_MS", "JEV_GUARD_BUDGET_MS")
+
+    def _clear_env(self):
+        return mock.patch.dict(os.environ, {}, clear=True)
+
+    def test_posix_default_is_1500(self):
+        with self._clear_env():
+            self.assertEqual(enforce.budget_ms(windows=False), 1500)
+
+    def test_windows_default_is_2000(self):
+        with self._clear_env():
+            self.assertEqual(enforce.budget_ms(windows=True), 2000)
+
+    def test_real_platform_detection_used_when_not_injected(self):
+        # enforce.py does `from .platform_compat import is_windows`, so the
+        # spy has to replace enforce's own bound name, not the module
+        # attribute -- patching platform_compat.is_windows would not be seen
+        # by the already-imported reference.
+        with self._clear_env(), mock.patch.object(enforce, "is_windows",
+                                                    wraps=platform_compat.is_windows) as spy:
+            enforce.budget_ms()
+            spy.assert_called_once_with(None)
+
+    def test_env_override_wins_on_posix(self):
+        with mock.patch.dict(os.environ, {"AIRLOCK_BUDGET_MS": "999"}, clear=True):
+            self.assertEqual(enforce.budget_ms(windows=False), 999)
+
+    def test_env_override_wins_on_windows_too(self):
+        with mock.patch.dict(os.environ, {"AIRLOCK_BUDGET_MS": "999"}, clear=True):
+            self.assertEqual(enforce.budget_ms(windows=True), 999)
+
+    def test_legacy_env_names_still_override(self):
+        for name in ("PLUMBLINE_BUDGET_MS", "JEV_GUARD_BUDGET_MS"):
+            with mock.patch.dict(os.environ, {name: "777"}, clear=True):
+                self.assertEqual(enforce.budget_ms(windows=True), 777, name)
+                self.assertEqual(enforce.budget_ms(windows=False), 777, name)
+
+    def test_same_value_reaches_the_urlopen_timeout(self):
+        """budget_ms() feeds client.ask(timeout_s=...), which client.py passes
+        straight to urllib.request.urlopen(timeout=...). Assert the wiring,
+        not just the constant."""
+        with self._clear_env():
+            b_ms = enforce.budget_ms(windows=True)
+        self.assertEqual(b_ms, 2000)
+        with mock.patch.object(client, "call_jev",
+                               return_value=({"answers": {}}, 5)) as direct, \
+             mock.patch.object(client.keyfile, "get_api_key", return_value="k"), \
+             mock.patch("socket.socket"):
+            client.ask({"state": {}, "questions": {}}, timeout_s=b_ms / 1000.0, windows=True)
+        _api_key, _state, _questions = direct.call_args[0]
+        self.assertEqual(direct.call_args[1]["timeout"], 2.0)
+
+    def test_windows_pretooluse_hook_timeout_still_leaves_room(self):
+        """The wired settings.json PreToolUse timeout (install/_wire.py:
+        PRETOOLUSE_TIMEOUT) is 5s on every platform, including Windows. The
+        2000ms Windows budget must leave real headroom under it."""
+        # install/_wire.py reads NEW_HOOK from the environment at import
+        # time (it is a script invoked by wire.sh, not a library module), so
+        # importing it here needs that var present regardless of AIRLOCK_*.
+        with mock.patch.dict(os.environ, {"NEW_HOOK": "/dev/null"}):
+            from install import _wire
+        with self._clear_env():
+            b_ms = enforce.budget_ms(windows=True)
+        self.assertLess(b_ms, _wire.PRETOOLUSE_TIMEOUT * 1000)
+        self.assertGreaterEqual(_wire.PRETOOLUSE_TIMEOUT * 1000 - b_ms, 1000)
 
 
 class TestWinPath(unittest.TestCase):

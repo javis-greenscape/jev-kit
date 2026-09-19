@@ -702,14 +702,23 @@ def expected_case_fields(row, guard, correct_label):
     if _policy is None or scope is None or command is None:
         expected["deny_expectation"] = "unverified"
         return expected
-    if correct_label == "code_structure_search" and row.get("search_intent") != correct_label:
-        # Denying here turns on whether the search root has a graphify graph,
-        # which this row does not record. Say so instead of picking one.
+    recorded_graph = row.get("root_has_code_graph")
+    if recorded_graph is not None:
+        # The row itself carries the deciding input -- the value the policy
+        # actually used when this branch was evaluated. Prefer it over any
+        # inference.
+        graph_present = bool(recorded_graph)
+    elif correct_label == "code_structure_search" and row.get("search_intent") != correct_label:
+        # Denying here turns on whether the search root has a graphify graph.
+        # This row predates that field, or the branch was never evaluated,
+        # and the label just changed under the corrected answer -- nothing
+        # honest to infer. Say so instead of picking one.
         expected["deny_expectation"] = "unverified"
         return expected
-    try:
+    else:
         graph_present = bool(row.get("would_deny")) and \
             (row.get("answers") or {}).get("search_intent", {}).get("choice") == "code_structure_search"
+    try:
         verdict = _policy.evaluate_search(
             scope, correct_label, _row_confidence(row, "search_intent"), command,
             graph_present,

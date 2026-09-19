@@ -15,7 +15,8 @@ rule's default, overridable in ~/.config/airlock/rules.json. Only `deny` can
 block; `warn` returns its advice as hook output; `log` writes a row and
 nothing else.
 
-Budget: AIRLOCK_BUDGET_MS (default 1500) bounds every client.ask() call.
+Budget: AIRLOCK_BUDGET_MS bounds every client.ask() call -- default 1500ms,
+2000ms on native Windows (no warm daemon there, see budget_ms() below).
 Fail-open everywhere: any exception, a malformed answer, the daemon being
 down plus a slow fallback, or exceeding the budget all mean ALLOW, logged
 with `error` set and `enforced: false`. This module never raises to its
@@ -33,8 +34,21 @@ import time
 # they pull in urllib and the keyfile reader, several ms of start-up that a
 # code-only rule -- the common matched case -- must not pay for.
 from . import log, paths, policy, rules as rules_mod, state as state_mod
+from .platform_compat import is_windows
 
 DEFAULT_BUDGET_MS = 1500
+
+# Windows has no warm daemon (airlock/platform_compat.py:has_unix_sockets is
+# False there), so every judgement is a fresh HTTPS connection rather than a
+# socket round-trip to an already-running process. Measured against a native
+# Windows host: median 1030ms, max 1359ms over 32 calls, with 1 of 32
+# exceeding the POSIX 1500ms budget and fail-opening (see
+# docs/measurements.md). The owner's call is 2000ms on Windows so that
+# variance does not routinely eat the budget and silently disable
+# enforcement; POSIX, WSL and macOS keep 1500ms, where the daemon is
+# available and the measured latency is far below it.
+WINDOWS_DEFAULT_BUDGET_MS = 2000
+
 LOOP_WINDOW_S = 600  # 10 minutes, per the brief
 
 # `user_requested` softening. At or above this, a deny becomes a warn. It is
@@ -58,12 +72,25 @@ def _now_iso():
     return datetime.datetime.now(datetime.timezone.utc).isoformat()
 
 
-def budget_ms():
+def budget_ms(windows=None):
+    """The hard budget for one client.ask() call, in milliseconds.
+
+    Default is platform-dependent: 2000ms on native Windows (no warm daemon,
+    every call is a fresh HTTPS connection), 1500ms everywhere else (POSIX,
+    WSL, macOS -- all have the daemon). AIRLOCK_BUDGET_MS and its legacy
+    names (PLUMBLINE_BUDGET_MS, JEV_GUARD_BUDGET_MS) override the default on
+    every platform, exactly as before this default became platform-aware.
+
+    `windows` is the injection point every caller in this package forwards
+    (see airlock/platform_compat.py); real detection is used when it is
+    None.
+    """
+    default = WINDOWS_DEFAULT_BUDGET_MS if is_windows(windows) else DEFAULT_BUDGET_MS
     try:
         return int(paths.env("AIRLOCK_BUDGET_MS", "PLUMBLINE_BUDGET_MS", "JEV_GUARD_BUDGET_MS",
-                             default=str(DEFAULT_BUDGET_MS)))
+                             default=str(default)))
     except Exception:
-        return DEFAULT_BUDGET_MS
+        return default
 
 
 def emit_deny(reason):

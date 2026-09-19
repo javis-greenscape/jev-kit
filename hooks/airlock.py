@@ -10,7 +10,9 @@ AIRLOCK_MODE, else the first word of ~/.config/airlock/mode, else
   a detached background process (airlock/worker.py), and exits 0 with no
   stdout, well under 100ms.
 - enforce: judges SYNCHRONOUSLY, in this process, through airlock/enforce.py
-  (client.ask() under a hard budget -- AIRLOCK_BUDGET_MS, default 1500ms).
+  (client.ask() under a hard budget -- AIRLOCK_BUDGET_MS, default 1500ms,
+  2000ms on native Windows, where there is no warm daemon and every call is
+  a fresh HTTPS connection; see airlock/enforce.py:budget_ms).
   A deny is the documented PreToolUse JSON on stdout with exit 0. Fail-open
   on any timeout, exception, or malformed answer.
 - off: complete no-op, same as the kill switch.

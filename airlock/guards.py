@@ -228,6 +228,14 @@ def compute_search_entry(data, timeout_s=None):
     entry["suggestion"] = verdict.get("suggestion")
     entry["under_tiered"] = False
     entry["margin"] = margin
+    # The deciding input to the graphify-suggestion deny branch of
+    # evaluate_search, recorded only here: this is the one place that branch
+    # was actually evaluated (a Jev call was made and its verdict computed).
+    # The "no_deny_possible" skip above and the client.ask() exception path
+    # never reach evaluate_search, so they never get this field -- and it is
+    # never filled in by statting the filesystem after the fact, only by the
+    # value the policy call above already used.
+    entry["root_has_code_graph"] = has_graph
     if sampled:
         entry["skipped"] = "sampled_shadow"
 

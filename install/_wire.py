@@ -54,6 +54,11 @@ FUNCTION_HOOKS_ENV_KEY = "CLAUDE_CODE_ENABLE_FUNCTION_HOOKS"
 SESSION_CHECK = os.environ.get("SESSION_CHECK", "1") == "1"
 SESSION_CHECK_HOOK = os.environ.get("SESSION_CHECK_HOOK", "")
 SESSION_CHECK_COMMAND = os.environ.get("SESSION_CHECK_COMMAND", SESSION_CHECK_HOOK)
+# 5 s here on every platform, including native Windows: the enforce judgement
+# budget there is 2000ms (airlock/enforce.py:WINDOWS_DEFAULT_BUDGET_MS, no
+# warm daemon so every call is a fresh HTTPS connection, measured median
+# 1030ms / max 1359ms), which leaves 3s of room for interpreter start-up and
+# the rest of the hook's own work before this ceiling could fire.
 PRETOOLUSE_TIMEOUT = 5
 BELAY_TIMEOUT = 25
 SESSION_CHECK_TIMEOUT = 5

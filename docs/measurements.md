@@ -46,11 +46,14 @@ installed launcher. **32 judged calls** (mixed `R8-tool-choice-guard` and
 | max | 1359 |
 
 **One of the 32 did not complete**: `_ssl.c:989: The handshake operation timed
-out`, which blew the 1500 ms enforce budget and **fail-opened** -- a 3.1%
-fail-open rate in this sample. Windows has no warm daemon, so every judgement
-pays a fresh DNS + TCP + TLS handshake against a budget chosen for a Linux box
-that has one. A Windows-specific budget is proposed, and deliberately not
-applied, in [native-windows.md](native-windows.md).
+out`, which blew the then-1500 ms enforce budget and **fail-opened** -- a
+3.1% fail-open rate in this sample. Windows has no warm daemon, so every
+judgement pays a fresh DNS + TCP + TLS handshake against a budget chosen for
+a Linux box that has one. The owner's decision from these numbers: the
+default enforce budget on native Windows is now **2000 ms**
+(`airlock/enforce.py:WINDOWS_DEFAULT_BUDGET_MS`), clearing the measured
+1359 ms max with room to spare; POSIX, WSL and macOS keep 1500 ms. See
+[native-windows.md](native-windows.md).
 
 The health check's own direct HTTPS probe on the same machine and the same
 session: `direct_ask {ok: true, latency_ms: 1125}`, `status=healthy`.

@@ -20,6 +20,11 @@ Jev request, no log row, no subprocess.
 | `R9-commit-secret` | Bash | deny | code + a local credential belt | staging or committing a secret |
 | `R10-general-risk` | Bash | **warn only, never deny** | code pre-filter, then a Jev Score + `user_requested` | the catch-all: a call no other rule covers that plainly reaches outside the working tree |
 
+`R8-tool-choice-guard`'s graphify-suggestion branch only exists when the search
+root has a graphify graph (`graphify-out/graph.json`); with no graph present it
+is inert -- never suggests `graphify query`, never denies on that branch --
+which is most users, since most do not use graphify at all.
+
 Every deny keeps its safety net: the `[airlock-ok: <reason>]` override stamp
 in a call's description, loop protection (the same call is never denied twice
 in ten minutes), a hard budget, fail-open on any error, and -- where Jev is
