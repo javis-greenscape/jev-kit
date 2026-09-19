@@ -158,28 +158,86 @@ def _affinity_cpu_count():
         return None
 
 
-def _cgroup_cpu_quota_count(cgroup_root="/sys/fs/cgroup"):
-    """CPUs implied by a cgroup CPU quota (a container's `--cpus=N`, which
-    an affinity mask does not see). Tries cgroup v2's single `cpu.max`
-    file, then cgroup v1's separate quota/period files. `max`/absent/
-    unreadable/non-positive all mean "no evidence", never a count."""
+def _proc_cgroup_relpaths(proc_cgroup="/proc/self/cgroup"):
+    """(v2_relpath, v1_cpu_relpath) for THIS process, each "/" when unknown.
+
+    A process is rarely in the root cgroup: under systemd it sits in a slice
+    or a scope, and that is where a `CPUQuota=` lands. Reading only the mount
+    root's `cpu.max` therefore sees `max` on a capped host and reports the
+    machine as unconstrained.
+    """
+    v2 = v1 = "/"
     try:
-        with open(os.path.join(cgroup_root, "cpu.max")) as f:
-            quota_str, period_str = f.read().split()
-        if quota_str == "max":
-            return None
-        quota, period = int(quota_str), int(period_str)
+        with open(proc_cgroup) as f:
+            for line in f:
+                parts = line.strip().split(":", 2)
+                if len(parts) != 3:
+                    continue
+                hid, controllers, path = parts
+                if hid == "0" and controllers == "":
+                    v2 = path or "/"
+                elif "cpu" in controllers.split(","):
+                    v1 = path or "/"
     except Exception:
-        try:
-            with open(os.path.join(cgroup_root, "cpu", "cpu.cfs_quota_us")) as f:
+        pass
+    return v2, v1
+
+
+def _ancestor_dirs(root, relpath):
+    """Every cgroup directory from `relpath` up to `root`, nearest first."""
+    parts = [p for p in (relpath or "/").split("/") if p]
+    out = []
+    while True:
+        out.append(os.path.join(root, *parts) if parts else root)
+        if not parts:
+            return out
+        parts.pop()
+
+
+def _read_quota_count(directory, v2=True):
+    """CPUs implied by one cgroup directory's quota, or None for no limit."""
+    try:
+        if v2:
+            with open(os.path.join(directory, "cpu.max")) as f:
+                quota_str, period_str = f.read().split()
+            if quota_str == "max":
+                return None
+            quota, period = int(quota_str), int(period_str)
+        else:
+            with open(os.path.join(directory, "cpu.cfs_quota_us")) as f:
                 quota = int(f.read().strip())
-            with open(os.path.join(cgroup_root, "cpu", "cpu.cfs_period_us")) as f:
+            with open(os.path.join(directory, "cpu.cfs_period_us")) as f:
                 period = int(f.read().strip())
-        except Exception:
-            return None
+    except Exception:
+        return None
     if quota <= 0 or period <= 0:
         return None
     return max(1, -(-quota // period))  # ceil division, no float/math import
+
+
+def _cgroup_cpu_quota_count(cgroup_root="/sys/fs/cgroup",
+                            proc_cgroup="/proc/self/cgroup"):
+    """CPUs implied by a cgroup CPU quota (a container's `--cpus=N` or a
+    systemd `CPUQuota=`, neither of which an affinity mask sees).
+
+    Walks this process's own cgroup and every ancestor up to the mount root,
+    in both the v2 layout (`<root>/<path>/cpu.max`) and the v1 one
+    (`<root>/cpu/<path>/cpu.cfs_quota_us`), and returns the TIGHTEST limit
+    found, since an ancestor's cap binds its descendants. Absent, `max`,
+    unreadable or non-positive all mean "no evidence", never a count.
+    """
+    v2_path, v1_path = _proc_cgroup_relpaths(proc_cgroup)
+    counts = []
+    for d in _ancestor_dirs(cgroup_root, v2_path):
+        n = _read_quota_count(d, v2=True)
+        if n:
+            counts.append(n)
+    v1_root = os.path.join(cgroup_root, "cpu")
+    for d in _ancestor_dirs(v1_root, v1_path):
+        n = _read_quota_count(d, v2=False)
+        if n:
+            counts.append(n)
+    return min(counts) if counts else None
 
 
 def cpu_count(override=None):

@@ -725,12 +725,28 @@ def prefilter_wide_run(ctx, cpus=None):
     """R3's pre-filter. Written for gs, the shared 4-core VPS: an uncapped
     whole-suite run or build genuinely contends there. It stays silent on a
     machine with headroom to spare (see `airlock.headless.is_small_host`),
-    so a 12-core workstation does not get warned about someone else's box."""
+    so a 12-core workstation does not get warned about someone else's box.
+
+    `cpus` pins the core count instead of detecting it; `ctx["cpus"]` does the
+    same for a caller that only has a ctx to hand (the eval harness pins it so
+    a case's expected label does not depend on the machine scoring it). The
+    probe is deferred until a segment actually looks like an R3 command, so an
+    ordinary `ls` or `git status` costs no cgroup reads on the hook's hot path.
+    """
     if ctx["tool_name"] not in SHELL_TOOLS:
         return None
-    if not is_small_host(cpus):
-        return None
-    n = cpu_count(cpus)
+    if cpus is None:
+        cpus = ctx.get("cpus")
+    cached = {}
+
+    def small_host_cores():
+        """Core count if this host is small enough for R3 to speak, else None.
+        Probed at most once per call."""
+        if "n" not in cached:
+            cached["n"] = cpu_count(cpus)
+        n = cached["n"]
+        return n if is_small_host(n) else None
+
     for seg in ctx["segments"]:
         prog, args = program_of(seg)
         if prog is None:
@@ -744,6 +760,9 @@ def prefilter_wide_run(ctx, cpus=None):
         if prog == "pytest":
             if _has_path_arg(args) or any(a in _PYTEST_SELECTOR_FLAGS for a in args):
                 continue
+            n = small_host_cores()
+            if n is None:
+                return None
             capped = any(a.startswith("-n") or a.startswith("--numprocesses") for a in args)
             return Match(
                 "`pytest` with no path or selector runs the WHOLE suite on a %d-core box" % n,
@@ -761,6 +780,9 @@ def prefilter_wide_run(ctx, cpus=None):
                 continue
             if "--maxWorkers" in joined or "--max-workers" in joined or "--pool" in joined or "--threads" in joined:
                 continue
+            n = small_host_cores()
+            if n is None:
+                return None
             return Match(
                 "`%s %s` runs the whole test suite with uncapped workers (%d shared cores)"
                 % (prog, joined.strip(), n),
@@ -771,6 +793,9 @@ def prefilter_wide_run(ctx, cpus=None):
         if prog == "make":
             for a in args:
                 if a == "-j" or (a.startswith("-j") and not a[2:].isdigit()):
+                    n = small_host_cores()
+                    if n is None:
+                        return None
                     return Match(
                         "`make -j` with no number takes every core on a %d-core shared box" % n,
                         "Cap it explicitly: make -j2 (and `nice -n 10 make -j2` for a long build).",
@@ -778,6 +803,9 @@ def prefilter_wide_run(ctx, cpus=None):
 
         if prog == "cargo" and args[:1] and args[0] in ("build", "test", "check", "clippy"):
             if not any(a == "-j" or a.startswith("-j") or a.startswith("--jobs") for a in args):
+                n = small_host_cores()
+                if n is None:
+                    return None
                 return Match(
                     "`cargo %s` with no -j uses every core on a %d-core shared box" % (args[0], n),
                     "Cap it explicitly: cargo %s -j2" % args[0],

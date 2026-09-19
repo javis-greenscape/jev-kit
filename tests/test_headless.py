@@ -226,6 +226,54 @@ class TestCgroupCpuQuotaCount(unittest.TestCase):
         root = self._cgroup({})
         self.assertIsNone(headless._cgroup_cpu_quota_count(root))
 
+    # --- the process's own cgroup, not the mount root (Codex, PR #2) -------
+
+    def _proc_cgroup(self, text):
+        d = tempfile.mkdtemp()
+        path = Path(d) / "cgroup"
+        path.write_text(text)
+        return str(path)
+
+    def test_v2_quota_on_the_processes_own_cgroup(self):
+        # The mount root says `max`; the systemd scope this process is in is
+        # capped at 2 cores. Reading only the root reported no limit.
+        root = self._cgroup({
+            "cpu.max": "max 100000\n",
+            "user.slice/session-3.scope/cpu.max": "200000 100000\n",
+        })
+        proc = self._proc_cgroup("0::/user.slice/session-3.scope\n")
+        self.assertEqual(headless._cgroup_cpu_quota_count(root, proc), 2)
+
+    def test_v2_ancestor_quota_binds_the_leaf(self):
+        root = self._cgroup({
+            "cpu.max": "max 100000\n",
+            "user.slice/cpu.max": "300000 100000\n",
+            "user.slice/session-3.scope/cpu.max": "max 100000\n",
+        })
+        proc = self._proc_cgroup("0::/user.slice/session-3.scope\n")
+        self.assertEqual(headless._cgroup_cpu_quota_count(root, proc), 3)
+
+    def test_tightest_limit_in_the_chain_wins(self):
+        root = self._cgroup({
+            "user.slice/cpu.max": "400000 100000\n",
+            "user.slice/session-3.scope/cpu.max": "100000 100000\n",
+        })
+        proc = self._proc_cgroup("0::/user.slice/session-3.scope\n")
+        self.assertEqual(headless._cgroup_cpu_quota_count(root, proc), 1)
+
+    def test_v1_quota_on_the_processes_own_cgroup(self):
+        root = self._cgroup({
+            "cpu/docker/abc/cpu.cfs_quota_us": "200000\n",
+            "cpu/docker/abc/cpu.cfs_period_us": "100000\n",
+        })
+        proc = self._proc_cgroup("4:cpu,cpuacct:/docker/abc\n")
+        self.assertEqual(headless._cgroup_cpu_quota_count(root, proc), 2)
+
+    def test_unreadable_proc_cgroup_falls_back_to_the_root(self):
+        root = self._cgroup({"cpu.max": "400000 100000\n"})
+        self.assertEqual(
+            headless._cgroup_cpu_quota_count(root, "/nonexistent/cgroup"), 4)
+
 
 class TestMergeIntoRulesJson(unittest.TestCase):
     def setUp(self):

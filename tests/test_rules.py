@@ -209,6 +209,29 @@ class TestR3HostCapacity(unittest.TestCase):
         match = rules.prefilter_wide_run(ctx_bash("npm test"), cpus=4)
         self.assertIn("4 shared cores", match.detail)
 
+    def test_ctx_cpus_pins_the_count_for_a_caller_holding_only_a_ctx(self):
+        # The eval harness pins capacity this way, so a case's label does not
+        # depend on the machine scoring it (Codex, PR #2).
+        ctx = ctx_bash("pytest")
+        ctx["cpus"] = 4
+        self.assertIsNotNone(rules.prefilter_wide_run(ctx))
+        ctx["cpus"] = 12
+        self.assertIsNone(rules.prefilter_wide_run(ctx))
+
+    def test_capacity_is_not_probed_for_a_command_that_cannot_match(self):
+        # The probe reads cgroup files, and this runs on every Bash call.
+        from unittest import mock
+        with mock.patch("airlock.rules.cpu_count") as probe:
+            self.assertIsNone(rules.prefilter_wide_run(ctx_bash("git status")))
+            self.assertIsNone(rules.prefilter_wide_run(ctx_bash("ls -la")))
+        probe.assert_not_called()
+
+    def test_capacity_is_probed_once_for_a_matching_command(self):
+        from unittest import mock
+        with mock.patch("airlock.rules.cpu_count", return_value=4) as probe:
+            self.assertIsNotNone(rules.prefilter_wide_run(ctx_bash("make -j")))
+        self.assertEqual(probe.call_count, 1)
+
     def test_r4_long_work(self):
         for c in ("pnpm install", "npx playwright install chromium", "docker build -t x .", "uv sync"):
             rows = fired(ctx_bash(c), "R4-long-work-bare-shell")
