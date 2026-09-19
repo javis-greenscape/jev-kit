@@ -158,6 +158,12 @@ def field_context(goal, action, page, history):
 
 
 def field_text(context):
+    if os.environ.get("TEXT_MODEL_PROVIDER") == "claude-standing":
+        # Standing-process adapter: one long-lived `claude` CLI child instead of a spawn per
+        # call. See jev_ultrafast/text_model_claude_standing.py and SPIKE-NOTES.md.
+        from .text_model_claude_standing import field_text as claude_standing_field_text
+
+        return claude_standing_field_text(context)
     if os.environ.get("TEXT_MODEL_PROVIDER") == "claude-cli":
         # Spike-only adapter: no Anthropic/OpenRouter key on this box, OAuth via `claude` CLI instead.
         # See jev_ultrafast/text_model_claude.py and SPIKE-NOTES.md.

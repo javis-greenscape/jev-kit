@@ -409,3 +409,153 @@ switching to a link that is actually offered fixed it on the first retry, no cod
   a real OpenAI-compatible key for `TEXT_MODEL_API_KEY` (OpenRouter/DeepSeek) to use the
   adapter this project already ships instead of the Claude-CLI one — not a further change to the
   agent loop itself, which needs nothing more done to it.
+
+## Standing text model (2026-09-19, follow-up)
+
+Built to remove the per-call CLI-spawn cost identified above. **Result: the standing process
+does what it says — no repeated CLI startup, no repeated hook overhead — but it does not reach
+"model time only" for a realistic TYPE_TEXT call, because the CLI mode required to keep a
+session alive (`--input-format stream-json`) forces a heavier response path than the plain
+`-p "<prompt>"` mode the original per-call adapter used. This is a real, measured limit of
+this CLI version, not a defect in the adapter below.**
+
+### What the CLI supports (`claude --help`, this box's version 2.1.272)
+
+- `--input-format stream-json` / `--output-format stream-json`: confirmed present.
+  `--input-format=stream-json` **requires** `--output-format=stream-json`
+  (`Error: --input-format=stream-json requires output-format=stream-json.`), which in turn
+  **requires** `--verbose` (`Error: When using --print, --output-format=stream-json requires
+  --verbose.`) — the three are a package, not independently selectable.
+- `--system-prompt <prompt>`: present, replaces the default system prompt.
+- `--tools <tools...>`: `--tools ""` disables all tools (confirmed: `"tools":[]` in the
+  session's `init` event).
+- `--no-session-persistence`: present ("sessions will not be saved to disk and cannot be
+  resumed").
+- No `--disallowedTools`/`--allowedTools` needed once `--tools ""` is used.
+- **`--bare`** (skip hooks/LSP/plugin sync/CLAUDE.md discovery) looked like the fix for
+  hook overhead, but it hard-requires an Anthropic API-key credential
+  (`ANTHROPIC_API_KEY`/`ANTHROPIC_AUTH_TOKEN`/`apiKeyHelper`) and refuses OAuth
+  ("A non-OAuth Anthropic credential cannot satisfy the org pin" is the inverse error this repo's
+  managed settings produce when you try `--bare` under OAuth-only auth) — **not usable on this
+  box**, no key exists here.
+- **`--safe-mode`** was the one that worked: disables CLAUDE.md/skills/plugins/hooks
+  ("useful for troubleshooting a broken configuration") while auth/model selection/permissions
+  work normally, i.e. OAuth still works. Using it cut a trivial `Reply with exactly: OK` round
+  trip from **8.69s** (full hook stack, including a `SessionStart` hook dump) to **2.16s**
+  (`duration_ms: 1555`, `ttft_ms: 1512`) on the very first call of a fresh child.
+- No flag disables extended thinking outright. `--effort {low,medium,high,xhigh,max}` exists
+  and does change the thinking budget (see below) but there is no `--effort none`/off.
+
+### Prototype measurements (hand-rolled Python, `subprocess.Popen` + a persistent reader thread)
+
+- Spawn (`Popen(...)` returning): **~1ms** — process creation itself is not the cost.
+- First request on a fresh `--safe-mode` child, trivial prompt (`Reply with exactly: OK`):
+  **1.86s** wall (`duration_ms=1495`).
+- Requests 2-15 on the same child, trivial short prompts, stayed **flat at 850-990ms** each —
+  no growth in *latency* across 15 turns of session-history accumulation. **Cost did climb**
+  steadily (`total_cost_usd` 0.0017 → 0.0216 over 15 calls, i.e. ~13x cumulative), because every
+  earlier turn's tokens are still billed each turn — this is the reason to recycle, not latency.
+- A genuinely long-lived child (2s gap between requests, unrelated requests) answered correctly
+  each time with no session drop: `req1 1326ms`, `req2 2270ms` (after a 2s idle gap), `req3
+  819ms` — confirms the child really does sit and wait for the next stdin line rather than
+  needing to be re-spawned.
+- **The catch, found only once realistic (large) TYPE_TEXT contexts were used**: thinking-token
+  counts balloon with input size/complexity under `--output-format stream-json`, and that
+  dominates latency:
+  - Trivial prompt, `--safe-mode` alone: 68 thinking tokens, 1.5s.
+  - A realistic TYPE_TEXT context (goal + field + ~6000-char page text, same shape as
+    `field_context()`'s real output): **7.2s** (`duration_ms=7216`, 524 thinking tokens).
+  - Same realistic context with `--effort low` added: **5.9-6.6s** (465-688 thinking tokens
+    depending on run) — `--effort` reduces the budget somewhat but does not remove it.
+  - **The same prompt through the *original* plain `-p "<prompt>"` adapter (no
+    `--input-format`/`--output-format` at all) measured 3.998s** for the identical
+    goal/field/page context — i.e. **plain-text `-p` mode is faster than stream-json mode for
+    the same model, same prompt, same content**, apparently because plain-text `-p` does not
+    force the heavier structured-response path that `--output-format json` / `stream-json` does
+    (the original spike already flagged the `--output-format json` mode as "6.58s ... invokes a
+    heavier reasoning path" vs plain text's 2.7s for a trivial prompt; the same gap holds at
+    realistic prompt size and is the actual bottleneck here, not CLI startup).
+
+### Design built (`jev_ultrafast/text_model_claude_standing.py`)
+
+- One long-lived `claude -p --model haiku --input-format stream-json --output-format
+  stream-json --verbose --safe-mode --no-session-persistence --effort low --system-prompt "..."
+  --tools ""` child per `_Child` instance. System prompt: "Return only the text to type into the
+  field: no quotes, no JSON, no markdown, no explanation... If no correct value can be
+  determined, respond with exactly: NONE" (plain text, not JSON, since the multi-turn mode does
+  not offer a `response_format`-style guarantee either).
+- Each request is one `{"type":"user","message":{...}}` line on stdin; a dedicated per-child
+  reader thread drains stdout into a `queue.Queue`, filtering for `"type":"result"` events, so a
+  timed-out or slow request can never block or corrupt the next one (the child is unconditionally
+  retired on any request failure — a late answer sitting in an abandoned child's queue is never
+  read by anything).
+- **Recycling**: `TEXT_MODEL_RECYCLE_AFTER` (default 20) requests per child. Measured: on
+  reaching the threshold, a replacement child is spawned in a background thread immediately;
+  the *next* request is served by whichever child is ready (old child if the replacement hasn't
+  finished starting yet, new child otherwise) — verified with `TEXT_MODEL_RECYCLE_AFTER=3`:
+  requests 1-3 on child A, request 4 still on child A (replacement not ready yet), requests 5-6
+  on child B (`requests_served` resets to 1) — no request stalled waiting for the new child.
+- **Fallback**: `TEXT_MODEL_TIMEOUT` (default 15s) per request. On a `TimeoutError` or a dead
+  child (`RuntimeError`), the failing child is retired, a replacement is queued in the
+  background, and the *single failing request* is retried once through the untouched per-call
+  adapter (`text_model_claude.field_text`), with a `logger.warning` noting the fallback.
+- **Lifecycle**: `warm()` eagerly spawns the default child (call once at agent start-up).
+  `shutdown()`/an `atexit` hook terminate every tracked child (`stdin.close()` then
+  `terminate()`, `kill()` after a 3s grace period). `StandingTextModel` is also a context
+  manager (`with StandingTextModel() as m: ...`) for explicit scoping instead of the module-level
+  default. Selected via `TEXT_MODEL_PROVIDER=claude-standing` (mirrors the existing
+  `claude-cli` branch in `model.py:field_text`).
+- Verified no orphaned `claude -p` processes after a standalone smoke test
+  (`python -m jev_ultrafast.text_model_claude_standing`) and after the full agent run below:
+  `pgrep -af 'claude -p'` before/after diffed clean (the only matches throughout were pre-existing,
+  unrelated `workerS` background-agent sessions, never touched).
+
+### End-to-end re-run, README Wikipedia goal, `TEXT_MODEL_PROVIDER=claude-standing`
+
+Same setup as the earlier end-to-end run (headless Chromium via `scripts/launch_chromium.js`,
+`BU_CDP_URL=http://127.0.0.1:9333`, one instance, closed after use — confirmed via `pgrep -a
+chrom` returning nothing afterward), plus `examples/run.py` now calls
+`text_model_claude_standing.warm()` before opening the `Agent` when
+`TEXT_MODEL_PROVIDER=claude-standing` is set (agent/browser/model wiring unchanged otherwise).
+
+- **Reached the goal** both times: final URL
+  `.../wiki/G%C3%B6del%27s_incompleteness_theorems`, status `done`.
+- **Wall time: 11.0-12.6s** (`time uv run python examples/run.py ...`), vs the earlier
+  `claude-cli` run's **9.3-9.8s** — **slower**, not faster, end to end.
+- **TYPE_TEXT latency: 6.55s** (`history[0]["text_latency_ms"]`, with `--effort low` already
+  applied) vs the earlier per-call adapter's **4761ms** — also worse, confirmed by the isolated
+  prototype numbers above (stream-json mode is the slower response path at this prompt size,
+  independent of CLI-spawn cost).
+- No retries, no fallback triggered, no `StalePage` — the mechanism itself worked correctly on
+  the first attempt each time; the result is a genuine latency regression versus the simpler
+  per-call adapter, not a bug.
+
+### Verdict and limits
+
+- **The standing-process mechanism (recycling, fallback, warm, cleanup) is built correctly and
+  verified**: multi-turn session confirmed stable across an idle gap, recycling swaps children
+  without stalling a request, a dead/slow child falls back once and self-heals in the
+  background, and no process is ever orphaned.
+- **It does not deliver the intended latency win on this CLI version.** The premise was "per-call
+  cost is mostly CLI start-up, so a standing process should cost roughly model time only." That
+  premise holds for CLI start-up and hook overhead (measured: ~0.6-1.5s eliminated) but not for
+  the dominant cost at realistic prompt sizes, which is Haiku's extended thinking under
+  `--output-format stream-json` — a response mode that `--input-format stream-json` mandates and
+  that plain `-p` text mode does not use. `--effort low` shrinks but does not remove this
+  (13.2s → 6.5-7.2s on the realistic context; still above the 4.3-4.8s plain-text baseline).
+  **No CLI flag was found to disable extended thinking outright** (`--help` has no
+  `--effort none`/`--no-thinking`/equivalent; `--bare` would sidestep the whole default agent
+  harness but requires an API-key credential this box does not have).
+- **This was not chased further** (no attempt at the Claude Agent SDK for Python, no attempt to
+  reverse-engineer an undocumented thinking-disable setting): the brief's trigger for that
+  escalation was stream-json mode *not working*, and it does work — it is simply the wrong lever
+  for this specific bottleneck, which is a report-and-stop finding rather than a build-more one.
+  If the extra ~2s per fill matters enough to chase further, the next things to actually try are
+  (a) the Agent SDK's `query()`/`ClaudeSDKClient` streaming input, in case it exposes a thinking
+  budget of zero that the CLI's flag surface does not, or (b) accepting the per-call `claude-cli`
+  adapter (4.3-4.8s, already built, already the fallback path here) as the practical floor on
+  this box until a real OpenAI-compatible key is available for `TEXT_MODEL_API_KEY`.
+- **Recommendation**: keep `text_model_claude_standing.py` in the tree (it is correct, safe, and
+  a net win if a future CLI version exposes a way to skip extended thinking under stream-json),
+  but do not make it the default — `TEXT_MODEL_PROVIDER=claude-cli` (or a real API key) remains
+  the faster option on this box today.
