@@ -41,7 +41,8 @@ NEW_HOOK_COMMAND = "%s %s" % (PYTHON3, NEW_HOOK)
 
 
 def _run(path, apply_=False, belay=False, function_hooks=False,
-         belay_wrapper="/nonexistent/airlock-belay-run"):
+         belay_wrapper="/nonexistent/airlock-belay-run",
+         session_check=False, session_hook=None):
     env = dict(os.environ)
     env["NEW_HOOK"] = NEW_HOOK
     env["NEW_HOOK_COMMAND"] = NEW_HOOK_COMMAND
@@ -49,6 +50,12 @@ def _run(path, apply_=False, belay=False, function_hooks=False,
     env["BELAY"] = "1" if belay else "0"
     env["BELAY_WRAPPER"] = belay_wrapper
     env["FUNCTION_HOOKS"] = "1" if function_hooks else "0"
+    # Off unless a test asks for it, so every pre-existing assertion here is
+    # still about the PreToolUse entry alone.
+    env["SESSION_CHECK"] = "1" if session_check else "0"
+    env["SESSION_CHECK_HOOK"] = session_hook or ""
+    env["SESSION_CHECK_COMMAND"] = (
+        "%s %s" % (PYTHON3, session_hook)) if session_hook else ""
     return subprocess.run([sys.executable, str(WIRE), str(path)],
                           capture_output=True, text=True, env=env, timeout=30)
 
@@ -333,3 +340,206 @@ class TestFunctionHooksFlag(WireTestBase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestSessionCheckEntry(WireTestBase):
+    """The SessionStart session check: a DEFAULT component, so wiring it has
+    to be as careful as wiring the guard itself.
+
+    It is added on a first install, it is idempotent, it lands under
+    SessionStart and nowhere else, it never disturbs the PreToolUse entry, and
+    a pointer at a file that is not there is SKIPPED rather than registered --
+    a SessionStart hook that fails would print an error at the top of every
+    single session, which is the exact opposite of what this component is for.
+    """
+
+    def _session_hook(self):
+        """A real file, because _wire.py refuses to register a missing one."""
+        tmp = tempfile.NamedTemporaryFile("w", suffix=".py", delete=False)
+        tmp.write("# stand-in for hooks/airlock_session_check.py\n")
+        tmp.close()
+        self.addCleanup(os.unlink, tmp.name)
+        # The pattern is anchored on the real name, so the path has to end in
+        # it for the repoint/idempotency checks to see it at all.
+        target = os.path.join(os.path.dirname(tmp.name), "hooks")
+        os.makedirs(target, exist_ok=True)
+        path = os.path.join(target, "airlock_session_check.py")
+        with open(path, "w") as f:
+            f.write("# stand-in\n")
+        self.addCleanup(lambda: os.path.exists(path) and os.unlink(path))
+        return path
+
+    def _session_commands(self, path):
+        data = self._data(path)
+        out = []
+        for entry in (data.get("hooks") or {}).get("SessionStart") or []:
+            for h in entry.get("hooks") or []:
+                out.append(h["command"])
+        return out
+
+    def test_a_first_install_adds_it(self):
+        hook = self._session_hook()
+        path = self._file(_settings(NEW_HOOK_COMMAND))
+        _run(path, apply_=True, session_check=True, session_hook=hook)
+        self.assertEqual(self._session_commands(path), ["%s %s" % (PYTHON3, hook)])
+
+    def test_the_pretooluse_entry_is_untouched(self):
+        hook = self._session_hook()
+        path = self._file(_settings(NEW_HOOK_COMMAND))
+        _run(path, apply_=True, session_check=True, session_hook=hook)
+        self.assertEqual(self._command(path), NEW_HOOK_COMMAND)
+
+    def test_it_is_idempotent(self):
+        hook = self._session_hook()
+        path = self._file(_settings(NEW_HOOK_COMMAND))
+        _run(path, apply_=True, session_check=True, session_hook=hook)
+        before = Path(path).read_text()
+        result = _run(path, apply_=True, session_check=True, session_hook=hook)
+        self.assertEqual(Path(path).read_text(), before)
+        self.assertIn("already wired", result.stdout)
+
+    def test_apply_backs_the_file_up_first(self):
+        hook = self._session_hook()
+        path = self._file(_settings(NEW_HOOK_COMMAND))
+        _run(path, apply_=True, session_check=True, session_hook=hook)
+        self.assertEqual(len(self._backups(path)), 1)
+
+    def test_print_changes_nothing_but_says_what_it_would_do(self):
+        hook = self._session_hook()
+        path = self._file(_settings(NEW_HOOK_COMMAND))
+        before = Path(path).read_text()
+        result = _run(path, session_check=True, session_hook=hook)
+        self.assertEqual(Path(path).read_text(), before)
+        self.assertIn("SessionStart", result.stdout)
+
+    def test_unrelated_hooks_and_keys_survive(self):
+        hook = self._session_hook()
+        path = self._file(json.dumps({
+            "model": "opus",
+            "hooks": {
+                "PreToolUse": [{"matcher": "*", "hooks": [
+                    {"type": "command", "command": NEW_HOOK_COMMAND, "timeout": 5}]}],
+                "SessionStart": [{"matcher": "*", "hooks": [
+                    {"type": "command", "command": "/usr/local/bin/mine"}]}],
+            }}))
+        _run(path, apply_=True, session_check=True, session_hook=hook)
+        data = self._data(path)
+        self.assertEqual(data["model"], "opus")
+        self.assertIn("/usr/local/bin/mine", self._session_commands(path))
+        self.assertIn("%s %s" % (PYTHON3, hook), self._session_commands(path))
+
+    def test_a_missing_hook_file_is_skipped_not_registered(self):
+        path = self._file(_settings(NEW_HOOK_COMMAND))
+        result = _run(path, apply_=True, session_check=True,
+                      session_hook="/nonexistent/hooks/airlock_session_check.py")
+        self.assertEqual(self._session_commands(path), [])
+        self.assertIn("skipping", result.stdout)
+
+    def test_a_stale_session_check_path_is_repointed(self):
+        hook = self._session_hook()
+        path = self._file(json.dumps({"hooks": {
+            "PreToolUse": [{"matcher": "*", "hooks": [
+                {"type": "command", "command": NEW_HOOK_COMMAND, "timeout": 5}]}],
+            "SessionStart": [{"matcher": "*", "hooks": [
+                {"type": "command",
+                 "command": "%s /old/release/hooks/airlock_session_check.py" % PYTHON3,
+                 "timeout": 5}]}],
+        }}))
+        _run(path, apply_=True, session_check=True, session_hook=hook)
+        self.assertEqual(self._session_commands(path), ["%s %s" % (PYTHON3, hook)])
+
+    def test_repointing_the_guard_does_not_touch_the_session_check(self):
+        # The two patterns must not overlap: `hooks/airlock_session_check.py`
+        # does not end in `hooks/airlock.py`.
+        hook = self._session_hook()
+        session_cmd = "%s %s" % (PYTHON3, hook)
+        path = self._file(json.dumps({"hooks": {
+            "PreToolUse": [{"matcher": "*", "hooks": [
+                {"type": "command",
+                 "command": "%s /old/hooks/airlock.py" % PYTHON3, "timeout": 5}]}],
+            "SessionStart": [{"matcher": "*", "hooks": [
+                {"type": "command", "command": session_cmd, "timeout": 5}]}],
+        }}))
+        _run(path, apply_=True, session_check=True, session_hook=hook)
+        self.assertEqual(self._command(path), NEW_HOOK_COMMAND)
+        self.assertEqual(self._session_commands(path), [session_cmd])
+
+    def test_a_brand_new_settings_file_gets_both_entries(self):
+        hook = self._session_hook()
+        path = self._missing_path()
+        _run(path, apply_=True, session_check=True, session_hook=hook)
+        data = self._data(path)
+        self.assertEqual(
+            data["hooks"]["PreToolUse"][0]["hooks"][0]["command"], NEW_HOOK_COMMAND)
+        self.assertEqual(self._session_commands(path), ["%s %s" % (PYTHON3, hook)])
+
+    def test_session_check_off_adds_nothing(self):
+        hook = self._session_hook()
+        path = self._file(_settings(NEW_HOOK_COMMAND))
+        _run(path, apply_=True, session_check=False, session_hook=hook)
+        self.assertEqual(self._session_commands(path), [])
+
+
+class TestSessionCheckOnWindows(WireTestBase):
+    """The Windows shape, by injection -- HOOK_COMMAND_QUOTED=1, the launcher
+    spelling, and PowerShell's call operator."""
+
+    WIN_LAUNCHER = "C:\\Users\\Someone\\AppData\\Local\\airlock\\airlock-hook.py"
+    WIN_SESSION = "C:\\Users\\Someone\\AppData\\Local\\airlock\\airlock-session-check.py"
+    WIN_PY = "C:\\Windows\\py.exe"
+
+    def _win_run(self, path, session_hook, apply_=True, session_check=True):
+        env = dict(os.environ)
+        env["NEW_HOOK"] = self.WIN_LAUNCHER
+        env["NEW_HOOK_COMMAND"] = '"%s" "%s"' % (self.WIN_PY, self.WIN_LAUNCHER)
+        env["APPLY"] = "1" if apply_ else "0"
+        env["BELAY"] = "0"
+        env["BELAY_WRAPPER"] = ""
+        env["FUNCTION_HOOKS"] = "0"
+        env["HOOK_COMMAND_QUOTED"] = "1"
+        env["SESSION_CHECK"] = "1" if session_check else "0"
+        env["SESSION_CHECK_HOOK"] = session_hook
+        env["SESSION_CHECK_COMMAND"] = '& "%s" "%s"' % (self.WIN_PY, session_hook)
+        return subprocess.run([sys.executable, str(WIRE), str(path)],
+                              capture_output=True, text=True, env=env, timeout=30)
+
+    def _session_commands(self, path):
+        data = self._data(path)
+        out = []
+        for entry in (data.get("hooks") or {}).get("SessionStart") or []:
+            for h in entry.get("hooks") or []:
+                out.append(h["command"])
+        return out
+
+    def test_the_windows_command_shape_is_added_verbatim(self):
+        # The file has to exist for _wire.py to register it, so point at one
+        # that does while keeping the Windows-shaped NAME.
+        tmpdir = tempfile.mkdtemp()
+        self.addCleanup(lambda: __import__("shutil").rmtree(tmpdir, ignore_errors=True))
+        session_hook = os.path.join(tmpdir, "airlock-session-check.py")
+        with open(session_hook, "w") as f:
+            f.write("# stand-in\n")
+        path = self._file(json.dumps({"hooks": {"PreToolUse": [
+            {"matcher": "*", "hooks": [
+                {"type": "command",
+                 "command": '"%s" "%s"' % (self.WIN_PY, self.WIN_LAUNCHER),
+                 "timeout": 5}]}]}}))
+        self._win_run(path, session_hook)
+        self.assertEqual(self._session_commands(path),
+                         ['& "%s" "%s"' % (self.WIN_PY, session_hook)])
+
+    def test_it_is_idempotent_on_windows_too(self):
+        tmpdir = tempfile.mkdtemp()
+        self.addCleanup(lambda: __import__("shutil").rmtree(tmpdir, ignore_errors=True))
+        session_hook = os.path.join(tmpdir, "airlock-session-check.py")
+        with open(session_hook, "w") as f:
+            f.write("# stand-in\n")
+        path = self._file(json.dumps({"hooks": {"PreToolUse": [
+            {"matcher": "*", "hooks": [
+                {"type": "command",
+                 "command": '"%s" "%s"' % (self.WIN_PY, self.WIN_LAUNCHER),
+                 "timeout": 5}]}]}}))
+        self._win_run(path, session_hook)
+        before = Path(path).read_text()
+        self._win_run(path, session_hook)
+        self.assertEqual(Path(path).read_text(), before)

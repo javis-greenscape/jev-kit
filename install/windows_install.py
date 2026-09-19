@@ -6,10 +6,10 @@
     py -3 install\\windows_install.py --wire
 
 What it installs is deliberately the CORE and nothing else: the PreToolUse
-guard in shadow mode, the rules table, the key file, the file-search steer
-pointing at voidtools Everything, the health check, this installer, the
-doctor and the uninstaller. Out of scope on Windows, and not installed by
-anything here: the warm-connection daemon (it listens on a Unix domain
+guard in shadow mode, the SessionStart session check, the rules table, the
+key file, the file-search steer pointing at voidtools Everything, the health
+check, this installer, the doctor and the uninstaller. Out of scope on
+Windows, and not installed by anything here: the warm-connection daemon (it listens on a Unix domain
 socket, which Windows does not have -- the client falls back to a direct
 HTTPS call per judgement, about 0.9 s rather than about 0.3 s warm), belay,
 compaction, the browser agent, code review and the tuning loop.
@@ -24,10 +24,13 @@ Steps, in order:
   2. point `current` at it -- a directory junction if the volume allows one,
      and a `current.txt` text pointer always (see install/windows_common.py
      for why both, and why settings.json points at neither)
-  3. write the stable launcher %LOCALAPPDATA%\\airlock\\airlock-hook.py
+  3. write the two stable launchers, %LOCALAPPDATA%\\airlock\\airlock-hook.py
+     (the PreToolUse guard) and airlock-session-check.py (the SessionStart
+     check that tells you when the guard has stopped judging)
   4. write the mode file: shadow. Arming is a separate, human decision
   5. with --wire: back up %USERPROFILE%\\.claude\\settings.json to a
-     timestamped sibling, then add the PreToolUse hook
+     timestamped sibling, then add the PreToolUse hook and the SessionStart
+     session check, in one edit and one backup
   6. with --schedule-health: register an hourly Task Scheduler health check
 """
 import argparse
@@ -55,6 +58,9 @@ def parse_args(argv=None):
                     help="an extra settings.json to wire; repeatable")
     ap.add_argument("--schedule-health", action="store_true",
                     help="register an hourly health check with Task Scheduler")
+    ap.add_argument("--no-session-check", action="store_true",
+                    help="do not register the SessionStart session check "
+                         "(it is part of the default set)")
     ap.add_argument("--source", default=wc.REPO_ROOT,
                     help="the checkout to deploy (default: this one)")
     return ap.parse_args(argv)
@@ -66,6 +72,8 @@ def plan(args):
     python_exe = wc.find_python()
     git_bash = wc.find_git_bash()
     launcher = os.path.join(root, wc.LAUNCHER_NAME)
+    session_launcher = os.path.join(root, wc.SESSION_LAUNCHER_NAME)
+    session_check = not args.no_session_check
     return {
         "install_root": root,
         "releases_dir": os.path.join(root, wc.RELEASES_NAME),
@@ -82,6 +90,10 @@ def plan(args):
         "shell": "bash (Git for Windows)" if git_bash else "powershell (no Git Bash found)",
         "hook_command": (wc.hook_command(python_exe, launcher, git_bash)
                          if python_exe else None),
+        "session_launcher": session_launcher,
+        "session_check": session_check,
+        "session_command": (wc.hook_command(python_exe, session_launcher, git_bash)
+                            if (python_exe and session_check) else None),
         "settings_files": (args.settings or wc.default_settings_files()),
         "mode": "shadow",
         "wire": bool(args.wire),
@@ -148,6 +160,12 @@ def do_install(args, p):
 
     launcher = wc.write_launcher(root)
     actions.append("launcher written: %s" % launcher)
+    if p["session_check"]:
+        session_launcher = wc.write_session_launcher(root)
+        actions.append("session-check launcher written: %s" % session_launcher)
+    else:
+        session_launcher = None
+        actions.append("session check: skipped (--no-session-check)")
 
     mode_file = os.path.join(p["config_dir"], "mode")
     if not os.path.isfile(mode_file):
@@ -167,15 +185,24 @@ def do_install(args, p):
         if not p["python"]:
             actions.append("WIRE SKIPPED: no interpreter to put in the hook command")
         else:
-            for path, changed in wc.wire(p["settings_files"], launcher, p["hook_command"]):
+            for path, changed in wc.wire(
+                    p["settings_files"], launcher, p["hook_command"],
+                    session_hook_path=session_launcher,
+                    session_hook_cmd=p["session_command"]):
                 actions.append("settings.json %s: %s"
                                % (path, "edited (backed up first)" if changed else "no change"))
     else:
-        actions.append("settings.json NOT touched (pass --wire). The entry to add:")
-        actions.append(json.dumps({"hooks": {"PreToolUse": [
+        actions.append("settings.json NOT touched (pass --wire). The entries to add:")
+        entry = {"hooks": {"PreToolUse": [
             {"matcher": "*", "hooks": [{"type": "command",
                                         "command": p["hook_command"],
-                                        "timeout": 5}]}]}}, indent=2))
+                                        "timeout": 5}]}]}}
+        if p["session_check"]:
+            entry["hooks"]["SessionStart"] = [
+                {"matcher": "*", "hooks": [{"type": "command",
+                                            "command": p["session_command"],
+                                            "timeout": 5}]}]
+        actions.append(json.dumps(entry, indent=2))
 
     if args.schedule_health:
         if not p["python"]:
@@ -201,7 +228,8 @@ def main(argv=None):
 
     print("airlock: native Windows install")
     for key in ("install_root", "config_dir", "state_dir", "key_file",
-                "python", "shell", "hook_command", "mode", "daemon"):
+                "python", "shell", "hook_command", "session_command", "mode",
+                "daemon"):
         print("  %-14s %s" % (key + ":", p[key]))
     print("  %-14s %s" % ("settings:", ", ".join(p["settings_files"])))
 

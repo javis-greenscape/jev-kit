@@ -8,6 +8,7 @@
 #   - ONE REAL DENY and ONE REAL ALLOW through the actual hook process, in
 #     enforce mode, against a throwaway HOME, so nothing touches the real log
 #     or the real loop-protection state
+#   - the SessionStart session check, against a throwaway HOME, timed
 #   - a plocate query against the real index
 #   - a daemon ping over the Unix socket
 #
@@ -115,6 +116,116 @@ sys.exit(0 if d.get("permissionDecision") == "deny" else 1)
 
   rm -rf "$TMPHOME"
   trap - EXIT
+fi
+
+# ---------------------------------------------------------------------------
+head_ "Session check (SessionStart)"
+
+# Two separate questions, and both matter. Is the entry REGISTERED -- a hook
+# nobody calls is not a check -- and does it RUN inside its budget?
+#
+# The run is against a THROWAWAY HOME on purpose. This hook de-duplicates
+# itself: showing a warning records that it was shown, and running it against
+# the real state directory here would consume today's warning and leave the
+# person's next real session silent about a genuine fault.
+SESSION_HOOK="$LIVE/hooks/airlock_session_check.py"
+if [ ! -f "$SESSION_HOOK" ]; then
+  skip "no session check at $SESSION_HOOK (install/install.sh --session-check)"
+else
+  SC_HOME="$(mktemp -d)"
+  SC_EVENT='{"session_id":"doctor-session","hook_event_name":"SessionStart","source":"startup","cwd":"/tmp"}'
+  SC_START="$("$PY" -c 'import time;print(time.time())')"
+  # HOME alone is not enough: install/config.env may have exported
+  # AIRLOCK_CONFIG_DIR / AIRLOCK_STATE_DIR / AIRLOCK_HOME, and any one of
+  # those would drag the run back to the real state directory.
+  sc_out="$(printf '%s' "$SC_EVENT" | env -u AIRLOCK_CONFIG_DIR -u AIRLOCK_STATE_DIR \
+    -u PLUMBLINE_CONFIG_DIR -u PLUMBLINE_STATE_DIR -u JEV_GUARD_CONFIG_DIR \
+    -u JEV_GUARD_STATE_DIR -u PLUMBLINE_HOME -u JEV_HOME \
+    HOME="$SC_HOME" AIRLOCK_HOME="$SC_HOME/.local/share/airlock" \
+    "$PY" "$SESSION_HOOK" 2>/dev/null)"
+  SC_RC=$?
+  SC_MS="$("$PY" -c "import sys,time;print(int((time.time()-float(sys.argv[1]))*1000))" "$SC_START")"
+  rm -rf "$SC_HOME"
+  if [ "$SC_RC" -ne 0 ]; then
+    fail "session check exited $SC_RC; it must always exit 0 (fail open)"
+  elif [ "$SC_MS" -gt 1500 ]; then
+    fail "session check took ${SC_MS}ms end to end; its own budget is 300ms plus interpreter start-up"
+  else
+    pass "session check ran in ${SC_MS}ms (budget 300ms plus interpreter start-up)"
+  fi
+  if [ -n "$sc_out" ]; then
+    if printf '%s' "$sc_out" | "$PY" -c '
+import json,sys
+d = json.load(sys.stdin)
+assert isinstance(d.get("systemMessage"), str) and d["systemMessage"]
+h = d["hookSpecificOutput"]
+assert h.get("hookEventName") == "SessionStart"
+assert isinstance(h.get("additionalContext"), str)
+' 2>/dev/null; then
+      pass "session check output is a valid SessionStart hook result"
+      printf '        %s\n' "$(printf '%s' "$sc_out" | "$PY" -c 'import json,sys;print(json.load(sys.stdin)["systemMessage"].splitlines()[0])' 2>/dev/null)"
+      printf '        (that is against a THROWAWAY HOME with no key, so a message here is expected)\n'
+    else
+      fail "session check printed something that is not a valid hook result: ${sc_out:0:200}"
+    fi
+  else
+    pass "session check was silent (nothing wrong to report on a throwaway HOME)"
+  fi
+
+  # Wiring. Paths are never guessed for an EDIT, but this is a read-only
+  # report, so every account tree on the box is worth looking at.
+  #
+  # The verdict is deliberately per-FILE and relative to the guard. A file
+  # that registers the PreToolUse guard but NOT the session check is a
+  # half-wired install -- almost always a machine wired before this component
+  # existed -- and that is a real fault worth a FAIL. A file with neither is
+  # simply not wired, which is a supported state (`--wire` is opt-in), so it
+  # is a skip with the command to fix it.
+  SC_WIRED=0
+  SC_HALF=0
+  SC_ANY=0
+  for f in "$HOME"/.claude*/settings.json "$HOME"/.claude*/settings.local.json; do
+    [ -f "$f" ] || continue
+    SC_ANY=1
+    SC_STATE="$("$PY" - "$f" <<'PYSC' 2>/dev/null || echo error
+import json, sys
+
+
+def commands(data, event):
+    out = []
+    for entry in (data.get("hooks") or {}).get(event) or []:
+        if not isinstance(entry, dict):
+            continue
+        for h in entry.get("hooks") or []:
+            if isinstance(h, dict) and isinstance(h.get("command"), str):
+                out.append(h["command"])
+    return out
+
+
+data = json.load(open(sys.argv[1]))
+guard = any("hooks/airlock.py" in c or "airlock-hook.py" in c
+            for c in commands(data, "PreToolUse"))
+session = any("airlock_session_check.py" in c or "airlock-session-check.py" in c
+              for c in commands(data, "SessionStart"))
+print("wired" if session else ("half" if guard else "absent"))
+PYSC
+)"
+    case "$SC_STATE" in
+      wired)
+        pass "wired: $f registers the SessionStart session check"
+        SC_WIRED=1 ;;
+      half)
+        fail "$f registers the PreToolUse guard but NOT the SessionStart session check. Fix: install/install.sh --guard --session-check --wire $f"
+        SC_HALF=1 ;;
+    esac
+  done
+  if [ "$SC_WIRED" = "0" ] && [ "$SC_HALF" = "0" ]; then
+    if [ "$SC_ANY" = "1" ]; then
+      skip "no settings.json under $HOME wires airlock at all (--wire is opt-in). To add both entries: install/install.sh --guard --session-check --wire <settings.json>"
+    else
+      skip "no settings.json found under $HOME to check the wiring in"
+    fi
+  fi
 fi
 
 # ---------------------------------------------------------------------------

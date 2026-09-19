@@ -16,6 +16,8 @@ check RUNS something and reads what came back:
     ever opened -- the guard blocks the string
   - a malformed payload, to prove the guard fails open
   - the kill switch, to prove it is a complete no-op
+  - the SessionStart session check, against a throwaway profile, timed and
+    with its output validated as a real hook result
   - the Windows file-search steer: that a `dir /s C:\\` classifies as
     disk-wide and that the suggestion it would print names es.exe
   - voidtools Everything: is es.exe there, is the index running
@@ -30,6 +32,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import windows_common as wc  # noqa: E402
@@ -190,6 +193,112 @@ def check_hook(r, hook, python_exe):
             shutil.rmtree(profile, ignore_errors=True)
         except Exception:
             pass
+
+
+def check_session_check(r, release, python_exe):
+    """The SessionStart session check: does it RUN, and is it REGISTERED?
+
+    Run against a throwaway profile, for the same reason the Linux doctor
+    does: the hook de-duplicates itself, so running it against the real state
+    directory would consume the warning that the person's next real session
+    was supposed to get.
+    """
+    r.head("Session check (SessionStart)")
+    hook = os.path.join(release, "hooks", "airlock_session_check.py") if release else None
+    if not hook or not os.path.isfile(hook):
+        r.skip("no session check in the live release (re-run the installer)")
+    elif not python_exe:
+        r.skip("no interpreter to run the session check with")
+    else:
+        profile = tempfile.mkdtemp(prefix="airlock-session-")
+        try:
+            started = time.time()
+            code, out, err = run_hook(
+                hook, python_exe,
+                {"session_id": "doctor-session", "hook_event_name": "SessionStart",
+                 "source": "startup", "cwd": "C:\\"},
+                {}, profile)
+            elapsed_ms = int((time.time() - started) * 1000)
+            if code != 0:
+                r.bad("session check exited %s; it must always exit 0 (fail open): %s"
+                      % (code, err[:200]))
+            elif elapsed_ms > 3000:
+                r.bad("session check took %d ms end to end; its own budget is "
+                      "300 ms plus interpreter start-up" % elapsed_ms)
+            else:
+                r.ok("session check ran in %d ms (budget 300 ms plus "
+                     "interpreter start-up)" % elapsed_ms)
+            if out:
+                try:
+                    data = json.loads(out)
+                    assert isinstance(data.get("systemMessage"), str) and data["systemMessage"]
+                    inner = data["hookSpecificOutput"]
+                    assert inner.get("hookEventName") == "SessionStart"
+                    assert isinstance(inner.get("additionalContext"), str)
+                except Exception:
+                    r.bad("session check printed something that is not a valid "
+                          "hook result: %r" % out[:200])
+                else:
+                    r.ok("session check output is a valid SessionStart hook result")
+                    print("        %s" % data["systemMessage"].splitlines()[0])
+                    print("        (throwaway profile with no key, so a message "
+                          "here is expected)")
+            else:
+                r.ok("session check was silent (nothing wrong to report on a "
+                     "throwaway profile)")
+        finally:
+            try:
+                import shutil
+                shutil.rmtree(profile, ignore_errors=True)
+            except Exception:
+                pass
+
+    # Registered? The verdict is per-FILE and relative to the guard, the same
+    # way the Linux doctor does it. A file that registers the PreToolUse guard
+    # but NOT the session check is a HALF-wired install -- almost always a
+    # machine wired before this component existed -- and that is a real fault.
+    # A file with neither is simply not wired, which is a supported state
+    # (`--wire` is opt-in), so it is a skip with the command to fix it.
+    def _commands(data, event):
+        out = []
+        for entry in (data.get("hooks") or {}).get(event) or []:
+            if not isinstance(entry, dict):
+                continue
+            for h in entry.get("hooks") or []:
+                if isinstance(h, dict) and isinstance(h.get("command"), str):
+                    out.append(h["command"])
+        return out
+
+    wired = False
+    half = False
+    seen = False
+    for path in wc.default_settings_files():
+        if not os.path.isfile(path):
+            continue
+        seen = True
+        try:
+            with open(path) as f:
+                data = json.load(f)
+        except Exception:
+            continue
+        lowered_session = [c.lower() for c in _commands(data, "SessionStart")]
+        lowered_guard = [c.lower() for c in _commands(data, "PreToolUse")]
+        if any(wc.SESSION_LAUNCHER_NAME.lower() in c or "airlock_session_check.py" in c
+               for c in lowered_session):
+            r.ok("wired: %s registers the SessionStart session check" % path)
+            wired = True
+        elif any(wc.LAUNCHER_NAME.lower() in c or "airlock.py" in c
+                 for c in lowered_guard):
+            r.bad("%s registers the PreToolUse guard but NOT the SessionStart "
+                  "session check. Fix: py -3 install\\windows_install.py --wire"
+                  % path)
+            half = True
+    if not wired and not half:
+        if seen:
+            r.skip("no settings.json wires airlock at all (--wire is opt-in). "
+                   "To add both entries: py -3 install\\windows_install.py --wire")
+        else:
+            r.skip("no settings.json found to check the wiring in")
 
 
 def check_paths(r):
@@ -363,6 +472,7 @@ def main(argv=None):
     print("  python:       %s" % (python_exe or "NONE FOUND"))
 
     check_hook(r, hook, python_exe)
+    check_session_check(r, release, python_exe)
     check_paths(r)
     check_file_search(r)
     check_daemon(r)

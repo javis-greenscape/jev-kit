@@ -12,8 +12,8 @@
 #   - it never installs the components that send more off the machine, or that
 #     need a system package or a second toolchain, by default: browser,
 #     review, shim, tuning and compaction are all opt-in
-#   - the DEFAULT set is: guard, daemon, monitoring, filesearch, claude-update,
-#     belay. `--belay` clones a pinned third-party repository (jev-belay), so a
+#   - the DEFAULT set is: guard, session-check, daemon, monitoring, filesearch,
+#     claude-update, belay. `--belay` clones a pinned third-party repository (jev-belay), so a
 #     default run does reach the network; use explicit component flags to avoid
 #     that
 #   - it never runs sudo, and never writes outside $HOME
@@ -43,10 +43,14 @@ airlock installer
 
 usage: $0 [components] [options]
 
-Components (default: --guard --daemon --monitoring --filesearch
-            --claude-update --belay):
+Components (default: --guard --session-check --daemon --monitoring
+            --filesearch --claude-update --belay):
   --guard        the PreToolUse guard itself: deploy a release, create the
                  config directory, print the settings.json edit
+  --session-check  the SessionStart check that tells YOU, at the moment you
+                 start a session, when the guard is not judging anything.
+                 On by default; --no-session-check leaves it out
+  --no-session-check  do not register the SessionStart entry
   --daemon       the warm-connection daemon (systemd user unit)
   --tuning       the unattended tuning timer
   --monitoring   the five-minute health check timer
@@ -85,6 +89,10 @@ EOF
 WANT_GUARD=0; WANT_DAEMON=0; WANT_TUNING=0; WANT_MONITORING=0
 WANT_FILESEARCH=0; WANT_BROWSER=0; WANT_REVIEW=0; WANT_SHIM=0
 WANT_CLAUDE_UPDATE=0; WANT_BELAY=0; WANT_COMPACTION=0
+# The session check rides with the guard: it is part of the DEFAULT set on
+# every platform and is not one of the flags that makes the default set go
+# away, because a guard installed without it is a guard whose death is silent.
+WANT_SESSION_CHECK=1
 ANY_COMPONENT=0
 # Whether filesearch was asked for BY NAME. A missing `plocate` is a hard
 # failure only then: aborting a whole default install over one optional
@@ -110,6 +118,8 @@ while [ "$#" -gt 0 ]; do
     --claude-update) WANT_CLAUDE_UPDATE=1; ANY_COMPONENT=1; shift ;;
     --belay) WANT_BELAY=1; ANY_COMPONENT=1; shift ;;
     --compaction) WANT_COMPACTION=1; ANY_COMPONENT=1; shift ;;
+    --session-check) WANT_SESSION_CHECK=1; shift ;;
+    --no-session-check) WANT_SESSION_CHECK=0; shift ;;
     --all)
       WANT_GUARD=1; WANT_DAEMON=1; WANT_TUNING=1; WANT_MONITORING=1
       WANT_FILESEARCH=1; WANT_BROWSER=1; WANT_REVIEW=1; WANT_SHIM=1
@@ -292,6 +302,7 @@ fi
 step "Plan"
 plan() { [ "$1" = "1" ] && echo "   install  $2" || true; }
 plan "$WANT_GUARD" "guard"
+plan "$WANT_SESSION_CHECK" "session-check (SessionStart hook)"
 plan "$WANT_DAEMON" "daemon"
 plan "$WANT_TUNING" "tuning"
 plan "$WANT_MONITORING" "monitoring"
@@ -467,6 +478,7 @@ if [ "$WANT_GUARD" = "1" ]; then
   fi
 
   HOOK="$AIRLOCK_HOME/current/hooks/airlock.py"
+  SESSION_CHECK_HOOK="$AIRLOCK_HOME/current/hooks/airlock_session_check.py"
   echo
   echo "   The settings.json edit. Register this ONE entry, matcher \"*\" -- the"
   echo "   rules table filters in code, far more cheaply than a regex matcher:"
@@ -488,10 +500,34 @@ if [ "$WANT_GUARD" = "1" ]; then
      }
 EOF
   echo
+  if [ "$WANT_SESSION_CHECK" = "1" ]; then
+    echo "   And the SessionStart entry. The guard fails open, so a dead guard is"
+    echo "   silent; this is what tells YOU, at the moment you start a session."
+    echo "   It prints nothing at all when everything is healthy:"
+    echo
+    cat <<EOF
+     {
+       "hooks": {
+         "SessionStart": [
+           {
+             "matcher": "*",
+             "hooks": [
+               { "type": "command",
+                 "command": "$PY $SESSION_CHECK_HOOK",
+                 "timeout": 5 }
+             ]
+           }
+         ]
+       }
+     }
+EOF
+    echo
+  fi
   if [ "${#WIRE_FILES[@]}" -gt 0 ]; then
     echo "   --wire given; applying to ${#WIRE_FILES[@]} file(s) (each backed up first):"
     WIRE_EXTRA_FLAGS=()
     [ "$WANT_BELAY" = "1" ] && WIRE_EXTRA_FLAGS+=("--belay")
+    [ "$WANT_SESSION_CHECK" = "1" ] || WIRE_EXTRA_FLAGS+=("--no-session-check")
     AIRLOCK_HOME="$AIRLOCK_HOME" JEV_HOME="$AIRLOCK_HOME" AIRLOCK_PYTHON3="$PY" \
       "$SCRIPT_DIR/wire.sh" --apply "${WIRE_EXTRA_FLAGS[@]}" "${WIRE_FILES[@]}"
   else

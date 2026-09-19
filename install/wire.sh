@@ -15,12 +15,15 @@ set -euo pipefail
 
 usage() {
   cat >&2 <<EOF
-usage: $0 --print|--apply [--belay] [--function-hooks] <settings.json> [...]
+usage: $0 --print|--apply [--belay] [--function-hooks] [--no-session-check]
+          <settings.json> [...]
 
-  --belay           also add the belay Stop hook (matcher "*", command
+  --belay            also add the belay Stop hook (matcher "*", command
                      <HOME>/bin/airlock-belay-run, timeout 25) -- only if
                      that wrapper file actually exists on this machine.
-  --function-hooks  also set env.CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1.
+  --function-hooks   also set env.CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1.
+  --session-check    add the SessionStart session check (the default).
+  --no-session-check leave the SessionStart entry out.
 EOF
   exit 2
 }
@@ -39,10 +42,16 @@ esac
 
 BELAY=0
 FUNCTION_HOOKS=0
+# The session check is a DEFAULT component on every platform: the guard fails
+# open, so a dead guard is silent, and on a workstation nothing outside the
+# machine can notice. --no-session-check opts out.
+SESSION_CHECK=1
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --belay) BELAY=1; shift ;;
     --function-hooks) FUNCTION_HOOKS=1; shift ;;
+    --session-check) SESSION_CHECK=1; shift ;;
+    --no-session-check) SESSION_CHECK=0; shift ;;
     --) shift; break ;;
     --*) usage ;;
     *) break ;;
@@ -68,8 +77,13 @@ if [ -z "$PY" ]; then
 fi
 NEW_HOOK_COMMAND="$PY $NEW_HOOK"
 
+SESSION_CHECK_HOOK="$AIRLOCK_HOME/current/hooks/airlock_session_check.py"
+SESSION_CHECK_COMMAND="$PY $SESSION_CHECK_HOOK"
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 AIRLOCK_HOME="$AIRLOCK_HOME" NEW_HOOK="$NEW_HOOK" NEW_HOOK_COMMAND="$NEW_HOOK_COMMAND" \
   APPLY="$APPLY" BELAY="$BELAY" BELAY_WRAPPER="$BELAY_WRAPPER" FUNCTION_HOOKS="$FUNCTION_HOOKS" \
+  SESSION_CHECK="$SESSION_CHECK" SESSION_CHECK_HOOK="$SESSION_CHECK_HOOK" \
+  SESSION_CHECK_COMMAND="$SESSION_CHECK_COMMAND" \
   python3 "$SCRIPT_DIR/_wire.py" "$@"

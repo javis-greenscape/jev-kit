@@ -7,12 +7,13 @@
 
 Reverses exactly what install/windows_install.py did, in the opposite order:
 
-  1. remove the airlock PreToolUse entry from every settings.json it is in,
+  1. remove airlock's PreToolUse entry AND its SessionStart session-check
+     entry from every settings.json they are in,
      BACKING EACH FILE UP to a timestamped sibling first. Only airlock's own
      entry is removed -- every other hook, key and value is left alone, and
      an empty `hooks` block left behind by the removal is cleaned up
   2. delete the Task Scheduler health-check task, if one was registered
-  3. remove the launcher, the `current` junction and `current.txt`
+  3. remove both launchers, the `current` junction and `current.txt`
   4. remove the release directories
 
 CONFIG AND STATE SURVIVE BY DEFAULT, and that is deliberate: %APPDATA%\\airlock
@@ -51,10 +52,14 @@ def parse_args(argv=None):
 def _is_airlock_hook(command, launcher):
     """Is this hook command airlock's?
 
-    Matched on the launcher path when we know it, and otherwise on the two
-    file names airlock has ever used as an entry point plus its launcher
-    name. Deliberately narrow: removing a hook that is not ours would be the
-    single worst thing an uninstaller could do.
+    Matched on the launcher path when we know it, and otherwise on every file
+    name airlock has ever used as an entry point plus its two launcher names
+    -- the PreToolUse guard and the SessionStart session check.
+
+    Deliberately narrow: removing a hook that is not ours would be the single
+    worst thing an uninstaller could do, so this is a fixed list of names we
+    wrote ourselves, never a substring like "airlock" that somebody else's
+    hook could happen to contain.
     """
     if not isinstance(command, str):
         return False
@@ -63,7 +68,9 @@ def _is_airlock_hook(command, launcher):
     lowered = command.lower().replace("/", "\\")
     return any(token in lowered for token in (
         wc.LAUNCHER_NAME.lower(),
+        wc.SESSION_LAUNCHER_NAME.lower(),
         "hooks\\airlock.py",
+        "hooks\\airlock_session_check.py",
         "hooks\\plumbline.py",
         "hooks\\jev_guard.py",
     ))
@@ -167,7 +174,7 @@ def main(argv=None):
         else:
             actions.append("current junction: would remove %s" % junction)
 
-    for path in (wc.pointer_path(), launcher):
+    for path in (wc.pointer_path(), launcher, wc.session_launcher_path()):
         if os.path.isfile(path):
             if apply:
                 os.remove(path)

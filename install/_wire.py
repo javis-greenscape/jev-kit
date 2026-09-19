@@ -10,8 +10,11 @@ Two jobs, both idempotent:
 
   2. ADD whatever is missing -- the PreToolUse entry itself (a first install
      has nothing to repoint: there is no airlock hook command anywhere yet),
-     and, opt in per flag, the belay Stop hook and the function-hooks env
-     var. Adding necessarily changes the JSON's structure, so this path
+     the SessionStart session-check entry (a DEFAULT component: the guard
+     fails open, so a dead guard is silent, and on a workstation the only
+     reliable moment to say so is when somebody starts a session), and, opt
+     in per flag, the belay Stop hook and the function-hooks env var.
+     Adding necessarily changes the JSON's structure, so this path
      re-serializes the whole file (via json.load/json.dump, which preserves
      existing key order -- Python dicts keep insertion order) rather than
      doing text surgery on a shape that was not there to begin with. Every
@@ -23,8 +26,10 @@ A file that needs anything ADDED goes through the structural path, even if
 it also needs a repoint -- there is no way to add new nested JSON without
 becoming a JSON re-serializer for that file.
 
-Reads NEW_HOOK, NEW_HOOK_COMMAND, APPLY, BELAY, BELAY_WRAPPER, FUNCTION_HOOKS
-from the environment (set by wire.sh) and the settings.json paths from argv.
+Reads NEW_HOOK, NEW_HOOK_COMMAND, APPLY, BELAY, BELAY_WRAPPER,
+FUNCTION_HOOKS, SESSION_CHECK, SESSION_CHECK_HOOK and
+SESSION_CHECK_COMMAND from the environment (set by wire.sh) and the
+settings.json paths from argv.
 Never touches a path not given on the command line.
 """
 import copy
@@ -42,8 +47,16 @@ BELAY = os.environ.get("BELAY") == "1"
 BELAY_WRAPPER = os.environ.get("BELAY_WRAPPER", "")
 FUNCTION_HOOKS = os.environ.get("FUNCTION_HOOKS") == "1"
 FUNCTION_HOOKS_ENV_KEY = "CLAUDE_CODE_ENABLE_FUNCTION_HOOKS"
+# The session check is a DEFAULT component, so it defaults to ON here too and
+# wire.sh has to pass SESSION_CHECK=0 to leave it out. Its own hard budget is
+# 300 ms; the 5 s registered here is the same generous ceiling the PreToolUse
+# entry carries, for a hook that is meant never to approach it.
+SESSION_CHECK = os.environ.get("SESSION_CHECK", "1") == "1"
+SESSION_CHECK_HOOK = os.environ.get("SESSION_CHECK_HOOK", "")
+SESSION_CHECK_COMMAND = os.environ.get("SESSION_CHECK_COMMAND", SESSION_CHECK_HOOK)
 PRETOOLUSE_TIMEOUT = 5
 BELAY_TIMEOUT = 25
+SESSION_CHECK_TIMEOUT = 5
 
 # Matches a JSON string value that is (or ends in) a path to airlock.py's
 # hook entry point -- e.g. "$HOME/code/airlock/hooks/airlock.py" or
@@ -102,7 +115,30 @@ _WIN_HOOK_PATTERN = re.compile(
 _WIN_HOOK_CMD_RE = re.compile(
     r'^((?:[^"]|"[^"]*")*")([^"]*?' + _WIN_HOOK_TAIL_PARSED + r')(")$')
 
+# The SAME two shapes again, for the SessionStart session check. Kept as its
+# own pair rather than folded into the patterns above, because the two hooks
+# are repointed independently: a machine can perfectly well have a current
+# PreToolUse entry and a session-check entry still pointing at an old release,
+# and one pattern matching both would make "how many did we repoint" a lie.
+#
+# They cannot collide. The guard's pattern is anchored on the literal
+# `hooks/airlock.py`; `hooks/airlock_session_check.py` does not end in that,
+# and `airlock-session-check.py` does not end in `airlock-hook.py`.
+_SESSION_TAIL = r'hooks/airlock_session_check\.py'
+_SESSION_PATTERN = re.compile(
+    r'"((?:(?:[^"\\]|\\.)*?\s)?)((?:[^"\\\s]|\\.)*' + _SESSION_TAIL + r')"')
+_SESSION_CMD_RE = re.compile(
+    r'^((?:(?:[^\\]|\\.)*?\s)?)((?:[^\\\s]|\\.)*' + _SESSION_TAIL + r')$')
+
+_WIN_SESSION_TAIL = r'(?:hooks\\\\airlock_session_check|airlock-session-check)\.py'
+_WIN_SESSION_TAIL_PARSED = r'(?:hooks[\\\\/]airlock_session_check|airlock-session-check)\.py'
+
 QUOTED = os.environ.get("HOOK_COMMAND_QUOTED") == "1"
+
+_WIN_SESSION_PATTERN = re.compile(
+    r'"((?:[^"\\]|\\.)*\\")(' + _WIN_PATH_CHARS + _WIN_SESSION_TAIL + r')(\\")"')
+_WIN_SESSION_CMD_RE = re.compile(
+    r'^((?:[^"]|"[^"]*")*")([^"]*?' + _WIN_SESSION_TAIL_PARSED + r')(")$')
 
 
 def _text_pattern():
@@ -111,6 +147,14 @@ def _text_pattern():
 
 def _cmd_pattern():
     return _WIN_HOOK_CMD_RE if QUOTED else _HOOK_CMD_RE
+
+
+def _session_text_pattern():
+    return _WIN_SESSION_PATTERN if QUOTED else _SESSION_PATTERN
+
+
+def _session_cmd_pattern():
+    return _WIN_SESSION_CMD_RE if QUOTED else _SESSION_CMD_RE
 
 
 def _json_inner(value):
@@ -134,6 +178,21 @@ def _pretooluse_block():
 def _belay_block():
     return {"matcher": "*", "hooks": [
         {"type": "command", "command": BELAY_WRAPPER, "timeout": BELAY_TIMEOUT}]}
+
+
+def _session_check_block():
+    return {"matcher": "*", "hooks": [
+        {"type": "command", "command": SESSION_CHECK_COMMAND,
+         "timeout": SESSION_CHECK_TIMEOUT}]}
+
+
+def _session_check_ok():
+    """Only wire it if we were actually told where it is AND the file is
+    there. A SessionStart entry pointing at nothing would run, fail and print
+    an error at the top of every session -- the exact opposite of a component
+    whose entire promise is silence when healthy."""
+    return bool(SESSION_CHECK and SESSION_CHECK_HOOK
+                and os.path.isfile(SESSION_CHECK_HOOK))
 
 
 def _matcher_block(entries, matcher):
@@ -171,6 +230,8 @@ def _append_hook(data, event, block, command):
 
 def _fresh_settings():
     data = {"hooks": {"PreToolUse": [_pretooluse_block()]}}
+    if _session_check_ok():
+        data["hooks"]["SessionStart"] = [_session_check_block()]
     if BELAY and BELAY_WRAPPER and os.path.isfile(BELAY_WRAPPER):
         data["hooks"]["Stop"] = [_belay_block()]
     if FUNCTION_HOOKS:
@@ -181,6 +242,14 @@ def _fresh_settings():
 def _describe_fresh():
     lines = ["  PreToolUse: matcher \"*\", command \"%s\", timeout %d"
              % (NEW_HOOK_COMMAND, PRETOOLUSE_TIMEOUT)]
+    if SESSION_CHECK:
+        if _session_check_ok():
+            lines.append("  SessionStart (session check): matcher \"*\", "
+                         "command \"%s\", timeout %d"
+                         % (SESSION_CHECK_COMMAND, SESSION_CHECK_TIMEOUT))
+        else:
+            lines.append("  SessionStart (session check): SKIPPED, no hook at %s"
+                         % (SESSION_CHECK_HOOK or "<unset>"))
     if BELAY:
         if BELAY_WRAPPER and os.path.isfile(BELAY_WRAPPER):
             lines.append("  Stop (belay): matcher \"*\", command \"%s\", timeout %d"
@@ -207,23 +276,40 @@ def _process_missing(path):
     return True
 
 
-def _repoint_text(text):
-    """Pure text substitution: repoint every airlock hook command found to
-    NEW_HOOK, keeping each command's own interpreter prefix. Returns the new
-    text, or None if nothing needed repointing."""
+def _repoint_one(text, pattern, new_path):
     if QUOTED:
         def _replace(match):
-            return '"%s%s%s"' % (match.group(1), _json_inner(NEW_HOOK), match.group(3))
+            return '"%s%s%s"' % (match.group(1), _json_inner(new_path), match.group(3))
     else:
         def _replace(match):
-            return '"%s%s"' % (match.group(1), _json_inner(NEW_HOOK))
-    return _text_pattern().sub(_replace, text)
+            return '"%s%s"' % (match.group(1), _json_inner(new_path))
+    return pattern.sub(_replace, text)
 
 
-def _structural_repoint(data):
+def _repoint_text(text):
+    """Pure text substitution: repoint every airlock hook command found to its
+    new path, keeping each command's own interpreter prefix.
+
+    Both hooks are repointed in the one pass -- the PreToolUse guard and the
+    SessionStart session check -- because a machine re-wiring after a release
+    needs both to follow, and doing them in two passes would mean two backups
+    of the same file for one logical edit."""
+    text = _repoint_one(text, _text_pattern(), NEW_HOOK)
+    if SESSION_CHECK_HOOK:
+        text = _repoint_one(text, _session_text_pattern(), SESSION_CHECK_HOOK)
+    return text
+
+
+def _structural_repoint(data, pattern=None, new_path=None):
     """Walk hooks.PreToolUse (and, defensively, every hook block) and
     repoint any command whose path is an old airlock/plumbline/jev_guard
-    hook path, in place. Returns True if anything changed."""
+    hook path, in place. Returns True if anything changed.
+
+    `pattern`/`new_path` select which of the two hooks is being repointed;
+    the defaults are the PreToolUse guard, which is what every existing
+    caller means."""
+    pattern = pattern or _cmd_pattern()
+    new_path = new_path or NEW_HOOK
     changed = False
     hooks = data.get("hooks") or {}
     for entries in hooks.values():
@@ -238,10 +324,10 @@ def _structural_repoint(data):
                 cmd = h.get("command")
                 if not isinstance(cmd, str):
                     continue
-                m = _cmd_pattern().match(cmd)
-                if m and m.group(2) != NEW_HOOK:
+                m = pattern.match(cmd)
+                if m and m.group(2) != new_path:
                     tail = m.group(3) if QUOTED else ""
-                    h["command"] = m.group(1) + NEW_HOOK + tail
+                    h["command"] = m.group(1) + new_path + tail
                     changed = True
     return changed
 
@@ -271,7 +357,26 @@ def process(path):
 
     needs_function_hooks = FUNCTION_HOOKS and (data.get("env") or {}).get(FUNCTION_HOOKS_ENV_KEY) != "1"
 
-    if not (needs_repoint or needs_add_pretooluse or needs_belay or needs_function_hooks):
+    # The SessionStart session check. Two separate questions, deliberately:
+    # is there an entry at all (add it), and does the entry that IS there
+    # point somewhere stale (repoint it). Conflating them would make a first
+    # install and a re-wire the same code path and get one of them wrong.
+    session_ok = _session_check_ok()
+    # Only NOISY when a path was actually named and is not there. A caller
+    # that never passed SESSION_CHECK_HOOK at all (an old wire.sh, or a test
+    # exercising the guard entry alone) gets silence, not a warning about a
+    # component it never asked for.
+    session_missing_hook = bool(SESSION_CHECK and SESSION_CHECK_HOOK and not session_ok)
+    session_matches = [(m[0], m[1]) for m in _session_text_pattern().findall(text)]
+    needs_add_session = session_ok and not session_matches
+    needs_repoint_session = bool(session_matches) and SESSION_CHECK_HOOK and not all(
+        hook_path == _json_inner(SESSION_CHECK_HOOK)
+        for _prefix, hook_path in session_matches)
+
+    needs_repoint = needs_repoint or needs_repoint_session
+    needs_add = needs_add_pretooluse or needs_add_session or needs_belay or needs_function_hooks
+
+    if not (needs_repoint or needs_add):
         if matches:
             print("%s: already wired to %s" % (path, NEW_HOOK))
         else:
@@ -279,13 +384,16 @@ def process(path):
         if belay_missing_wrapper:
             print("%s: --belay given but no wrapper at %s, skipping Stop hook"
                   % (path, BELAY_WRAPPER or "<unset>"))
+        if session_missing_hook:
+            print("%s: --session-check given but no hook at %s, skipping "
+                  "SessionStart entry" % (path, SESSION_CHECK_HOOK or "<unset>"))
         return False
 
     # A pure repoint -- nothing to ADD -- keeps the byte-preserving text
     # path: it is both the common case (a machine re-wiring after a
     # release) and the one this design exists to protect (see module
     # docstring and tests/test_wire.py's TestInterpreterPrefix/TestSafety).
-    if needs_repoint and not (needs_add_pretooluse or needs_belay or needs_function_hooks):
+    if needs_repoint and not needs_add:
         new_text = _repoint_text(text)
         try:
             json.loads(new_text)
@@ -293,18 +401,21 @@ def process(path):
             print("%s: substitution would produce invalid JSON (%s), refusing" % (path, exc),
                   file=sys.stderr)
             return False
+        pairs = ([(m, NEW_HOOK) for m in matches]
+                 + [(m, SESSION_CHECK_HOOK) for m in session_matches])
+        total = len(matches) + len(session_matches)
         if not APPLY:
-            print("%s: would repoint %d hook path(s) to %s" % (path, len(matches), NEW_HOOK))
-            for prefix, hook_path in sorted(set(matches)):
-                if hook_path != NEW_HOOK:
+            print("%s: would repoint %d hook path(s)" % (path, total))
+            for (prefix, hook_path), target in sorted(set(pairs)):
+                if hook_path != target:
                     print("  - %s%s" % (prefix, hook_path))
-                    print("    -> %s%s" % (prefix, NEW_HOOK))
+                    print("    -> %s%s" % (prefix, target))
             return True
         backup = _backup(path)
         with open(path, "w") as f:
             f.write(new_text)
-        print("%s: backed up to %s, %d hook path(s) -> %s (interpreter prefix kept)"
-              % (path, backup, len(matches), NEW_HOOK))
+        print("%s: backed up to %s, %d hook path(s) repointed (interpreter prefix kept)"
+              % (path, backup, total))
         return True
 
     # Something needs ADDING (possibly alongside a repoint): structural
@@ -315,10 +426,20 @@ def process(path):
     if needs_repoint:
         if _structural_repoint(new_data):
             actions.append("repointed %d existing hook path(s) to %s" % (len(matches), NEW_HOOK))
+        if needs_repoint_session and _structural_repoint(
+                new_data, _session_cmd_pattern(), SESSION_CHECK_HOOK):
+            actions.append("repointed %d session-check hook path(s) to %s"
+                           % (len(session_matches), SESSION_CHECK_HOOK))
     if needs_add_pretooluse:
         if _append_hook(new_data, "PreToolUse", _pretooluse_block(), NEW_HOOK_COMMAND):
             actions.append('added PreToolUse: matcher "*", command "%s", timeout %d'
                             % (NEW_HOOK_COMMAND, PRETOOLUSE_TIMEOUT))
+    if needs_add_session:
+        if _append_hook(new_data, "SessionStart", _session_check_block(),
+                        SESSION_CHECK_COMMAND):
+            actions.append('added SessionStart (session check): matcher "*", '
+                           'command "%s", timeout %d'
+                           % (SESSION_CHECK_COMMAND, SESSION_CHECK_TIMEOUT))
     if needs_belay:
         if _append_hook(new_data, "Stop", _belay_block(), BELAY_WRAPPER):
             actions.append('added Stop (belay): matcher "*", command "%s", timeout %d'
@@ -341,6 +462,9 @@ def process(path):
         if belay_missing_wrapper:
             print("  (--belay given but no wrapper at %s, skipping Stop hook)"
                   % (BELAY_WRAPPER or "<unset>"))
+        if session_missing_hook:
+            print("  (--session-check given but no hook at %s, skipping "
+                  "SessionStart entry)" % (SESSION_CHECK_HOOK or "<unset>"))
         return True
 
     backup = _backup(path)
@@ -352,6 +476,9 @@ def process(path):
     if belay_missing_wrapper:
         print("  (--belay given but no wrapper at %s, skipping Stop hook)"
               % (BELAY_WRAPPER or "<unset>"))
+    if session_missing_hook:
+        print("  (--session-check given but no hook at %s, skipping "
+              "SessionStart entry)" % (SESSION_CHECK_HOOK or "<unset>"))
     return True
 
 

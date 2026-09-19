@@ -32,6 +32,13 @@ pay for. That keeps settings.json stable across every deploy and rollback: a
 rollback rewrites one line of `current.txt` and the next tool call picks it
 up, which is the same promise the Linux symlink makes.
 
+The SessionStart session check gets its own launcher, `airlock-session-check.py`,
+written the same way and for the same reason. Two launchers rather than one
+launcher with an argument: a hook command in settings.json is a string a human
+reads, and `"py.exe" "...\airlock-session-check.py"` says what it is, where
+`"py.exe" "...\airlock-hook.py" session-check` says almost nothing and invites
+a re-wire to drop the argument.
+
 Nothing here ever needs Administrator, writes outside the user's profile, or
 touches the registry, a service, or PATH.
 """
@@ -50,6 +57,7 @@ from airlock import paths  # noqa: E402
 from airlock.platform_compat import is_windows  # noqa: E402
 
 LAUNCHER_NAME = "airlock-hook.py"
+SESSION_LAUNCHER_NAME = "airlock-session-check.py"
 POINTER_NAME = "current.txt"
 CURRENT_NAME = "current"
 RELEASES_NAME = "releases"
@@ -66,8 +74,8 @@ EXCLUDE_NAMES = {
 
 # --- the launcher ------------------------------------------------------------
 
-LAUNCHER_SOURCE = '''#!/usr/bin/env python3
-"""Stable entry point for the airlock PreToolUse hook on Windows.
+LAUNCHER_TEMPLATE = '''#!/usr/bin/env python3
+"""Stable entry point for the airlock %(what)s on Windows.
 
 settings.json points here and never at a release directory, so a deploy or a
 rollback never has to touch settings.json: it rewrites the `current` pointer
@@ -108,7 +116,7 @@ def main():
     root = _release_root()
     if not root:
         return
-    hook = os.path.join(root, "hooks", "airlock.py")
+    hook = os.path.join(root, "hooks", "%(script)s")
     if not os.path.isfile(hook):
         return
     if root not in sys.path:
@@ -125,6 +133,13 @@ if __name__ == "__main__":
         pass
     sys.exit(0)
 '''
+
+#: Kept as its own name because install/windows_uninstall.py and the tests
+#: both reference "the PreToolUse launcher source" specifically.
+LAUNCHER_SOURCE = LAUNCHER_TEMPLATE % {
+    "what": "PreToolUse hook", "script": "airlock.py"}
+SESSION_LAUNCHER_SOURCE = LAUNCHER_TEMPLATE % {
+    "what": "SessionStart session check", "script": "airlock_session_check.py"}
 
 
 # --- small helpers -----------------------------------------------------------
@@ -157,6 +172,10 @@ def install_root(env=None):
 
 def launcher_path(env=None):
     return os.path.join(install_root(env), LAUNCHER_NAME)
+
+
+def session_launcher_path(env=None):
+    return os.path.join(install_root(env), SESSION_LAUNCHER_NAME)
 
 
 def pointer_path(env=None):
@@ -275,7 +294,8 @@ def default_settings_files(env=None):
     return out
 
 
-def wire(settings_files, hook_path, hook_cmd, apply=True, env=None):
+def wire(settings_files, hook_path, hook_cmd, apply=True, env=None,
+         session_hook_path=None, session_hook_cmd=None):
     """Wire (or repoint) the PreToolUse hook, through install/_wire.py.
 
     _wire.py is the file that knows how to edit a settings.json without
@@ -292,6 +312,12 @@ def wire(settings_files, hook_path, hook_cmd, apply=True, env=None):
     child_env["BELAY"] = "0"
     child_env["FUNCTION_HOOKS"] = "0"
     child_env["HOOK_COMMAND_QUOTED"] = "1"
+    # The SessionStart session check, in the SAME quoted Windows shape (with
+    # PowerShell's call operator where there is no Git Bash) -- so both hooks
+    # are registered in one edit, one backup, and one idempotency check.
+    child_env["SESSION_CHECK"] = "1" if session_hook_path else "0"
+    child_env["SESSION_CHECK_HOOK"] = session_hook_path or ""
+    child_env["SESSION_CHECK_COMMAND"] = session_hook_cmd or session_hook_path or ""
 
     old = dict(os.environ)
     os.environ.clear()
@@ -385,11 +411,15 @@ def write_pointer(root, release_dir):
     return path
 
 
-def write_launcher(root):
-    path = os.path.join(root, LAUNCHER_NAME)
+def write_launcher(root, name=LAUNCHER_NAME, source=None):
+    path = os.path.join(root, name)
     with open(path, "w") as f:
-        f.write(LAUNCHER_SOURCE)
+        f.write(LAUNCHER_SOURCE if source is None else source)
     return path
+
+
+def write_session_launcher(root):
+    return write_launcher(root, SESSION_LAUNCHER_NAME, SESSION_LAUNCHER_SOURCE)
 
 
 def prune_releases(releases_dir, keep=KEEP_RELEASES, current=None):
