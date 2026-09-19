@@ -49,6 +49,14 @@ import re
 from . import paths
 
 HOME = os.path.expanduser("~")
+
+# Every tool that carries a shell command string in tool_input.command.
+# Claude Code's hooks reference is explicit: "Match `Bash|PowerShell` in hooks
+# that inspect shell commands, so they cover both tools", because on Windows
+# without Git Bash "the tool is enabled automatically and Claude Code doesn't
+# register the Bash tool at all" -- a hook matching only Bash never fires
+# there. On Linux nothing changes: a Bash payload is still a Bash payload.
+SHELL_TOOLS = ("Bash", "PowerShell")
 CONFIG_FILE = str(paths.config_file("rules.json"))
 # "ask" sits between allow and deny: the human is asked rather than the call
 # being blocked outright. It is a config-only action -- no rule ships with it
@@ -366,7 +374,7 @@ def prefilter_secret(ctx):
                              extra={"target": fp, "kind": "read"})
         return None
 
-    if tool != "Bash":
+    if tool not in SHELL_TOOLS:
         return None
 
     command = ctx["command"]
@@ -579,7 +587,7 @@ def _has_path_arg(args, exts=(".py", ".js", ".ts", ".tsx", ".jsx", ".mjs")):
 
 
 def prefilter_wide_run(ctx):
-    if ctx["tool_name"] != "Bash":
+    if ctx["tool_name"] not in SHELL_TOOLS:
         return None
     for seg in ctx["segments"]:
         prog, args = program_of(seg)
@@ -671,7 +679,7 @@ def _in_tmux(command, ctx):
 
 
 def prefilter_long_run(ctx):
-    if ctx["tool_name"] != "Bash":
+    if ctx["tool_name"] not in SHELL_TOOLS:
         return None
     command = ctx["command"]
     if not command or _in_tmux(command, ctx):
@@ -756,7 +764,7 @@ R5_SUGGESTION = (
 
 
 def prefilter_sudo(ctx):
-    if ctx["tool_name"] != "Bash":
+    if ctx["tool_name"] not in SHELL_TOOLS:
         return None
     for seg in ctx["segments"]:
         toks = words(seg)
@@ -814,7 +822,7 @@ R6_SUGGESTION = (
 
 
 def prefilter_gui(ctx):
-    if ctx["tool_name"] != "Bash":
+    if ctx["tool_name"] not in SHELL_TOOLS:
         return None
     for seg in ctx["segments"]:
         prog, args = program_of(seg)
@@ -840,7 +848,7 @@ R7_SUGGESTION = (
 
 
 def prefilter_destructive(ctx):
-    if ctx["tool_name"] != "Bash":
+    if ctx["tool_name"] not in SHELL_TOOLS:
         return None
     for seg in ctx["segments"]:
         prog, args = program_of(seg)
@@ -898,7 +906,7 @@ def prefilter_commit_secret(ctx):
     handed anyway, and only the first four characters of a match are ever
     recorded.
     """
-    if ctx["tool_name"] != "Bash":
+    if ctx["tool_name"] not in SHELL_TOOLS:
         return None
 
     command = ctx.get("command") or ""
@@ -1155,7 +1163,7 @@ def prefilter_general_risk(ctx):
     operation globbed high in the tree. Anything else returns None and R10
     costs nothing at all -- not a Jev call, not a log row.
     """
-    if ctx["tool_name"] != "Bash":
+    if ctx["tool_name"] not in SHELL_TOOLS:
         return None
     cwd = (ctx.get("cwd") or "").rstrip("/")
 
@@ -1403,7 +1411,7 @@ def suppression_reason(rule_id, answers):
 RULES = [
     Rule(
         id="R1-secret-exposure",
-        tools=("Bash", "Read", "NotebookRead"),
+        tools=SHELL_TOOLS + ("Read", "NotebookRead"),
         action="deny",
         prefilter=prefilter_secret,
         questions=questions_secret,
@@ -1421,14 +1429,14 @@ RULES = [
     ),
     Rule(
         id="R3-whole-suite-or-uncapped-build",
-        tools=("Bash",),
+        tools=SHELL_TOOLS,
         action="warn",
         prefilter=prefilter_wide_run,
         why="CLAUDE.md resource envelope: cap parallelism explicitly; prefer targeted test runs.",
     ),
     Rule(
         id="R4-long-work-bare-shell",
-        tools=("Bash",),
+        tools=SHELL_TOOLS,
         action="warn",
         prefilter=prefilter_long_run,
         questions=questions_long_run,
@@ -1437,21 +1445,21 @@ RULES = [
     ),
     Rule(
         id="R5-sudo",
-        tools=("Bash",),
+        tools=SHELL_TOOLS,
         action="deny",
         prefilter=prefilter_sudo,
         why="CLAUDE.md: sudo only for a named system package, never under $HOME.",
     ),
     Rule(
         id="R6-gui-or-browser",
-        tools=("Bash",),
+        tools=SHELL_TOOLS,
         action="deny",
         prefilter=prefilter_gui,
         why="CLAUDE.md: there is no desktop; print the URL instead.",
     ),
     Rule(
         id="R7-destructive",
-        tools=("Bash",),
+        tools=SHELL_TOOLS,
         action="warn",
         prefilter=prefilter_destructive,
         why="CLAUDE.md: ask first for anything hard to reverse or outward-facing.",
@@ -1465,14 +1473,14 @@ RULES = [
     ),
     Rule(
         id="R8-tool-choice-guard",
-        tools=("Bash",),
+        tools=SHELL_TOOLS,
         action="deny",
         legacy="tool_choice_guard",
         why="Original tool-choice guard, behaviour unchanged.",
     ),
     Rule(
         id="R9-commit-secret",
-        tools=("Bash",),
+        tools=SHELL_TOOLS,
         action="deny",
         prefilter=prefilter_commit_secret,
         why="CLAUDE.md Safety: never commit secrets. Credential shapes from "
@@ -1480,7 +1488,7 @@ RULES = [
     ),
     Rule(
         id="R10-general-risk",
-        tools=("Bash",),
+        tools=SHELL_TOOLS,
         action="warn",
         prefilter=prefilter_general_risk,
         questions=questions_general_risk,
@@ -1526,7 +1534,7 @@ def effective_action(rule, overrides=None):
 def build_ctx(data, tool_name=None):
     ti = data.get("tool_input") or {}
     tool_name = tool_name or data.get("tool_name") or ""
-    command = str(ti.get("command") or "") if tool_name == "Bash" else ""
+    command = str(ti.get("command") or "") if tool_name in SHELL_TOOLS else ""
     return {
         "tool_name": tool_name,
         "tool_input": ti,

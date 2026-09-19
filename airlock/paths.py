@@ -23,12 +23,29 @@ step 3 wins there and resolves to exactly the same files either way.
 is idempotent; until it has been run, steps 3 and 4 are what keep the machine
 working.
 
-Deliberately stdlib-only and free of any other airlock import, so the hot
-path in hooks/airlock.py can resolve a directory without pulling in client,
-guards or policy.
+On Windows there is no XDG layout to follow, so the three directories move
+to the places Windows actually reserves for them (item 1 of the native-Windows
+brief), keeping every environment override exactly as it is:
+
+  config    %APPDATA%\\airlock          (roams with the profile: mode,
+                                         rules.json, the key file)
+  state     %LOCALAPPDATA%\\airlock\\state   (machine-local: the shadow log,
+                                         loop-protection state, tune state)
+  releases  %LOCALAPPDATA%\\airlock      (holds releases\\ and the `current`
+                                         pointer; state\\ is its sibling)
+
+The same legacy-name fallback applies there, under the same two parents, so a
+Windows machine that somehow carries a `plumbline` directory is not reset.
+
+Deliberately stdlib-only apart from airlock.platform_compat (which is itself
+stdlib-only and imports nothing from airlock), so the hot path in
+hooks/airlock.py can resolve a directory without pulling in client, guards or
+policy.
 """
 import os
 from pathlib import Path
+
+from .platform_compat import is_windows
 
 APP = "airlock"
 # Every earlier name, newest first. A directory is looked for under each in
@@ -85,34 +102,72 @@ def _pick(new, *legacies):
     return new
 
 
-def _resolve(env_names, parent_parts, legacy_parent_parts=None):
+def _win_base(var, *fallback_parts):
+    """%APPDATA% or %LOCALAPPDATA%, falling back to the documented default
+    location under the profile when the variable is missing (which happens in
+    a stripped hook environment). Never raises."""
+    try:
+        raw = os.environ.get(var)
+    except Exception:
+        raw = None
+    if raw:
+        try:
+            return Path(os.path.expandvars(os.path.expanduser(raw)))
+        except Exception:
+            pass
+    return _home().joinpath(*fallback_parts)
+
+
+def _resolve(env_names, parent_parts, legacy_parent_parts=None,
+             win_base=None, win_tail=(), windows=None):
     override = env(*env_names)
     if override:
         try:
             return Path(os.path.expanduser(override))
         except Exception:
             pass
+    if is_windows(windows) and win_base is not None:
+        # The app directory itself is picked first (new name, then each legacy
+        # name), and only then is the tail appended -- so state lands at
+        # %LOCALAPPDATA%\airlock\state, a sibling of releases\ and current,
+        # rather than at %LOCALAPPDATA%\state\airlock.
+        app_dir = _pick(win_base / APP, *[win_base / name for name in LEGACY_APPS])
+        return app_dir.joinpath(*win_tail)
     home = _home()
     parent = home.joinpath(*parent_parts)
     legacy_parent = home.joinpath(*(legacy_parent_parts or parent_parts))
     return _pick(parent / APP, *[legacy_parent / name for name in LEGACY_APPS])
 
 
-def config_dir():
+def config_dir(windows=None):
     """~/.config/airlock, else ~/.config/plumbline, else ~/.config/jev-guard,
-    whichever of the older two exists first."""
-    return _resolve(CONFIG_ENV, (".config",))
+    whichever of the older two exists first.
+
+    On Windows: %APPDATA%\\airlock, with the same two legacy names tried under
+    %APPDATA% before falling back to the new one."""
+    return _resolve(CONFIG_ENV, (".config",),
+                    win_base=_win_base("APPDATA", "AppData", "Roaming"),
+                    windows=windows)
 
 
-def state_dir():
-    """~/.local/state/airlock, else the plumbline then jev-guard names."""
-    return _resolve(STATE_ENV, (".local", "state"))
+def state_dir(windows=None):
+    """~/.local/state/airlock, else the plumbline then jev-guard names.
+
+    On Windows: %LOCALAPPDATA%\\airlock\\state -- machine-local, deliberately
+    NOT roaming, and a sibling of the releases directory."""
+    return _resolve(STATE_ENV, (".local", "state"),
+                    win_base=_win_base("LOCALAPPDATA", "AppData", "Local"),
+                    win_tail=("state",), windows=windows)
 
 
-def install_home():
+def install_home(windows=None):
     """$AIRLOCK_HOME: where deploy.sh writes releases and `current`.
-    ~/.local/share/airlock, else the plumbline then jev-guard names."""
-    return _resolve(HOME_ENV, (".local", "share"))
+    ~/.local/share/airlock, else the plumbline then jev-guard names.
+
+    On Windows: %LOCALAPPDATA%\\airlock."""
+    return _resolve(HOME_ENV, (".local", "share"),
+                    win_base=_win_base("LOCALAPPDATA", "AppData", "Local"),
+                    windows=windows)
 
 
 def config_file(name):
@@ -123,17 +178,32 @@ def state_file(name):
     return state_dir() / name
 
 
-def runtime_socket():
-    """The daemon's Unix socket. New name first; if it is absent and an older
-    socket is live -- plumbline's, then jev-guard's -- use that, so a daemon
-    started before a rename keeps serving hooks from a renamed release until
-    somebody restarts it."""
+def _runtime_dir(windows=None):
+    """The parent the daemon socket lives in.
+
+    On Windows there is no daemon at all (no AF_UNIX), so there is also no
+    /tmp to fall back to and nothing world-writable may be named: the answer
+    is a path under the per-user state directory that nothing ever binds.
+    `airlock/client.py` never even asks for it there -- it skips the daemon
+    outright -- but the function must still return something rather than
+    raising or naming /tmp."""
+    if is_windows(windows):
+        return str(state_dir(windows=windows) / "runtime")
     runtime = os.environ.get("XDG_RUNTIME_DIR")
     if not runtime:
         try:
             runtime = "/run/user/%d" % os.getuid()
         except Exception:
             runtime = "/tmp"
+    return runtime
+
+
+def runtime_socket(windows=None):
+    """The daemon's Unix socket. New name first; if it is absent and an older
+    socket is live -- plumbline's, then jev-guard's -- use that, so a daemon
+    started before a rename keeps serving hooks from a renamed release until
+    somebody restarts it."""
+    runtime = _runtime_dir(windows=windows)
     new = os.path.join(runtime, APP, "%s.sock" % APP)
     legacies = (
         os.path.join(runtime, "plumbline", "plumbline.sock"),
@@ -149,13 +219,7 @@ def runtime_socket():
     return new
 
 
-def runtime_socket_dir():
+def runtime_socket_dir(windows=None):
     """The directory the DAEMON should create and bind in -- always the new
     name. Only a client ever falls back to an older socket."""
-    runtime = os.environ.get("XDG_RUNTIME_DIR")
-    if not runtime:
-        try:
-            runtime = "/run/user/%d" % os.getuid()
-        except Exception:
-            runtime = "/tmp"
-    return os.path.join(runtime, APP)
+    return os.path.join(_runtime_dir(windows=windows), APP)

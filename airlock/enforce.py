@@ -555,7 +555,7 @@ def _run_legacy(data, tool_name, rule, eff, base, override_reason, b_ms, session
     """The two original guards, behaviour unchanged for action=deny. `warn`
     and `log` downgrade them to a logged row without any block."""
     guard_name = rule.legacy
-    if tool_name == "Bash":
+    if tool_name in rules_mod.SHELL_TOOLS:
         key = ("bash", str((data.get("tool_input") or {}).get("command") or "").strip())
     else:
         key = ("agent", str((data.get("tool_input") or {}).get("description") or "").strip())
@@ -605,7 +605,7 @@ def _run_legacy(data, tool_name, rule, eff, base, override_reason, b_ms, session
     should_deny = False
     surface = None
     if "error" not in entry:
-        if tool_name == "Bash":
+        if tool_name in rules_mod.SHELL_TOOLS:
             should_deny = policy.enforce_deny_search(entry)
         else:
             surface = policy.tier_surface(entry)
@@ -627,7 +627,8 @@ def _run_legacy(data, tool_name, rule, eff, base, override_reason, b_ms, session
         log.append(entry)
         return False
 
-    reason = _bash_deny_reason(entry) if tool_name == "Bash" else _agent_deny_reason(entry)
+    reason = (_bash_deny_reason(entry) if tool_name in rules_mod.SHELL_TOOLS
+              else _agent_deny_reason(entry))
 
     if eff not in ("deny", "ask"):
         entry["enforced"] = False

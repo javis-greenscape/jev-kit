@@ -10,6 +10,7 @@ import shlex
 from pathlib import Path
 
 from . import tiers
+from .platform_compat import is_windows
 
 CONFIDENCE_THRESHOLD = 0.8
 MARGIN_THRESHOLD = 0.4
@@ -277,22 +278,45 @@ def tier_surface(tier_entry, rewrite_on=None):
 # --- Bash tool-choice guard --------------------------------------------------
 
 SEARCH_PROGRAMS = {"find", "fd", "fdfind", "grep", "egrep", "rg", "ag", "ack", "locate", "plocate", "tree", "du"}
+# The Windows-only half, matching airlock/scope.py's WINDOWS_SEARCH_PROGRAMS,
+# plus the two shells a search can be wrapped in. Consulted ONLY on Windows,
+# because `dir`, `where` and `find` all mean something else on Linux.
+WINDOWS_SEARCH_PROGRAMS = {
+    "dir", "where", "findstr", "get-childitem", "gci", "childitem",
+    "select-string", "sls", "es",
+    "cmd", "powershell", "pwsh",
+}
 _SEGMENT_SPLIT = re.compile(r"[;&|]+")
 _SKIP_PREFIX_TOKENS = {"sudo", "nice", "time", "env"}
 
 
-def bash_is_search_like(command):
-    """Cheap code pre-filter: does this Bash command contain a search-like
+def bash_is_search_like(command, windows=None):
+    """Cheap code pre-filter: does this shell command contain a search-like
     program as a command word in any of its segments? Only when this is true
-    do we spend an API call on the tool-choice guard."""
+    do we spend an API call on the tool-choice guard.
+
+    Applies to the PowerShell tool as well as the Bash tool: Claude Code's
+    hooks reference says a hook that inspects shell commands must "Match
+    `Bash|PowerShell`", since on Windows without Git Bash the Bash tool is
+    never registered at all.
+    """
     if not command:
         return False
+    if windows is None:
+        windows = is_windows()
     for segment in _SEGMENT_SPLIT.split(command):
         segment = segment.strip()
         if not segment:
             continue
         try:
-            tokens = shlex.split(segment)
+            if windows:
+                lex = shlex.shlex(segment, posix=True)
+                lex.whitespace_split = True
+                lex.escape = ""
+                lex.commenters = ""
+                tokens = list(lex)
+            else:
+                tokens = shlex.split(segment)
         except ValueError:
             tokens = segment.split()
         if not tokens:
@@ -308,9 +332,24 @@ def bash_is_search_like(command):
         prog = Path(tokens[idx]).name
         if prog in SEARCH_PROGRAMS:
             return True
+        if windows:
+            win_prog = _windows_program_name(tokens[idx])
+            if win_prog in SEARCH_PROGRAMS or win_prog in WINDOWS_SEARCH_PROGRAMS:
+                return True
         if prog == "ls" and any(t.startswith("-") and "R" in t for t in tokens[idx + 1:]):
             return True
     return False
+
+
+def _windows_program_name(token):
+    """Bare, lower-cased program name with either separator and any Windows
+    executable suffix removed. Mirrors airlock/scope.py:_program_name."""
+    name = str(token).replace("\\", "/").rstrip("/").rsplit("/", 1)[-1]
+    lowered = name.lower()
+    for suffix in (".exe", ".cmd", ".bat", ".com", ".ps1"):
+        if lowered.endswith(suffix):
+            return lowered[:-len(suffix)]
+    return lowered
 
 
 def _find_upward(cwd, relative):
@@ -338,13 +377,55 @@ def cwd_has_graphify_graph(cwd):
 
 
 PLOCATE_SUGGESTION = "plocate -d ~/.cache/plocate/home.db -i '<pattern>'"
+
+# The Windows counterpart. voidtools Everything keeps a live NTFS index, so a
+# filename question it answers is instant rather than a crawl -- the same
+# argument plocate makes on Linux. The flags are es.exe's own:
+#   -path <dir>   confine the search to one folder (and its subfolders)
+#   -n <count>    stop after N results
+#   -r            treat the search term as a regular expression
+#   -i            MATCH CASE. es is case-INsensitive by default, so -i makes
+#                 a search stricter, not looser -- the opposite of grep -i,
+#                 and the one flag that is easy to get backwards.
+ES_SUGGESTION = (
+    'es.exe -path "<folder>" -n 50 "<pattern>"\n'
+    '    (Everything\'s index answers instantly; add -r for a regex pattern, '
+    '-i to make the match case-sensitive)'
+)
 GRAPHIFY_SUGGESTION = "graphify query"
 
+# The indexed tool this platform already has. One function so the rule text,
+# the deny reason and the doctor all say the same thing on each OS, and no
+# caller has to test sys.platform for itself.
+def filename_search_suggestion(windows=None):
+    """The command to run INSTEAD of a disk-wide filename crawl."""
+    return ES_SUGGESTION if is_windows(windows) else PLOCATE_SUGGESTION
+
+
 _LOCATE_RE = re.compile(r"(?<![A-Za-z0-9_])(plocate|locate)(?![A-Za-z0-9_])")
+# `es` and `es.exe`, as a command word. Deliberately narrow: two letters would
+# otherwise match inside any word, and only a bare command word means the
+# Everything client.
+_ES_RE = re.compile(r"(?:^|[\s;&|(])es(?:\.exe)?(?=\s|$)", re.I)
 
 
 def command_already_uses_locate(command):
-    return bool(_LOCATE_RE.search(command or ""))
+    """Does the command already reach for the INDEXED tool?
+
+    Kept under its original name because that is what the deny path calls it
+    and what the tests assert. On Windows it also recognises `es`/`es.exe`,
+    so the guard never tells a session to replace Everything with Everything.
+    """
+    return command_already_uses_indexed_search(command)
+
+
+def command_already_uses_indexed_search(command, windows=None):
+    command = command or ""
+    if _LOCATE_RE.search(command):
+        return True
+    if is_windows(windows) and _ES_RE.search(command):
+        return True
+    return False
 
 
 # --- scope x search_intent policy table -------------------------------------
@@ -356,12 +437,15 @@ def command_already_uses_locate(command):
 # table is the only place the two combine into a verdict.
 
 
-def evaluate_search(scope, search_intent, confidence, command, root_has_graphify_graph, margin=None):
+def evaluate_search(scope, search_intent, confidence, command, root_has_graphify_graph,
+                    margin=None, windows=None):
     """Return the tool-choice-guard verdict for one Bash search command.
 
-    would_deny (plocate suggestion): scope == disk_wide AND
-    search_intent == filename_search AND the command doesn't already use
-    plocate/locate, gated on the shared confidence+margin deny bar.
+    would_deny (indexed-search suggestion): scope == disk_wide AND
+    search_intent == filename_search AND the command doesn't already use the
+    indexed tool (plocate/locate on Linux, es.exe on Windows), gated on the
+    shared confidence+margin deny bar. The suggestion string itself comes
+    from filename_search_suggestion(), so the advice is right on each OS.
 
     would_deny (graphify suggestion): search_intent == code_structure_search
     AND the root already has a graphify graph, gated the same way.
@@ -376,10 +460,10 @@ def evaluate_search(scope, search_intent, confidence, command, root_has_graphify
         if (
             scope == "disk_wide"
             and search_intent == "filename_search"
-            and not command_already_uses_locate(command)
+            and not command_already_uses_indexed_search(command, windows)
         ):
             would_deny = True
-            suggestion = PLOCATE_SUGGESTION
+            suggestion = filename_search_suggestion(windows)
         elif search_intent == "code_structure_search" and root_has_graphify_graph:
             would_deny = True
             suggestion = GRAPHIFY_SUGGESTION
@@ -400,7 +484,7 @@ def evaluate_search(scope, search_intent, confidence, command, root_has_graphify
 # of a corpus consisting only of already-flagged cases.
 
 GREP_LIKE_PROGRAMS = {"grep", "egrep", "fgrep", "rg", "ag", "ack"}
-SKIP_LOCATE_FAMILY = {"locate", "plocate"}
+SKIP_LOCATE_FAMILY = {"locate", "plocate", "es"}
 DEFAULT_SAMPLE_RATE = 0.05
 SAMPLE_RATE_ENV = "AIRLOCK_SAMPLE_RATE"
 SAMPLE_RATE_ENV_LEGACY = ("PLUMBLINE_SAMPLE_RATE", "JEV_GUARD_SAMPLE_RATE")

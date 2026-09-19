@@ -11,6 +11,7 @@ command line) -- plain Python file I/O only.
 import os
 
 from . import paths
+from .platform_compat import is_windows
 
 ENV_VAR = "TYPESAFE_API_KEY"
 
@@ -22,6 +23,12 @@ ENV_VAR = "TYPESAFE_API_KEY"
 # records that path in the pointer file below so the hook -- which runs with
 # a minimal environment and never sources config.env -- can still find it.
 DEFAULT_ENV_FILE = "~/.config/airlock/env"
+
+# The same file on Windows, where there is no ~/.config: %APPDATA%\airlock\env,
+# resolved through paths.config_dir() so an AIRLOCK_CONFIG_DIR override and the
+# legacy-name fallback both still apply. Linux keeps the literal path above
+# unchanged -- deliberately, because config_dir() would pick a legacy
+# ~/.config/plumbline directory where the old code always said `airlock`.
 
 # A one-line file holding the PATH of the key file, never its contents.
 # Written by install/install.sh from AIRLOCK_KEY_FILE, read here when the
@@ -58,9 +65,19 @@ def legacy_env_files():
     return tuple(part for part in raw.split(os.pathsep) if part.strip())
 
 
-def default_env_file():
+def generic_env_file(windows=None):
+    """The platform's default key-file path, before any legacy fallback."""
+    if is_windows(windows):
+        try:
+            return str(paths.config_dir(windows=windows) / "env")
+        except Exception:
+            pass
+    return os.path.expanduser(DEFAULT_ENV_FILE)
+
+
+def default_env_file(windows=None):
     """The key file to read when AIRLOCK_KEY_FILE is not set. Never raises."""
-    generic = os.path.expanduser(DEFAULT_ENV_FILE)
+    generic = generic_env_file(windows=windows)
     try:
         if os.path.isfile(generic):
             return generic
