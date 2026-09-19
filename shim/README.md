@@ -8,6 +8,13 @@ $HOME and a `~/.claude` default; nothing else was changed.
 
 # claude-cli-shim
 
+> **Experimental.** Tested: PageIndex local-mode indexing, by hand, once, on one
+> machine (see [Measured numbers](#measured-numbers-2026-09-19-this-box) for the
+> document and the box). Not tested: anything else. There are **no unit tests for
+> this component at all**, no labelled cases, and chat through the shim is known
+> not to work (see [Limits](#limits)). Treat it as a working experiment, not a
+> supported component.
+
 An OpenAI-compatible `/v1/chat/completions` + `/v1/models` HTTP shim, backed
 by standing `claude -p` CLI child processes, so that OpenAI-shaped clients
 (PageIndex, LiteLLM's `openai/` provider, anything speaking the

@@ -1,5 +1,12 @@
 # logtriage: label log lines, cheaply and without leaking them
 
+> **Experimental.** Tested: the ordering guarantee, the local rules and the cache,
+> by 27 unit tests with Jev mocked (`tests/test_logtriage.py`), including an
+> assertion against the actual request body that the model never sees raw text.
+> Not tested: real log volume, real triage accuracy, cost at scale. There is **no
+> labelled corpus and no measured accuracy** for this component, and it has had no
+> sustained real use.
+
 Reads log lines on stdin, emits one JSON object per line on stdout with a
 triage label. The design is ported from reachjalil/jevlogs (MIT, see
 [`docs/CREDITS.md`](../docs/CREDITS.md)), whose privacy architecture it

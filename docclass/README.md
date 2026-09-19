@@ -1,5 +1,13 @@
 # docclass: classify the pages of a document against a taxonomy
 
+> **Experimental.** Tested: the two-stage logic, the `not_in_this_list` escape
+> hatch and the confidence gate, by 25 unit tests with Jev mocked
+> (`tests/test_docclass.py`), plus one live run against a public IRS Form W-9
+> (`docclass/smoke.py`, see [Tests](#tests)). Not tested: any real taxonomy, any
+> real document set, any accuracy claim. There is **no labelled corpus and no
+> measured accuracy** for this component -- the numbers quoted below are the
+> upstream behaviour study's, not this code's.
+
 `classify_page(text, taxonomy)` plus a CLI for text-layer PDFs. The shape is
 ported from kyotofin/tax-doc-classifier (Apache-2.0, see
 [`docs/CREDITS.md`](../docs/CREDITS.md)); none of its content is, because US tax

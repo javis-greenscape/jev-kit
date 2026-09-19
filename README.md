@@ -29,28 +29,35 @@ name. Both older names still work through the cutover; see
 
 ## What is in the box
 
-Every component is optional except the guard, and the last column is the one
-worth reading before you install anything: what it sends off the machine.
+Every component is optional except the guard. Two columns are worth reading
+before you install anything: **Exercised**, which says how much use and testing
+each piece has actually had, and **What leaves the machine**.
 
-| Component | What it does | Default | What leaves the machine |
-|---|---|---|---|
-| `airlock/` + `hooks/` (the guard) | The rules table, policy, redaction, client and health. The `PreToolUse` entry point. | **yes** (`--guard`) | Redacted summaries of the ambiguous fraction of tool calls, to TypeSafe. Never a raw tool result; every string passes through `airlock/redact.py` first. |
-| `deploy/` (warm daemon) | Keeps a warm connection so a judgement costs ~0.3 s instead of ~0.9 s. | **yes** (`--daemon`) | Nothing of its own. It is the transport the guard already uses. |
-| `monitoring/` | Five-minute health check, its timer, and an optional push to a monitor you host. | **yes** (`--monitoring`) | Nothing, unless you set `AIRLOCK_KUMA_PUSH_URL`, in which case a bare liveness ping to that URL. |
-| `filesearch/` | Per-user `plocate` index of `$HOME` and its hourly timer, so R8 can suggest an indexed search. | **yes** (`--filesearch`) | Nothing. Entirely local. |
-| `claude-update/` | Idle-only Claude Code auto-updater and its timer. Updates only when no run is alive. | **yes** (`--claude-update`) | Nothing. An idle check and `npm install -g`. |
-| `belay/` | Wrapper for the community `jev-belay` Stop hook: when an agent claims it is finished with no passing check behind it, sends it back to verify. | **yes** (`--belay`) -- clones a pinned third-party repo | Task text, final assistant message and check command lines, through a 13-rule secret redactor, capped at a few thousand characters. No diffs, no file contents. |
-| `browser/` | Clones and patches a Jev-decided browser agent at a pin. | no (`--browser`) | Page state and goals to the decision model you configure. |
-| `review/` | Clones a Jev code reviewer at a pin, with a fail-open wrapper. | no (`--review`) | Diffs, to whatever review gate you configure. |
-| `shim/` | An OpenAI-shaped HTTP shim over the `claude` CLI. | no (`--shim`) | Whatever you send through it. |
-| `compaction/` | Installer for the community `fast-jev-compaction` plugin. **Read `compaction/README.md` first.** | no (`--compaction`) | **Up to ~25,000 tokens of raw, unredacted tool inputs and tool-result text per request.** By far the largest exposure here, which is why it is never installed for you. |
-| `tuning/` | Unattended tuning loop, its timer, promotion and threshold calibration. | no (`--tuning`) | Real Claude sessions on the account you nominate, for the judge. |
-| `docclass/` | Two-stage document classifier with an escape hatch and a confidence gate. | no | Page text, to TypeSafe, when you call it. |
-| `logtriage/` | Redact-first, local-rules-first log triage on stdin. | no | Nothing until local rules are exhausted; redacted lines after that. |
-| `eval/` | Labelled cases for every rule, and the ablations. | n/a | Nothing. |
-| `bench/` | A/B benchmark: enforce mode against no guard at all. | n/a | Nothing until you run it. |
-| `install/` | One installer, a doctor, deploy/rollback/wire, the migration script. | n/a | Nothing. |
-| `docs/` | Credits for the community projects the ported patterns came from, and the install guides. | n/a | Nothing. |
+`Exercised` means: unit tests, a labelled eval, a measured bench, and real daily
+use on at least one machine. `Experimental` means the logic has unit tests and
+the component has been run by hand, but it has no labelled corpus, no measured
+numbers, and no sustained real use -- keep it, read its README's banner, and do
+not build anything load-bearing on it yet.
+
+| Component | What it does | Default | Exercised | What leaves the machine |
+|---|---|---|---|---|
+| `airlock/` + `hooks/` (the guard) | The rules table, policy, redaction, client and health. The `PreToolUse` entry point. | **yes** (`--guard`) | exercised | Redacted summaries of the ambiguous fraction of tool calls, to TypeSafe. Never a raw tool result; every string passes through `airlock/redact.py` first. |
+| `deploy/` (warm daemon) | Keeps a warm connection so a judgement costs ~0.3 s instead of ~0.9 s (measured; see [Measured numbers](#measured-numbers)). | **yes** (`--daemon`) | exercised | Nothing of its own. It is the transport the guard already uses. |
+| `monitoring/` | Five-minute health check, its timer, and an optional push to a monitor you host. | **yes** (`--monitoring`) | exercised | Nothing, unless you set `AIRLOCK_KUMA_PUSH_URL`, in which case a bare liveness ping to that URL. |
+| `filesearch/` | Per-user `plocate` index of `$HOME` and its hourly timer, so R8 can suggest an indexed search. | **yes** (`--filesearch`) | exercised | Nothing. Entirely local. |
+| `claude-update/` | Idle-only Claude Code auto-updater and its timer. Updates only when no run is alive. | **yes** (`--claude-update`) | exercised | Nothing. An idle check and `npm install -g`. |
+| `belay/` | Wrapper for the community `jev-belay` Stop hook: when an agent claims it is finished with no passing check behind it, sends it back to verify. | **yes** (`--belay`) -- clones a pinned third-party repo | exercised | Task text, final assistant message and check command lines, through a 13-rule secret redactor, capped at a few thousand characters. No diffs, no file contents. |
+| `browser/` | Clones and patches a Jev-decided browser agent at a pin. | no (`--browser`) | own numbers, see `browser/README.md` | Page state and goals to the decision model you configure. |
+| `review/` | Clones a Jev code reviewer at a pin, with a fail-open wrapper. | no (`--review`) | no numbers here | Diffs, to whatever review gate you configure. |
+| `shim/` | An OpenAI-shaped HTTP shim over the `claude` CLI. | no (`--shim`) | **experimental** | Whatever you send through it. |
+| `compaction/` | Installer for the community `fast-jev-compaction` plugin. **Read `compaction/README.md` first.** | no (`--compaction`) | never enabled here | **Up to ~25,000 tokens of raw, unredacted tool inputs and tool-result text per request.** By far the largest exposure here, which is why it is never installed for you. |
+| `tuning/` | Unattended tuning loop, its timer, promotion and threshold calibration. | no (`--tuning`) | exercised | Real Claude sessions on the account you nominate, for the judge. |
+| `docclass/` | Two-stage document classifier with an escape hatch and a confidence gate. | no | **experimental** | Page text, to TypeSafe, when you call it. |
+| `logtriage/` | Redact-first, local-rules-first log triage on stdin. | no | **experimental** | Nothing until local rules are exhausted; redacted lines after that. |
+| `eval/` | Labelled cases for every rule, and the ablations. | n/a | exercised | Nothing. |
+| `bench/` | A/B benchmark: enforce mode against no guard at all. | n/a | exercised | Nothing until you run it. |
+| `install/` | One installer, a doctor, deploy/rollback/wire, the migration script. | n/a | exercised | Nothing. |
+| `docs/` | Credits for the community projects the ported patterns came from, and the install guides. | n/a | n/a | Nothing. |
 
 ## Install (for a person or an agent)
 
@@ -506,7 +513,12 @@ interpreter start-up. `subprocess`/`tempfile` and `client`/`guards` are
 imported lazily for exactly that reason.
 
 **Judgement latency.** Roughly 0.3 s through the warm daemon, against roughly
-0.9 s for a fresh DNS + TCP + TLS handshake per call.
+0.9 s for a fresh DNS + TCP + TLS handshake per call. Both are round figures for
+a single call on an idle daemon. The one figure measured end to end here is the
+tier eval's: **mean 572 ms per judgement** over 58 real Jev calls at four-way
+concurrency, `python3 -m airlock.eval`, 2026-09-19, on the box described above --
+which is a throughput number under load, not a single-call latency, and is
+quoted only so there is one figure with a method attached to it.
 
 **Rule accuracy**, `python3 -m airlock.eval`, 2026-09-19. Every deny-capable
 rule scored 100% with zero false denies on its labelled cases (R1 16 cases,
@@ -514,10 +526,12 @@ R2 8, R3 10, R4 11, R5 9, R6 9, R7 10, R9 9), so every rule ships at its
 intended action. **A rule with any false deny on its eval cases ships as
 `warn`, not `deny`.**
 
-`R10-general-risk` scored **88.9% on 18 labelled cases** (16/18), with zero
-false denies -- structurally impossible, since it can only warn. Both misses
-are over-warns on calls a person would shrug at: restarting this project's own
-user daemon, and an `rsync` into a local backup directory. Its code pre-filter
+`R10-general-risk` scored **95.2% on 21 labelled cases** (20/21), with zero
+false denies -- structurally impossible, since it can only warn. It was 88.9%
+(16/18) before the quieting pass that narrowed its pre-filter away from
+user-level `systemctl` and read-only `docker`; `eval/README.md` has both runs.
+The one remaining miss is an over-warn on an `rsync` into a local backup
+directory, which also flaps between runs. Its code pre-filter
 fired on **2 of 284 (0.7%)** of the Bash calls in the existing shadow log; it
 was actually *consulted* on 0 of them, because every row in that log is a call
 some specific rule had already claimed. That is the intended shape -- the
