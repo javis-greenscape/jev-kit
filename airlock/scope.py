@@ -619,6 +619,16 @@ def _widest(current, candidate):
     return current
 
 
+def _root_is_windows_host(root):
+    """policy.root_is_windows_host, imported lazily so scope.py keeps no
+    import-time dependency on policy (which imports this module)."""
+    try:
+        from . import policy
+        return policy.root_is_windows_host(root)
+    except Exception:
+        return False
+
+
 def classify_command(command, cwd=None, windows=None, _depth=0):
     """Classify the search scope of a shell command.
 
@@ -779,9 +789,25 @@ def classify_command(command, cwd=None, windows=None, _depth=0):
 
     if not found_any:
         return {"scope": "unknown", "program": None, "roots": []}
-    if last.get("scope") == "disk_wide" and searched_roots:
-        last = dict(last)
-        last["roots"] = searched_roots
+    if searched_roots:
+        scope_name = last.get("scope")
+        if scope_name == "disk_wide":
+            last = dict(last)
+            last["roots"] = searched_roots
+        elif scope_name in ("single_dir", "single_repo"):
+            # Both stages of `find /mnt/c/Users -name x; find ~/docs -name x`
+            # are single_dir, so publishing the accumulator only for a
+            # disk-wide verdict handed policy the first stage's root alone
+            # and lost the other half of the search (Codex P1, PR #1). Only
+            # a command that touched the Windows host gets the full set,
+            # since that is the case where the two halves need different
+            # indexes. Everything else keeps the widest stage's roots,
+            # because `roots` also feeds root_has_graphify_graph and
+            # widening it unconditionally would change which commands reach
+            # the unrelated graphify deny.
+            if any(_root_is_windows_host(r) for r in searched_roots):
+                last = dict(last)
+                last["roots"] = searched_roots
     return last
 
 

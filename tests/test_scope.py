@@ -396,6 +396,21 @@ class WslDriveRootScopeTests(unittest.TestCase):
             self.assertEqual(result["scope"], "disk_wide")
             self.assertIn("/mnt/c/Users", result["roots"])
 
+    def test_two_single_dir_stages_keep_the_windows_root(self):
+        # Codex P1, PR #1: both stages scope as single_dir, so publishing
+        # the accumulator only for a disk-wide verdict handed policy one
+        # stage's root and dropped the other half of the search.
+        from unittest import mock
+        from airlock import scope
+        win = "/mnt/c/Users"
+        for cmd in ('find %s -name x; find /home/alice/docs -name x' % win,
+                    'find /home/alice/docs -name x; find %s -name x' % win):
+            with self.subTest(cmd=cmd):
+                with mock.patch("airlock.headless.is_wsl", return_value=True):
+                    result = scope.classify_command(cmd, "/home/alice")
+                self.assertIn(win, result["roots"])
+                self.assertIn("/home/alice/docs", result["roots"])
+
     def test_roots_are_deduplicated_across_stages(self):
         from unittest import mock
         from airlock import scope
