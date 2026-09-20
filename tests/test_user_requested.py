@@ -280,12 +280,18 @@ class TestUserRequestedSoftening(EnforceBase):
 
     def test_it_is_never_asked_for_a_rule_that_only_warns(self):
         """R3 (a bare `pytest`) is a warn. Softening a warn is meaningless, so
-        the question must not be asked -- and must not cost an API call."""
+        the question must not be asked -- and must not cost an API call.
+
+        R3 only fires on a small host (see test_headless.TestHostCapacity),
+        so this test pins the detected size to gs's (4 cores) rather than
+        depending on whatever machine runs the suite."""
         path = _transcript([_user_row("run the tests")])
         self.addCleanup(os.unlink, path)
         self._stdout()
         data = self._payload(command="pytest", transcript=path, session="soften-6")
-        with mock.patch("airlock.client.ask") as ask:
+        with mock.patch("airlock.rules.is_small_host", return_value=True), \
+             mock.patch("airlock.rules.cpu_count", return_value=4), \
+             mock.patch("airlock.client.ask") as ask:
             enforce.handle(data, "Bash")
         ask.assert_not_called()
 
@@ -297,7 +303,9 @@ class TestUserRequestedSoftening(EnforceBase):
         buf = self._stdout()
         data = self._payload(command="pytest", transcript=path, session="soften-7")
         answer = ({"answers": {"user_requested": {"noul": 0.0}}}, 20)
-        with mock.patch("airlock.client.ask", return_value=answer):
+        with mock.patch("airlock.rules.is_small_host", return_value=True), \
+             mock.patch("airlock.rules.cpu_count", return_value=4), \
+             mock.patch("airlock.client.ask", return_value=answer):
             denied = enforce.handle(data, "Bash")
         self.assertFalse(denied)
         self.assertNotIn("permissionDecision", json.loads(buf.getvalue()).get("hookSpecificOutput", {}))

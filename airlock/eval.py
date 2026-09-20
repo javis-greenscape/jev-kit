@@ -45,6 +45,9 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 # ships `off` on every platform -- see airlock/headless.py -- so it is pinned
 # at its intended action here; every other rule is already at its default.
 EVAL_OVERRIDES = {"R6-gui-or-browser": "deny"}
+#: The host the rules table's expected labels were written for: gs, the shared
+#: 4-core VPS. Cases are scored as if running there, whatever the runner is.
+EVAL_HOST_CPUS = 4
 CASES_FILE = REPO_ROOT / "eval" / "cases.jsonl"
 RESULT_FILE = REPO_ROOT / "eval" / "last_result.json"
 
@@ -192,6 +195,11 @@ def _judge_rules(payload, rule_id):
     if tp and not Path(tp).is_absolute():
         payload["transcript_path"] = str(REPO_ROOT / tp)
     ctx = rules_mod.build_ctx(payload, tool_name)
+    # Pin the host capacity R3 reads. Its pre-filter is silent on a roomy
+    # machine, so without this the r3-* cases score as misses on any runner
+    # with more cores than airlock.headless.SMALL_HOST_CPU_THRESHOLD, and the
+    # per-rule accuracy number would then depend on which box ran the eval.
+    ctx["cpus"] = EVAL_HOST_CPUS
     rows = rules_mod.dry_run(ctx, ask=_ask_jev, overrides=EVAL_OVERRIDES)
     mine = [r for r in rows if r["rule_id"] == rule_id]
     other = sorted({r["rule_id"] for r in rows if r["rule_id"] != rule_id and r.get("fires")})

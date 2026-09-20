@@ -15,6 +15,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from airlock import headless, rules
 
@@ -114,6 +115,215 @@ class TestHeadlessDetection(unittest.TestCase):
                                            proc_version="", loginctl=lambda: None)
         self.assertFalse(hl)
         self.assertIn("detection failed", why)
+
+
+class TestHostCapacity(unittest.TestCase):
+    """R3 (airlock/rules.py:prefilter_wide_run) was written for gs, the
+    shared VPS: `nproc` = 4, 7GB RAM. It must stay silent on a bigger box
+    like MasterRig (`nproc` = 12, 15GB RAM), so this is gated on real,
+    injectable core-count detection rather than firing unconditionally."""
+
+    def test_cpu_count_uses_the_override(self):
+        self.assertEqual(headless.cpu_count(override=4), 4)
+        self.assertEqual(headless.cpu_count(override=12), 12)
+
+    def test_cpu_count_falls_back_to_a_safe_small_number(self):
+        with mock.patch("os.cpu_count", return_value=None), \
+             mock.patch("airlock.headless._affinity_cpu_count", return_value=None), \
+             mock.patch("airlock.headless._cgroup_cpu_quota_count", return_value=None):
+            self.assertEqual(headless.cpu_count(), 2)
+
+    def test_gs_sized_host_is_small(self):
+        self.assertTrue(headless.is_small_host(cpus=4))
+
+    def test_masterrig_sized_host_is_not_small(self):
+        self.assertFalse(headless.is_small_host(cpus=12))
+
+    def test_threshold_boundary(self):
+        self.assertTrue(headless.is_small_host(cpus=headless.SMALL_HOST_CPU_THRESHOLD))
+        self.assertFalse(headless.is_small_host(cpus=headless.SMALL_HOST_CPU_THRESHOLD + 1))
+
+    def test_is_small_host_detects_the_real_machine_when_not_overridden(self):
+        with mock.patch("airlock.headless.cpu_count", return_value=4):
+            self.assertTrue(headless.is_small_host())
+        with mock.patch("airlock.headless.cpu_count", return_value=12):
+            self.assertFalse(headless.is_small_host())
+
+
+class TestCpuCountConstrained(unittest.TestCase):
+    """Codex P2 on PR #2: os.cpu_count() reports the HOST's logical core
+    count, not what a container's --cpus quota or a taskset affinity mask
+    actually lets this process use -- so on a 12-core host capped to 4,
+    R3's warning was suppressed exactly where uncapped work still contends."""
+
+    def test_uses_the_smallest_of_affinity_cgroup_and_os_cpu_count(self):
+        with mock.patch("airlock.headless._affinity_cpu_count", return_value=8), \
+             mock.patch("airlock.headless._cgroup_cpu_quota_count", return_value=4), \
+             mock.patch("os.cpu_count", return_value=12):
+            self.assertEqual(headless.cpu_count(), 4)
+
+    def test_affinity_alone_caps_below_os_cpu_count(self):
+        with mock.patch("airlock.headless._affinity_cpu_count", return_value=4), \
+             mock.patch("airlock.headless._cgroup_cpu_quota_count", return_value=None), \
+             mock.patch("os.cpu_count", return_value=12):
+            self.assertEqual(headless.cpu_count(), 4)
+
+    def test_cgroup_quota_alone_caps_below_os_cpu_count(self):
+        with mock.patch("airlock.headless._affinity_cpu_count", return_value=None), \
+             mock.patch("airlock.headless._cgroup_cpu_quota_count", return_value=4), \
+             mock.patch("os.cpu_count", return_value=12):
+            self.assertEqual(headless.cpu_count(), 4)
+
+    def test_no_constraint_signal_falls_back_to_os_cpu_count(self):
+        with mock.patch("airlock.headless._affinity_cpu_count", return_value=None), \
+             mock.patch("airlock.headless._cgroup_cpu_quota_count", return_value=None), \
+             mock.patch("os.cpu_count", return_value=12):
+            self.assertEqual(headless.cpu_count(), 12)
+
+    def test_override_bypasses_all_detection(self):
+        with mock.patch("airlock.headless._affinity_cpu_count", return_value=2), \
+             mock.patch("airlock.headless._cgroup_cpu_quota_count", return_value=2), \
+             mock.patch("os.cpu_count", return_value=2):
+            self.assertEqual(headless.cpu_count(override=99), 99)
+
+
+class TestCgroupCpuQuotaCount(unittest.TestCase):
+    def _cgroup(self, files):
+        d = tempfile.mkdtemp()
+        for rel, content in files.items():
+            path = Path(d) / rel
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(content)
+        return d
+
+    def test_v2_quota_and_period(self):
+        root = self._cgroup({"cpu.max": "400000 100000\n"})
+        self.assertEqual(headless._cgroup_cpu_quota_count(root), 4)
+
+    def test_v2_unlimited_is_no_evidence(self):
+        root = self._cgroup({"cpu.max": "max 100000\n"})
+        self.assertIsNone(headless._cgroup_cpu_quota_count(root))
+
+    def test_v2_partial_core_rounds_up(self):
+        root = self._cgroup({"cpu.max": "150000 100000\n"})
+        self.assertEqual(headless._cgroup_cpu_quota_count(root), 2)
+
+    def test_v1_quota_and_period(self):
+        root = self._cgroup({
+            "cpu/cpu.cfs_quota_us": "200000\n",
+            "cpu/cpu.cfs_period_us": "100000\n",
+        })
+        self.assertEqual(headless._cgroup_cpu_quota_count(root), 2)
+
+    def test_v1_unlimited_quota_is_no_evidence(self):
+        root = self._cgroup({
+            "cpu/cpu.cfs_quota_us": "-1\n",
+            "cpu/cpu.cfs_period_us": "100000\n",
+        })
+        self.assertIsNone(headless._cgroup_cpu_quota_count(root))
+
+    def test_missing_files_are_no_evidence(self):
+        root = self._cgroup({})
+        self.assertIsNone(headless._cgroup_cpu_quota_count(root))
+
+    # --- the process's own cgroup, not the mount root (Codex, PR #2) -------
+
+    def _proc_cgroup(self, text):
+        d = tempfile.mkdtemp()
+        path = Path(d) / "cgroup"
+        path.write_text(text)
+        return str(path)
+
+    def test_v2_quota_on_the_processes_own_cgroup(self):
+        # The mount root says `max`; the systemd scope this process is in is
+        # capped at 2 cores. Reading only the root reported no limit.
+        root = self._cgroup({
+            "cpu.max": "max 100000\n",
+            "user.slice/session-3.scope/cpu.max": "200000 100000\n",
+        })
+        proc = self._proc_cgroup("0::/user.slice/session-3.scope\n")
+        self.assertEqual(headless._cgroup_cpu_quota_count(root, proc), 2)
+
+    def test_v2_ancestor_quota_binds_the_leaf(self):
+        root = self._cgroup({
+            "cpu.max": "max 100000\n",
+            "user.slice/cpu.max": "300000 100000\n",
+            "user.slice/session-3.scope/cpu.max": "max 100000\n",
+        })
+        proc = self._proc_cgroup("0::/user.slice/session-3.scope\n")
+        self.assertEqual(headless._cgroup_cpu_quota_count(root, proc), 3)
+
+    def test_tightest_limit_in_the_chain_wins(self):
+        root = self._cgroup({
+            "user.slice/cpu.max": "400000 100000\n",
+            "user.slice/session-3.scope/cpu.max": "100000 100000\n",
+        })
+        proc = self._proc_cgroup("0::/user.slice/session-3.scope\n")
+        self.assertEqual(headless._cgroup_cpu_quota_count(root, proc), 1)
+
+    def test_v1_quota_on_the_processes_own_cgroup(self):
+        root = self._cgroup({
+            "cpu/docker/abc/cpu.cfs_quota_us": "200000\n",
+            "cpu/docker/abc/cpu.cfs_period_us": "100000\n",
+        })
+        proc = self._proc_cgroup("4:cpu,cpuacct:/docker/abc\n")
+        self.assertEqual(headless._cgroup_cpu_quota_count(root, proc), 2)
+
+    def test_unreadable_proc_cgroup_falls_back_to_the_root(self):
+        root = self._cgroup({"cpu.max": "400000 100000\n"})
+        self.assertEqual(
+            headless._cgroup_cpu_quota_count(root, "/nonexistent/cgroup"), 4)
+
+    # --- hierarchy paths are not mount paths (Codex, PR #2) ---------------
+
+    def _mountinfo(self, text):
+        d = tempfile.mkdtemp()
+        path = Path(d) / "mountinfo"
+        path.write_text(text)
+        return str(path)
+
+    def test_v2_subtree_mount_translates_the_hierarchy_path(self):
+        # A container without its own cgroup namespace: mountinfo root is
+        # /docker/abc, so hierarchy path /docker/abc/child is visible at
+        # <mountpoint>/child, not <mountpoint>/docker/abc/child.
+        root = self._cgroup({"child/cpu.max": "200000 100000\n"})
+        proc = self._proc_cgroup("0::/docker/abc/child\n")
+        mi = self._mountinfo(
+            "36 25 0:31 /docker/abc %s rw - cgroup2 cgroup2 rw\n" % root)
+        self.assertEqual(
+            headless._cgroup_cpu_quota_count(root, proc, mi), 2)
+
+    def test_v1_cpu_controller_mounted_as_cpu_cpuacct(self):
+        root = self._cgroup({"cpu,cpuacct/abc/cpu.cfs_quota_us": "300000\n",
+                             "cpu,cpuacct/abc/cpu.cfs_period_us": "100000\n"})
+        proc = self._proc_cgroup("4:cpu,cpuacct:/abc\n")
+        mi = self._mountinfo(
+            "31 25 0:27 / %s/cpu,cpuacct rw - cgroup cgroup rw,cpu,cpuacct\n"
+            % root)
+        self.assertEqual(
+            headless._cgroup_cpu_quota_count(root, proc, mi), 3)
+
+    def test_path_outside_the_mounted_subtree_is_no_evidence(self):
+        root = self._cgroup({"cpu.max": "100000 100000\n"})
+        proc = self._proc_cgroup("0::/elsewhere\n")
+        mi = self._mountinfo(
+            "36 25 0:31 /docker/abc %s rw - cgroup2 cgroup2 rw\n" % root)
+        self.assertIsNone(headless._cgroup_cpu_quota_count(root, proc, mi))
+
+    def test_private_namespace_reports_a_root_relative_path(self):
+        # /proc/self/cgroup says "/" while mountinfo's root is a subtree:
+        # the quota lives at the mount point itself (Codex P2, PR #2).
+        root = self._cgroup({"cpu.max": "500000 100000\n"})
+        proc = self._proc_cgroup("0::/\n")
+        mi = self._mountinfo(
+            "36 25 0:31 /docker/abc %s rw - cgroup2 cgroup2 rw\n" % root)
+        self.assertEqual(headless._cgroup_cpu_quota_count(root, proc, mi), 5)
+
+    def test_unreadable_mountinfo_uses_the_plain_layout(self):
+        root = self._cgroup({"user.slice/cpu.max": "200000 100000\n"})
+        proc = self._proc_cgroup("0::/user.slice\n")
+        self.assertEqual(
+            headless._cgroup_cpu_quota_count(root, proc, "/nonexistent/mi"), 2)
 
 
 class TestMergeIntoRulesJson(unittest.TestCase):
