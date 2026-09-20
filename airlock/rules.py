@@ -1787,11 +1787,13 @@ def _pw_scan(segments, cwd, depth):
                 cur_cwd = target if os.path.isabs(target) else os.path.join(cur_cwd or "", target)
             continue
         if _PW_CDP_ASSIGN_RE.search(seg):
-            # An export carries into the segments after it, exactly as a `cd`
-            # does. Handing the harness a CDP port IS running the agent.
+            # An assignment or export carries into the segments AFTER it,
+            # exactly as a `cd` does. It does not bless the command sharing
+            # its own segment: `BU_CDP_URL=... node hand-rolled.js` is still a
+            # hand-rolled script, and only a path inside the agent's checkout
+            # says otherwise.
             cdp = True
-            continue
-        if cdp:
+        elif cdp:
             continue
         if any(m in a for a in args for m in _PW_JEV_PATH_MARKERS):
             continue

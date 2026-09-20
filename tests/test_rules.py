@@ -899,9 +899,15 @@ class TestR11BrowseViaJev(unittest.TestCase):
 
     def test_running_the_jev_browser_agent_is_never_caught(self):
         path = self._script("run_goal.py", "from playwright.sync_api import sync_playwright\n")
-        self.assert_silent(self.ctx("BU_CDP_URL=http://127.0.0.1:9333 python3 %s" % path))
+        # An export carries into the segments after it.
         self.assert_silent(self.ctx("export BU_CDP_URL=http://127.0.0.1:9333 ; python3 %s" % path))
         self.assert_silent(self.ctx("python3 ~/code/jev-ultrafast/run_goal.py"))
+        # An inline assignment does NOT bless the command it shares a segment
+        # with: that is still a hand-rolled script until its path says
+        # otherwise.
+        self.assert_asks(self.ctx("BU_CDP_URL=http://127.0.0.1:9333 python3 %s" % path))
+        self.assert_silent(self.ctx(
+            "BU_CDP_URL=http://127.0.0.1:9333 python3 ~/code/jev-ultrafast/run_goal.py"))
 
     def test_a_cd_into_the_agent_carries_only_to_what_runs_inside_it(self):
         """A `cd` sets the working directory for the segments after it. It
