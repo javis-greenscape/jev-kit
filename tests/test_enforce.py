@@ -14,6 +14,25 @@ from pathlib import Path
 from unittest import mock
 
 from airlock import enforce
+from airlock import policy as _policy_mod
+
+# These tests assert the guard's behaviour, not what this machine happens to
+# have installed. The live guard detects its replacement commands, so a runner
+# without a plocate database would see every deny-path test fail for a reason
+# that has nothing to do with the code under test (Codex P1, PR #1). Pin the
+# detection for the file; the tests that check detection itself live in
+# tests/test_wsl_filesearch.py.
+_AVAIL = mock.patch.object(_policy_mod, "detect_availability",
+                           lambda *a, **k: ("home", True))
+
+
+def setUpModule():
+    _AVAIL.start()
+
+
+def tearDownModule():
+    _AVAIL.stop()
+
 
 
 def _bash_data(command, description="", session_id="s1"):
@@ -92,7 +111,6 @@ class TestDenyJsonShape(EnforceTestBase):
         from airlock import policy as _policy
         # The live guard detects what this machine has, so compare against
         # the same detected values rather than the assumed defaults.
-        _policy.reset_availability_cache()
         _db, _es = _policy.detect_availability()
         self.assertIn(_policy.filename_search_suggestion(
             db_kind=_db, has_es=_es).splitlines()[0],

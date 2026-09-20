@@ -11,6 +11,24 @@ from unittest import mock
 
 from airlock import policy, guards
 
+# These tests assert the guard's behaviour, not what this machine happens to
+# have installed. The live guard detects its replacement commands, so a runner
+# without a plocate database would see every deny-path test fail for a reason
+# that has nothing to do with the code under test (Codex P1, PR #1). Pin the
+# detection for the file; the tests that check detection itself live in
+# tests/test_wsl_filesearch.py.
+_AVAIL = mock.patch.object(policy, "detect_availability",
+                           lambda *a, **k: ("home", True))
+
+
+def setUpModule():
+    _AVAIL.start()
+
+
+def tearDownModule():
+    _AVAIL.stop()
+
+
 
 def _fake_tier_response(task_kind="judgement", confidence=0.9, prior_failed=0.0):
     other = "unclear" if task_kind != "unclear" else "lookup"
@@ -287,7 +305,6 @@ class TestRunToolChoiceGuard(unittest.TestCase):
         # is compared against the function that produces it rather than
         # against one platform's literal string. roots=["/"] matches what
         # scope.classify_command actually extracts from "find / -name ...".
-        policy.reset_availability_cache()
         _db, _es = policy.detect_availability()
         self.assertEqual(entry["suggestion"], policy.filename_search_suggestion(
             roots=["/"], db_kind=_db, has_es=_es))

@@ -616,9 +616,15 @@ def es_available(windows=None):
             if is_windows(windows) else _tool_on_path("es")
         usable = present
         if present:
+            # Only the SERVICE check comes from airlock.everything. Its
+            # find_es() searches for `es.exe` alone, so on the documented
+            # WSL setup -- a bare `es` client on PATH and no `es.exe` --
+            # status()["ok"] is False and Everything would be written off
+            # as missing although it works (Codex P1, PR #1). Presence is
+            # decided above, from the name this platform actually uses.
             try:
                 from . import everything
-                usable = bool(everything.status()["ok"])
+                usable = everything.service_running() is not False
             except Exception:
                 usable = present
         _AVAILABILITY_CACHE[key] = bool(usable)
@@ -708,23 +714,44 @@ def resolve_roots(roots, follow_symlinks=True):
 # find follows a symlink root only when told to: -L everywhere, -H for the
 # command-line arguments alone. Both make a symlinked root's target the real
 # search ground.
-_FIND_FOLLOW_RE = re.compile(r"(?:^|\s)-[HL](?=\s|$)")
 
 
 def command_follows_symlinks(command):
-    """True when `command` makes a symlinked search root's target the ground
-    actually searched. False for a plain `find link -name x`, and True when
-    the program is not find at all, since the ordinary case elsewhere (ls,
-    grep -r, rg) is to follow what the path resolves to."""
+    """True when every search stage in `command` makes a symlinked root's
+    target the ground actually searched.
+
+    False for a plain `find link -name x`, and True when the program is not
+    find at all, since the ordinary case elsewhere (ls, grep -r, rg) is to
+    follow what the path resolves to.
+
+    Decided per stage, because `find -L a -name x; find b -name y` follows
+    symlinks in one stage and not the other, and a command-wide answer
+    would apply the wrong rule to one of them (Codex P2, PR #1). The roots
+    reaching policy are a merged list with no stage attached, so a command
+    with any non-following find stage is treated as not following: the
+    roots then stay unresolved, a symlink is classified as the Linux path
+    it is spelled as, and the guard allows the crawl. Erring that way costs
+    a slow search; erring the other way blocks a command and recommends one
+    that searches a tree the original never enters."""
     if not command:
         return True
     try:
         text = str(command)
     except Exception:
         return True
-    if "find" not in text:
-        return True
-    return bool(_FIND_FOLLOW_RE.search(text))
+    for segment in _split_command_segments(text):
+        try:
+            words = shlex.split(segment)
+        except ValueError:
+            words = segment.split()
+        if not words:
+            continue
+        program = os.path.basename(words[0])
+        if program != "find":
+            continue
+        if not any(w in ("-L", "-H") for w in words[1:]):
+            return False
+    return True
 
 
 def root_is_plocate_covered(root, home=None, db_kind=None):

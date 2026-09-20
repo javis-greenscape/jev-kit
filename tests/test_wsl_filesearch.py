@@ -443,17 +443,61 @@ class TestTheAdviceMatchesTheMachine(unittest.TestCase):
         try:
             with mock.patch.object(policy, "_tool_on_path",
                                    lambda *a, **k: True), \
-                    mock.patch("airlock.everything.status",
-                               lambda *a, **k: {"ok": False}):
+                    mock.patch("airlock.everything.service_running",
+                               lambda *a, **k: False):
                 self.assertFalse(_REAL_ES_AVAILABLE(windows=False))
-            policy._AVAILABILITY_CACHE.clear()
+            policy.reset_availability_cache()
             with mock.patch.object(policy, "_tool_on_path",
                                    lambda *a, **k: True), \
-                    mock.patch("airlock.everything.status",
-                               lambda *a, **k: {"ok": True}):
+                    mock.patch("airlock.everything.service_running",
+                               lambda *a, **k: True):
+                self.assertTrue(_REAL_ES_AVAILABLE(windows=False))
+            # A service state that cannot be determined counts as usable.
+            policy.reset_availability_cache()
+            with mock.patch.object(policy, "_tool_on_path",
+                                   lambda *a, **k: True), \
+                    mock.patch("airlock.everything.service_running",
+                               lambda *a, **k: None):
                 self.assertTrue(_REAL_ES_AVAILABLE(windows=False))
         finally:
-            policy._AVAILABILITY_CACHE.clear()
+            policy.reset_availability_cache()
+
+    def test_a_bare_es_client_counts_under_wsl(self):
+        # The documented WSL setup is a client named `es` and no `es.exe`.
+        # everything.find_es() searches for es.exe alone, so deciding
+        # presence from status() wrote Everything off as missing.
+        policy.reset_availability_cache()
+        try:
+            seen = []
+
+            def only_bare_es(name):
+                seen.append(name)
+                return name == "es"
+
+            with mock.patch.object(policy, "_tool_on_path", only_bare_es), \
+                    mock.patch("airlock.everything.service_running",
+                               lambda *a, **k: None):
+                self.assertTrue(_REAL_ES_AVAILABLE(windows=False))
+            self.assertIn("es", seen)
+            self.assertNotIn("es.exe", seen)
+        finally:
+            policy.reset_availability_cache()
+
+    def test_symlink_following_is_decided_per_search_stage(self):
+        # One stage follows, the other does not. A command-wide answer
+        # applies the wrong rule to one of them.
+        self.assertFalse(policy.command_follows_symlinks(
+            "find -L a -name x; find b -name y"))
+        self.assertTrue(policy.command_follows_symlinks(
+            "find -L a -name x; find -H b -name y"))
+        # A non-find stage never makes the command stop following.
+        self.assertTrue(policy.command_follows_symlinks(
+            "rg -l foo a; find -L b -name y"))
+        self.assertFalse(policy.command_follows_symlinks(
+            "rg -l foo a; find b -name y"))
+        # `-name find` is an argument, not a second find stage.
+        self.assertTrue(policy.command_follows_symlinks(
+            "find -L a -name find"))
 
     def test_the_home_database_does_not_claim_ground_it_lacks(self):
         with mock.patch.object(policy, "plocate_db_kind", lambda *a, **k: "home"):
