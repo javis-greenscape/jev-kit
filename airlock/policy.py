@@ -1035,6 +1035,112 @@ def _invokes_program(command, names):
     return False
 
 
+_HELP_FLAGS = frozenset({"-h", "--help", "-help", "/?", "-version",
+                         "--version", "-v"})
+_DRIVE_SPELLING_RE = re.compile(r"^([A-Za-z]):[\\/]?(.*)$")
+
+
+def _indexed_segments(command, names):
+    """Every stage of `command` whose program is one of `names`, as token
+    lists. Empty when the command cannot be lexed."""
+    wanted = {n.lower() for n in names}
+    try:
+        from . import scope as _scope
+        segments = _scope.shell_segments(command)
+        if segments is None:
+            return []
+        out = []
+        for tokens in segments:
+            program = _scope.segment_program(tokens)
+            if program and program.lower() in wanted:
+                out.append(tokens)
+        return out
+    except Exception:
+        return []
+
+
+def _is_a_real_search(tokens):
+    """Does this invocation search anything?
+
+    `es -h` prints help. It was counted as Everything answering the crawl
+    beside it, which suppressed the deny for a genuine Windows-host search
+    (review finding, PR #1)."""
+    args = tokens[1:]
+    if any(a.lower() in _HELP_FLAGS for a in args):
+        return False
+    return any(not a.startswith("-") for a in args) or bool(args)
+
+
+def _es_path_as_wsl(value):
+    """An Everything `-path` value as the WSL path it names, or None when
+    the spelling is not one we can place."""
+    if not value:
+        return None
+    text = value.replace("\\", "/")
+    match = _DRIVE_SPELLING_RE.match(text)
+    if match:
+        return "/mnt/%s/%s" % (match.group(1).lower(), match.group(2))
+    if _WSL_MOUNT_RE.match(text):
+        return text
+    return None
+
+
+def _es_scopes(tokens):
+    """The `-path` values of one es invocation, as WSL paths. None means
+    the invocation is not restricted and so reaches every indexed drive."""
+    scopes = []
+    restricted = False
+    args = tokens[1:]
+    for index, arg in enumerate(args):
+        if arg.lower() != "-path":
+            continue
+        restricted = True
+        if index + 1 < len(args):
+            placed = _es_path_as_wsl(args[index + 1])
+            if placed:
+                scopes.append(placed)
+    if not restricted:
+        return None
+    return scopes
+
+
+def _es_covers_windows_roots(command, roots, windows=None):
+    """Does an Everything invocation in `command` actually cover every
+    Windows-host root the command searches?
+
+    Naming `es` anywhere used to be enough, so `find /mnt/c/Users -name x;
+    es -h` read as covered and the deny disappeared (review finding, PR #1).
+    """
+    targets = [r for r in (roots or []) if root_is_windows_host(r, windows)]
+    if not targets:
+        return True
+    for tokens in _indexed_segments(command, ("es", "es.exe")):
+        if not _is_a_real_search(tokens):
+            continue
+        scopes = _es_scopes(tokens)
+        if scopes is None:
+            # No -path: Everything searches every indexed drive.
+            return True
+        remaining = [t for t in targets
+                     if not any(winpath.is_under(t, s) for s in scopes)]
+        if not remaining:
+            return True
+        targets = remaining
+    return False
+
+
+def _locate_is_a_real_search(command):
+    """Is a locate/plocate stage an actual query rather than `plocate -h`?
+
+    Its index covers the same ground whatever pattern is asked for, so the
+    pattern itself is not correlated -- that would be guessing at what the
+    author meant to find."""
+    for tokens in _indexed_segments(command, ("locate", "plocate")):
+        if _is_a_real_search(tokens):
+            return True
+    return False
+
+
 def _command_position_is_es(command):
     """Is `es`/`es.exe` the program invoked somewhere in `command`, rather
     than text that merely follows a ;/&/| sitting inside a quoted argument,
@@ -1127,9 +1233,11 @@ def command_covers_roots(command, roots=None, windows=None, wsl=None,
         return False
     needs_windows = any_root_is_windows_host(roots, windows)
     if any_root_is_plocate_covered(roots, db_kind=kind) \
-            and not _command_position_is_locate(command):
+            and not _locate_is_a_real_search(command):
         return False
-    if needs_windows and not (es_ok and _command_position_is_es(command)):
+    if needs_windows and not (es_ok
+                              and _es_covers_windows_roots(command, roots,
+                                                           windows)):
         # Naming `es` covers a Windows-host root only while Everything can
         # answer: with the service stopped the client runs and reports every
         # file as absent. `has_es` was accepted here and never read, so the

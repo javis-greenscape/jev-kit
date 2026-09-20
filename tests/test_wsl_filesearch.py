@@ -975,5 +975,64 @@ class SonnetReviewRoundTwo(unittest.TestCase):
             windows=True, has_es=True), policy.ES_SUGGESTION)
 
 
+class IndexedInvocationMustCoverTheRoot(unittest.TestCase):
+    """Review finding on PR #1: naming `es` or `plocate` anywhere in the
+    command counted as covering every root it searched, so an unrelated
+    invocation silenced a real deny."""
+
+    KW = dict(scope="single_dir", search_intent="filename_search",
+              confidence=0.99, margin=0.9, root_has_graphify_graph=False,
+              wsl=True)
+
+    def deny(self, command, roots=("/mnt/c/Users",)):
+        return policy.evaluate_search(command=command, roots=list(roots),
+                                      **self.KW)["would_deny"]
+
+    def test_a_bare_windows_host_crawl_denies(self):
+        self.assertTrue(self.deny('find "/mnt/c/Users" -name x'))
+
+    def test_es_help_does_not_count_as_a_search(self):
+        for flag in ("-h", "--help", "-version"):
+            with self.subTest(flag=flag):
+                self.assertTrue(self.deny(
+                    'find "/mnt/c/Users" -name x; es %s' % flag))
+
+    def test_es_scoped_to_another_drive_does_not_cover(self):
+        self.assertTrue(self.deny(
+            'find "/mnt/c/Users" -name x; es -path "D:/data" y'))
+
+    def test_es_scoped_to_the_root_covers(self):
+        self.assertFalse(self.deny(
+            'find "/mnt/c/Users" -name x; es -path "C:/Users" y'))
+
+    def test_es_scoped_to_the_drive_covers_a_directory_under_it(self):
+        self.assertFalse(self.deny(
+            'find "/mnt/c/Users" -name x; es -path "C:/" y'))
+
+    def test_unrestricted_es_covers_every_indexed_drive(self):
+        self.assertFalse(self.deny('find "/mnt/c/Users" -name x; es y'))
+
+    def test_a_later_es_can_supply_the_coverage(self):
+        self.assertFalse(self.deny(
+            'find "/mnt/c/Users" -name x; es -path "D:/d" y; '
+            'es -path "C:/Users" z'))
+
+    def test_plocate_help_does_not_count_as_a_search(self):
+        self.assertTrue(policy.evaluate_search(
+            command='find "$HOME" -name x; plocate -h',
+            roots=["/home/alice"], scope="disk_wide",
+            search_intent="filename_search", confidence=0.99, margin=0.9,
+            root_has_graphify_graph=False, wsl=True)["would_deny"])
+
+    def test_a_real_plocate_query_covers_its_ground(self):
+        # The index holds the same ground whatever pattern is asked for,
+        # so the pattern itself is not correlated.
+        self.assertFalse(policy.evaluate_search(
+            command='find "$HOME" -name x; plocate -i pattern',
+            roots=["/home/alice"], scope="disk_wide",
+            search_intent="filename_search", confidence=0.99, margin=0.9,
+            root_has_graphify_graph=False, wsl=True)["would_deny"])
+
+
 if __name__ == "__main__":
     unittest.main()
