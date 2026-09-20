@@ -45,9 +45,18 @@ plocate -d ~/.cache/plocate/home.db -i '<pattern>'
 If this component is not installed, the guard falls back to plocate's own
 `/var/lib/plocate/plocate.db` and suggests `plocate -i '<pattern>'`, which
 indexes whatever `updatedb` was configured to index rather than `$HOME`
-alone. With no plocate database at all, and on WSL with no `es` on PATH,
-the guard suggests nothing and allows the crawl: a deny naming a tool the
-machine does not have takes away the only command that would have worked.
+alone.
+
+A machine with `locate` but not `plocate` is told to run `locate`, since
+the two take the same flags and only the program name differs.
+
+Everything counts as usable only when its client is on PATH **and** its
+service is not known to be stopped. With the service down `es` still runs
+and returns nothing, so a deny naming it would report every file as absent.
+
+With no plocate database at all, and on WSL with no usable Everything, the
+guard suggests nothing and allows the crawl. A deny naming a tool the machine does
+not have takes away the only command that would have worked.
 
 Rebuild it on demand when a file made in the last hour is missing:
 

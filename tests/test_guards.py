@@ -287,7 +287,10 @@ class TestRunToolChoiceGuard(unittest.TestCase):
         # is compared against the function that produces it rather than
         # against one platform's literal string. roots=["/"] matches what
         # scope.classify_command actually extracts from "find / -name ...".
-        self.assertEqual(entry["suggestion"], policy.filename_search_suggestion(roots=["/"]))
+        policy.reset_availability_cache()
+        _db, _es = policy.detect_availability()
+        self.assertEqual(entry["suggestion"], policy.filename_search_suggestion(
+            roots=["/"], db_kind=_db, has_es=_es))
 
 
 class TestRootHasCodeGraphField(unittest.TestCase):

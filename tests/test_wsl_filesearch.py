@@ -19,6 +19,10 @@ _HOME = mock.patch.dict(os.environ, {"HOME": "/home/alice"})
 # The suggestion now depends on what the machine has: Everything's client
 # on PATH, and which plocate database exists. Pin both, so the file asserts
 # the policy rather than the box it runs on.
+# Captured before the pin below replaces it, so the one test that checks the
+# detection itself can still reach the real function.
+_REAL_ES_AVAILABLE = policy.es_available
+
 _AVAIL = mock.patch.multiple(policy,
                              es_available=lambda *a, **k: True,
                              plocate_db_kind=lambda *a, **k: "home")
@@ -101,7 +105,17 @@ class TestRootIsWindowsHost(unittest.TestCase):
         self.assertTrue(policy.root_is_windows_host("/mnt/c"))
 
     def test_native_windows_path_is_windows_host(self):
-        self.assertTrue(policy.root_is_windows_host(r"C:\Users\alice"))
+        self.assertTrue(policy.root_is_windows_host(r"C:\Users\alice",
+                                                    windows=True))
+
+    def test_msys_drive_is_a_linux_path_under_wsl(self):
+        # /c/projects on WSL is an ordinary Linux directory. Everything
+        # cannot search it, so reading it as a drive would deny a working
+        # crawl and hand back a query for a path that does not exist.
+        self.assertFalse(policy.root_is_windows_host("/c/projects",
+                                                     windows=False))
+        self.assertTrue(policy.root_is_windows_host("/c/projects",
+                                                    windows=True))
 
     def test_linux_paths_are_not_windows_host(self):
         self.assertFalse(policy.root_is_windows_host("/home/alice"))
@@ -351,33 +365,95 @@ class TestTheAdviceMatchesTheMachine(unittest.TestCase):
     def test_no_everything_client_means_no_deny_for_a_windows_root(self):
         with mock.patch.object(policy, "es_available", lambda *a, **k: False):
             self.assertIsNone(policy.filename_search_suggestion(
-                windows=False, roots=["/mnt/c/Users"], wsl=True))
+                windows=False, roots=["/mnt/c/Users"], wsl=True,
+                has_es=False))
             verdict = policy.evaluate_search(
                 scope="disk_wide", search_intent="filename_search",
                 confidence=_ABOVE_BAR_CONFIDENCE, command="find /mnt/c -name x",
                 root_has_graphify_graph=False, margin=_ABOVE_BAR_MARGIN,
-                roots=["/mnt/c"], wsl=True)
+                roots=["/mnt/c"], wsl=True, has_es=False)
             self.assertFalse(verdict["would_deny"])
             self.assertIsNone(verdict["suggestion"])
 
     def test_no_plocate_database_means_no_deny_on_plain_linux(self):
-        with mock.patch.object(policy, "plocate_db_kind", lambda *a, **k: None):
-            self.assertIsNone(policy.filename_search_suggestion(
-                windows=False, roots=["/home/alice"], wsl=False))
+        self.assertIsNone(policy.filename_search_suggestion(
+            windows=False, roots=["/home/alice"], wsl=False, db_kind=None,
+            has_es=False))
 
     def test_a_system_database_names_itself_and_covers_the_linux_side(self):
-        with mock.patch.object(policy, "plocate_db_kind", lambda *a, **k: "system"):
+        self.assertEqual(
+            policy.filename_search_suggestion(
+                windows=False, roots=["/opt"], wsl=False, db_kind="system"),
+            "plocate -i '<pattern>'")
+        # /opt IS indexed by the system database, so a mixed search gets
+        # the two-index advice rather than the keep-crawling one.
+        s = policy.filename_search_suggestion(
+            windows=False, roots=["/opt", "/mnt/c"], wsl=True,
+            db_kind="system")
+        self.assertIn("plocate -i '<pattern>'", s)
+        self.assertIn("es -path", s)
+        self.assertNotIn("home.db", s)
+
+    def test_locate_without_plocate_is_named_as_locate(self):
+        # A machine with locate but no plocate was handed `plocate -i ...`,
+        # a command it cannot run.
+        self.assertEqual(
+            policy.plocate_command("system-locate"), "locate -i '<pattern>'")
+        self.assertEqual(
+            policy.plocate_command("home-locate"),
+            "locate -d ~/.cache/plocate/home.db -i '<pattern>'")
+        # The -locate variants cover exactly the ground their base kind does.
+        self.assertTrue(policy.root_is_plocate_covered(
+            "/opt", db_kind="system-locate"))
+        self.assertFalse(policy.root_is_plocate_covered(
+            "/opt", home="/home/alice", db_kind="home-locate"))
+
+    def test_probes_do_not_depend_on_what_this_host_has_installed(self):
+        # The generated policy and its pinned fingerprint must read the same
+        # on a machine with no index at all.
+        with mock.patch.object(policy, "plocate_db_kind",
+                               lambda *a, **k: None), \
+                mock.patch.object(policy, "es_available",
+                                  lambda *a, **k: False):
             self.assertEqual(
                 policy.filename_search_suggestion(
-                    windows=False, roots=["/opt"], wsl=False),
-                "plocate -i '<pattern>'")
-            # /opt IS indexed by the system database, so a mixed search gets
-            # the two-index advice rather than the keep-crawling one.
-            s = policy.filename_search_suggestion(
-                windows=False, roots=["/opt", "/mnt/c"], wsl=True)
-            self.assertIn("plocate -i '<pattern>'", s)
-            self.assertIn("es -path", s)
-            self.assertNotIn("home.db", s)
+                    windows=False, roots=["/home/alice"], wsl=False),
+                policy.PLOCATE_SUGGESTION)
+            verdict = policy.evaluate_search(
+                scope="disk_wide", search_intent="filename_search",
+                confidence=_ABOVE_BAR_CONFIDENCE, command="find / -name x",
+                root_has_graphify_graph=False, margin=_ABOVE_BAR_MARGIN,
+                roots=["/"], wsl=False)
+            self.assertTrue(verdict["would_deny"])
+
+    def test_find_without_L_does_not_follow_a_symlink_root(self):
+        # GNU find examines a symlink root itself; it never enters the
+        # target, so the search visits nothing on the Windows host.
+        self.assertFalse(policy.command_follows_symlinks("find link -name x"))
+        self.assertTrue(policy.command_follows_symlinks("find -L link -name x"))
+        self.assertTrue(policy.command_follows_symlinks("find -H link -name x"))
+        # Anything that is not find follows what the path resolves to.
+        self.assertTrue(policy.command_follows_symlinks("rg -l foo link"))
+        self.assertTrue(policy.command_follows_symlinks(None))
+
+    def test_a_stopped_everything_service_is_not_a_usable_index(self):
+        # es on PATH with the service stopped returns nothing, so a deny
+        # would block a working crawl for a command that finds no files.
+        policy._AVAILABILITY_CACHE.clear()
+        try:
+            with mock.patch.object(policy, "_tool_on_path",
+                                   lambda *a, **k: True), \
+                    mock.patch("airlock.everything.status",
+                               lambda *a, **k: {"ok": False}):
+                self.assertFalse(_REAL_ES_AVAILABLE(windows=False))
+            policy._AVAILABILITY_CACHE.clear()
+            with mock.patch.object(policy, "_tool_on_path",
+                                   lambda *a, **k: True), \
+                    mock.patch("airlock.everything.status",
+                               lambda *a, **k: {"ok": True}):
+                self.assertTrue(_REAL_ES_AVAILABLE(windows=False))
+        finally:
+            policy._AVAILABILITY_CACHE.clear()
 
     def test_the_home_database_does_not_claim_ground_it_lacks(self):
         with mock.patch.object(policy, "plocate_db_kind", lambda *a, **k: "home"):

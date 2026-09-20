@@ -217,6 +217,10 @@ def compute_search_entry(data, timeout_s=None):
     search_intent_conf = search_intent_answer.get("confidence", 0.0)
     margin = policy.compute_margin(search_intent_answer.get("probabilities"))
 
+    # The live guard is the ONE caller that detects what this machine has.
+    # Everywhere else keeps policy.ASSUMED_*, so the generated policy and its
+    # pinned fingerprint read the same on every host (Codex P1, PR #1).
+    db_kind, has_es = policy.detect_availability()
     verdict = policy.evaluate_search(
         scope=command_scope,
         search_intent=search_intent,
@@ -225,6 +229,8 @@ def compute_search_entry(data, timeout_s=None):
         root_has_graphify_graph=has_graph,
         margin=margin,
         roots=scope_result.get("roots"),
+        db_kind=db_kind,
+        has_es=has_es,
     )
     entry["would_deny"] = verdict["would_deny"] and not sampled
     entry["suggestion"] = verdict.get("suggestion")
