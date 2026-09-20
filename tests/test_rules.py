@@ -1001,6 +1001,36 @@ class TestR11BrowseViaJev(unittest.TestCase):
             tool = "mcp__plugin_playwright_playwright__" + action
             self.assert_asks(self.ctx_mcp(tool), tool)
 
+    def test_the_playwright_test_package_counts_as_an_import(self):
+        for name, body in (
+            ("a.js", "const { chromium } = require('@playwright/test');\n"),
+            ("b.mjs", "import { chromium } from '@playwright/test';\n"),
+        ):
+            path = self._script(name, body)
+            self.assert_asks(self.ctx("node %s" % path), name)
+        self.assert_asks(self.ctx("node -e \"require('@playwright/test')\""))
+
+    def test_npx_flags_before_the_subcommand(self):
+        for c in ("npx -y playwright open https://x",
+                  "npx --yes playwright codegen https://x",
+                  "npx -p playwright playwright open https://x"):
+            self.assert_asks(self.ctx(c), c)
+        for c in ("npx -y playwright test", "npx -y playwright install",
+                  "npx -y vitest run"):
+            self.assert_silent(self.ctx(c), c)
+        self.assertEqual(rules._npx_arguments(["-y", "playwright", "open"]),
+                         ["playwright", "open"])
+        self.assertEqual(rules._npx_arguments(["-p", "x", "y"]), ["y"])
+        self.assertEqual(rules._npx_arguments(["-y"]), [])
+
+    def test_a_label_mentioning_the_agent_exempts_nothing(self):
+        path = self._script("hand_written.js", "const { chromium } = require('playwright');\n")
+        self.assert_asks(self.ctx("node %s --note jev-ultrafast-comparison" % path))
+        self.assert_asks(self.ctx("node %s --label jev_ultrafast" % path))
+        self.assertFalse(rules._pw_names_the_agent("jev-ultrafast-comparison"))
+        self.assertFalse(rules._pw_names_the_agent("--with=jev-ultrafast"))
+        self.assertTrue(rules._pw_names_the_agent("~/code/jev-ultrafast/run_goal.py"))
+
     def test_non_browsing_mcp_and_other_servers_are_ignored(self):
         self.assert_silent(self.ctx_mcp("mcp__playwright__browser_install"), "browser_install")
         self.assert_silent(self.ctx_mcp("mcp__playwright__browser_close"), "browser_close")

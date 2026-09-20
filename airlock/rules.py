@@ -1607,9 +1607,9 @@ _PW_MCP_BROWSING = {
 }
 
 _PW_IMPORT_RE = re.compile(
-    r"""require\(\s*['"]playwright(?:-core)?(?:/[\w.-]+)?['"]"""
-    r"""|from\s+['"]playwright(?:-core)?(?:/[\w.-]+)?['"]"""
-    r"""|import\s*\(\s*['"]playwright(?:-core)?(?:/[\w.-]+)?['"]"""
+    r"""require\(\s*['"](?:@playwright/[\w.-]+|playwright(?:-core)?(?:/[\w.-]+)?)['"]"""
+    r"""|from\s+['"](?:@playwright/[\w.-]+|playwright(?:-core)?(?:/[\w.-]+)?)['"]"""
+    r"""|import\s*\(\s*['"](?:@playwright/[\w.-]+|playwright(?:-core)?(?:/[\w.-]+)?)['"]"""
     r"""|^\s*import\s+playwright\b"""
     r"""|^\s*from\s+playwright(?:\.[\w.]+)?\s+import\b""",
     re.M,
@@ -1619,12 +1619,16 @@ _PW_IMPORT_RE = re.compile(
 # `-c`: there the import is mid-line, inside a quoted argument, not at the
 # start of a line of its own.
 _PW_IMPORT_INLINE_RE = re.compile(
-    r"""require\(\s*['"]playwright(?:-core)?(?:/[\w.-]+)?['"]"""
-    r"""|from\s+['"]playwright(?:-core)?(?:/[\w.-]+)?['"]"""
-    r"""|import\s*\(\s*['"]playwright(?:-core)?(?:/[\w.-]+)?['"]"""
+    r"""require\(\s*['"](?:@playwright/[\w.-]+|playwright(?:-core)?(?:/[\w.-]+)?)['"]"""
+    r"""|from\s+['"](?:@playwright/[\w.-]+|playwright(?:-core)?(?:/[\w.-]+)?)['"]"""
+    r"""|import\s*\(\s*['"](?:@playwright/[\w.-]+|playwright(?:-core)?(?:/[\w.-]+)?)['"]"""
     r"""|\bimport\s+playwright\b"""
     r"""|\bfrom\s+playwright(?:\.[\w.]+)?\s+import\b""",
 )
+
+# npx flags that take a separate value.
+_NPX_VALUE_FLAGS = {"-p", "--package", "-c", "--call", "--userconfig", "--shell",
+                    "--cache", "--registry", "--node-arg", "--scripts-prepend-node-path"}
 
 _PW_SCRIPT_EXTS = (".js", ".cjs", ".mjs", ".ts", ".mts", ".cts", ".py")
 _PW_MAX_SCRIPT_BYTES = 256 * 1024
@@ -1660,6 +1664,34 @@ _UV_RUN_VALUE_FLAGS = {
     "--group", "--package", "--env-file", "--index-url", "--find-links",
     "--constraint", "--override", "--refresh-package",
 }
+
+
+def _pw_names_the_agent(tok):
+    """True when a token is a PATH into the agent's own checkout. A bare word
+    that merely contains the name (an argument, a label, a branch) is not."""
+    if not tok or tok.startswith("-"):
+        return False
+    if not any(m in tok for m in _PW_JEV_PATH_MARKERS):
+        return False
+    return "/" in tok or os.sep in tok or tok.endswith(_PW_SCRIPT_EXTS)
+
+
+def _npx_arguments(args):
+    """npx's arguments with npx's own flags stripped, so the first element is
+    the package or binary it runs."""
+    i = 0
+    while i < len(args):
+        a = args[i]
+        if a == "--":
+            return args[i + 1:]
+        if a.startswith("-"):
+            if "=" not in a and a in _NPX_VALUE_FLAGS:
+                i += 2
+            else:
+                i += 1
+            continue
+        return args[i:]
+    return []
 
 
 def _env_program(args):
@@ -1740,8 +1772,10 @@ def _pw_is_test_run(prog, args):
             return True
         if args[:1] == ["run"] and len(args) > 1 and _PW_TEST_SCRIPT_RE.search(args[1]):
             return True
-    if prog == "npx" and args[:1] and args[0] in _JS_RUNNERS:
-        return True
+    if prog == "npx":
+        rest = _npx_arguments(args)
+        if rest[:1] and rest[0] in _JS_RUNNERS:
+            return True
     return False
 
 
@@ -1812,7 +1846,10 @@ def _pw_scan(segments, cwd, depth, cdp=False):
             cdp = True
         elif cdp:
             continue
-        if any(m in a for a in args for m in _PW_JEV_PATH_MARKERS):
+        # Only a PATH-shaped token earns the exemption. `node x.js --note
+        # jev-ultrafast-comparison` is a hand-rolled script with a label on
+        # it, not the agent.
+        if any(_pw_names_the_agent(a) for a in args):
             continue
         if prog is None:
             continue
@@ -1842,12 +1879,17 @@ def _pw_scan(segments, cwd, depth, cdp=False):
                     return found
                 continue
 
-        sub = ""
+        # `npx -y playwright open ...` runs playwright just as `npx
+        # playwright open ...` does; npx's own flags come first.
+        pw_args = None
         if prog == "playwright":
-            sub = args[0] if args else ""
-        elif prog == "npx" and args[:1] == ["playwright"]:
-            sub = args[1] if len(args) > 1 else ""
-        if prog == "playwright" or (prog == "npx" and args[:1] == ["playwright"]):
+            pw_args = args
+        elif prog == "npx":
+            rest = _npx_arguments(args)
+            if rest[:1] == ["playwright"]:
+                pw_args = rest[1:]
+        if pw_args is not None:
+            sub = pw_args[0] if pw_args else ""
             if sub in _PW_CLI_ALLOWED or not sub:
                 continue
             return Match(
