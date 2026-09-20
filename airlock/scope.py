@@ -433,6 +433,13 @@ def _classify_find(args, cwd, windows=False):
         if len(tok) > 2 and tok[:2] in _FIND_GLOBAL_FLAGS_WITH_VALUE:
             idx += 1
             continue
+        # `--` ends the options; the paths follow it. Reading it as the
+        # start of the expression fell back to the working directory, so
+        # `find -- /mnt/c/Users -name x` run from $HOME was classified with
+        # $HOME as its root (Codex P1, PR #1).
+        if tok == "--":
+            idx += 1
+            break
         break
     roots = []
     for tok in args[idx:]:

@@ -547,6 +547,35 @@ class TestTheAdviceMatchesTheMachine(unittest.TestCase):
             result = scope.classify_command(command)
             self.assertIn("/mnt/c/Users", result["roots"], command)
 
+    def test_find_accepts_an_end_of_options_marker(self):
+        # `find -- /mnt/c/Users -name x` run from a Linux directory was
+        # classified with that directory as its root, so the deny named
+        # plocate and dropped the Windows-host results.
+        from airlock import scope
+        self.assertIn("/mnt/c/Users",
+                      scope.classify_command("find -- /mnt/c/Users -name x")["roots"])
+        self.assertIn("/mnt/c/Users",
+                      scope.classify_command("find -L -- /mnt/c/Users -name x")["roots"])
+
+    def test_a_shell_comment_is_not_a_second_command(self):
+        # Bash ignores everything after an unquoted `#`, so the `es` here
+        # never runs and the crawl still needs steering.
+        self.assertFalse(policy.command_covers_roots(
+            "find /mnt/c -name x # ; es placeholder",
+            roots=["/mnt/c"], windows=False, wsl=True))
+        # A `#` inside quotes is part of a filename, not a comment.
+        self.assertTrue(policy.command_covers_roots(
+            'find /mnt/c -name "a#b"; es x',
+            roots=["/mnt/c"], windows=False, wsl=True))
+        # An escaped `#` is likewise not a comment.
+        self.assertTrue(policy.command_covers_roots(
+            "find /mnt/c -name a\\#b; es x",
+            roots=["/mnt/c"], windows=False, wsl=True))
+        # A comment ends at the newline; a later line still counts.
+        self.assertTrue(policy.command_covers_roots(
+            "find /mnt/c -name x # comment\nes -path C:/ x",
+            roots=["/mnt/c"], windows=False, wsl=True))
+
     def test_a_prefixed_find_is_still_a_find_stage(self):
         # scope strips these prefixes before naming the program; reading
         # the prefix as the program made the stage look like something
