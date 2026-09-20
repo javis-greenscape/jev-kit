@@ -127,22 +127,51 @@ def _run(runner, argv):
         return 1, str(exc)[:200]
 
 
+def _run_windows_tool(runner, argv):
+    """Run a native Windows console tool, from Windows or from WSL.
+
+    Under WSL the bare names `sc` and `tasklist` do not resolve: interop
+    runs Windows executables only under their full `.exe` names. The probes
+    therefore could not run at all there and always answered "unknown",
+    which is indistinguishable from a stopped service (Codex P1, PR #1).
+    The `.exe` form is tried whenever the bare name fails to launch.
+    """
+    code, out = _run(runner, argv)
+    if code == 0:
+        return code, out
+    text = (out or "").lower()
+    launch_failed = (
+        "no such file" in text
+        or "not found" in text
+        or "filenotfounderror" in text
+        or "errno 2" in text
+    )
+    if launch_failed and not argv[0].lower().endswith(".exe"):
+        return _run(runner, [argv[0] + ".exe"] + list(argv[1:]))
+    return code, out
+
+
 def service_running(runner=None, env=None):
     """Is the Everything index live?
 
     Two probes, cheapest first. `sc query Everything` answers for the service
     install; a per-user install has no service, so `tasklist` for
     Everything.exe is the fallback. Returns True, False, or None when neither
-    probe could be run at all (which is what happens on Linux, and is
-    reported as "unknown" rather than as "no").
+    probe could be run at all, reported as "unknown" rather than as "no".
+
+    Callers deciding whether to BLOCK a command must treat unknown as "not
+    usable": with Everything stopped and its client still on PATH, `es` runs
+    and returns nothing, so a deny would replace a working crawl with a
+    query that finds no files.
     """
-    code, out = _run(runner, ["sc", "query", "Everything"])
+    code, out = _run_windows_tool(runner, ["sc", "query", "Everything"])
     text = (out or "").lower()
     if code == 0 and "running" in text:
         return True
     reachable = code == 0 or "1060" in text or "does not exist" in text
 
-    code, out = _run(runner, ["tasklist", "/FI", "IMAGENAME eq Everything.exe", "/NH"])
+    code, out = _run_windows_tool(
+        runner, ["tasklist", "/FI", "IMAGENAME eq Everything.exe", "/NH"])
     text = (out or "").lower()
     if code == 0 and "everything.exe" in text:
         return True

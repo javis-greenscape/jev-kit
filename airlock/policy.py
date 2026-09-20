@@ -622,11 +622,19 @@ def es_available(windows=None):
             # status()["ok"] is False and Everything would be written off
             # as missing although it works (Codex P1, PR #1). Presence is
             # decided above, from the name this platform actually uses.
+            #
+            # Only a probe that came back RUNNING counts. An indeterminate
+            # answer -- which is what a probe that cannot run returns --
+            # must not read as usable: with Everything stopped and the
+            # client still on PATH, `es` runs and returns nothing, so a
+            # deny would block a working crawl for a query that finds no
+            # files (Codex P1, PR #1). No answer means no deny, and the
+            # crawl is merely slow.
             try:
                 from . import everything
-                usable = everything.service_running() is not False
+                usable = everything.service_running() is True
             except Exception:
-                usable = present
+                usable = False
         _AVAILABILITY_CACHE[key] = bool(usable)
     return _AVAILABILITY_CACHE[key]
 
@@ -744,6 +752,16 @@ def command_follows_symlinks(command):
             words = shlex.split(segment)
         except ValueError:
             words = segment.split()
+        # `sudo find link -name x` is a find stage. scope classification
+        # strips these prefixes before naming the program, and reading the
+        # prefix as the program here made the stage look like something
+        # other than find, so it counted as following symlinks (Codex P2,
+        # PR #1). Uses scope's own stripper, so the two cannot drift.
+        try:
+            from . import scope as _scope
+            words = _scope._strip_prefixes(words)
+        except Exception:
+            pass
         if not words:
             continue
         program = os.path.basename(words[0])
@@ -873,9 +891,18 @@ def filename_search_suggestion(windows=None, roots=None, wsl=None,
             # would block the one command that does work.
             return None
         if uncovered:
-            return _whole_fs_suggestion(plocate_line) if has_es else None
+            # The whole-filesystem advice names plocate for the Linux half.
+            # With no database that line is a command the machine cannot
+            # run, and the remaining `find <dir>` line is described as
+            # covering Linux paths OUTSIDE $HOME, so following it drops the
+            # home-side results (Codex P1, PR #1). No database, no deny.
+            if not has_es or kind is None:
+                return None
+            return _whole_fs_suggestion(plocate_line)
         if needs_es:
             if covered:
+                if kind is None:
+                    return None
                 return _mixed_suggestion(plocate_line)
             return ES_WSL_SUGGESTION
     if kind is None:

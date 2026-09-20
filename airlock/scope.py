@@ -410,9 +410,32 @@ def _has_flag(tokens, *names):
     return False
 
 
+#: find's global options, which precede the search roots. -H, -L and -P take
+#: no value; -D and -O take one. Stopping at the first "-" token recorded the
+#: working directory as the root of `find -L /mnt/c/Users -name x`, so the
+#: prefilter saw neither a disk-wide nor a Windows-host search and skipped it
+#: (Codex P2, PR #1).
+_FIND_GLOBAL_FLAGS = {"-H", "-L", "-P"}
+_FIND_GLOBAL_FLAGS_WITH_VALUE = {"-D", "-O"}
+
+
 def _classify_find(args, cwd, windows=False):
+    idx = 0
+    while idx < len(args):
+        tok = args[idx]
+        if tok in _FIND_GLOBAL_FLAGS:
+            idx += 1
+            continue
+        if tok in _FIND_GLOBAL_FLAGS_WITH_VALUE:
+            idx += 2
+            continue
+        # -O2 and -Dsearch attach their value to the flag.
+        if len(tok) > 2 and tok[:2] in _FIND_GLOBAL_FLAGS_WITH_VALUE:
+            idx += 1
+            continue
+        break
     roots = []
-    for tok in args:
+    for tok in args[idx:]:
         if tok.startswith("-"):
             break
         roots.append(_expand(tok, cwd, windows))

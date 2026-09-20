@@ -452,13 +452,15 @@ class TestTheAdviceMatchesTheMachine(unittest.TestCase):
                     mock.patch("airlock.everything.service_running",
                                lambda *a, **k: True):
                 self.assertTrue(_REAL_ES_AVAILABLE(windows=False))
-            # A service state that cannot be determined counts as usable.
+            # A service state that cannot be determined is NOT usable. It
+            # is indistinguishable from a stopped service, and denying on
+            # it replaces a working crawl with a query that finds nothing.
             policy.reset_availability_cache()
             with mock.patch.object(policy, "_tool_on_path",
                                    lambda *a, **k: True), \
                     mock.patch("airlock.everything.service_running",
                                lambda *a, **k: None):
-                self.assertTrue(_REAL_ES_AVAILABLE(windows=False))
+                self.assertFalse(_REAL_ES_AVAILABLE(windows=False))
         finally:
             policy.reset_availability_cache()
 
@@ -476,12 +478,84 @@ class TestTheAdviceMatchesTheMachine(unittest.TestCase):
 
             with mock.patch.object(policy, "_tool_on_path", only_bare_es), \
                     mock.patch("airlock.everything.service_running",
-                               lambda *a, **k: None):
+                               lambda *a, **k: True):
                 self.assertTrue(_REAL_ES_AVAILABLE(windows=False))
             self.assertIn("es", seen)
             self.assertNotIn("es.exe", seen)
         finally:
             policy.reset_availability_cache()
+
+    def test_the_service_probe_uses_the_exe_name_when_bare_fails(self):
+        # Under WSL interop runs Windows tools only as `<name>.exe`, so the
+        # bare probes could not run and always answered "unknown" -- which
+        # is indistinguishable from a stopped service.
+        from airlock import everything
+        seen = []
+
+        def runner(argv):
+            seen.append(argv[0])
+            if not argv[0].endswith(".exe"):
+                return 1, "No such file or directory: '%s'" % argv[0]
+            if argv[0] == "sc.exe":
+                return 0, "STATE : 4 RUNNING"
+            return 0, "Everything.exe 5836"
+
+        self.assertTrue(everything.service_running(runner=runner))
+        self.assertIn("sc", seen)
+        self.assertIn("sc.exe", seen)
+
+    def test_a_stopped_service_is_still_reported_stopped(self):
+        from airlock import everything
+
+        def runner(argv):
+            if not argv[0].endswith(".exe"):
+                return 1, "No such file or directory"
+            if argv[0] == "sc.exe":
+                return 0, "STATE : 1 STOPPED"
+            return 0, "INFO: No tasks are running"
+
+        self.assertFalse(everything.service_running(runner=runner))
+
+    def test_no_plocate_database_means_no_mixed_or_whole_fs_deny(self):
+        # Both lines of the mixed advice name plocate. With no database the
+        # replacement cannot run, and the whole-filesystem form's `find`
+        # line covers only Linux paths outside $HOME, so following it drops
+        # the home-side results.
+        self.assertIsNone(policy.filename_search_suggestion(
+            windows=False, roots=["/home/alice", "/mnt/c/Users"], wsl=True,
+            db_kind=None, has_es=True))
+        self.assertIsNone(policy.filename_search_suggestion(
+            windows=False, roots=["/"], wsl=True,
+            db_kind=None, has_es=True))
+        # A Windows-host root ALONE needs no plocate, so it still denies.
+        self.assertEqual(
+            policy.filename_search_suggestion(
+                windows=False, roots=["/mnt/c/Users"], wsl=True,
+                db_kind=None, has_es=True),
+            policy.ES_WSL_SUGGESTION)
+
+    def test_find_roots_come_after_its_global_options(self):
+        # `find -L /mnt/c/Users -name x` recorded the working directory,
+        # so the prefilter saw neither a disk-wide nor a Windows-host
+        # search and skipped the judgement entirely.
+        from airlock import scope
+        for command in ("find -L /mnt/c/Users -name x",
+                        "find -H /mnt/c/Users -name x",
+                        "find -P /mnt/c/Users -name x",
+                        "find -O2 /mnt/c/Users -name x",
+                        "find -D search /mnt/c/Users -name x"):
+            result = scope.classify_command(command)
+            self.assertIn("/mnt/c/Users", result["roots"], command)
+
+    def test_a_prefixed_find_is_still_a_find_stage(self):
+        # scope strips these prefixes before naming the program; reading
+        # the prefix as the program made the stage look like something
+        # other than find, so it counted as following symlinks.
+        self.assertFalse(policy.command_follows_symlinks("sudo find link -name x"))
+        self.assertFalse(policy.command_follows_symlinks(
+            "nice -n 10 find link -name x"))
+        self.assertFalse(policy.command_follows_symlinks("env find link -name x"))
+        self.assertTrue(policy.command_follows_symlinks("sudo find -L link -name x"))
 
     def test_symlink_following_is_decided_per_search_stage(self):
         # One stage follows, the other does not. A command-wide answer
