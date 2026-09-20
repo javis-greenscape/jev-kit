@@ -1644,7 +1644,7 @@ _UV_RUN_VALUE_FLAGS = {
     "--with", "--with-editable", "--with-requirements", "--python", "-p",
     "--project", "--directory", "--index", "--extra-index-url", "--extra",
     "--group", "--package", "--env-file", "--index-url", "--find-links",
-    "--constraint", "--override", "--refresh-package", "--no-project",
+    "--constraint", "--override", "--refresh-package",
 }
 
 
@@ -1687,18 +1687,46 @@ def _pw_script_source(tok, cwd):
         return ""
 
 
+# A package script whose NAME says it runs tests. `npm run scrape` is not one
+# of these, and is followed into package.json instead.
+_PW_TEST_SCRIPT_RE = re.compile(r"(?:^|[:_-])(?:test|tests|e2e|spec|ct|vitest|jest|mocha)(?:$|[:_-])")
+
+
 def _pw_is_test_run(prog, args):
-    """True for a run of e2e code: a test runner, or a package script. These
-    are always allowed -- writing and running tests is not browsing."""
+    """True for a run of e2e code: a test runner, or a package script whose
+    name says it runs tests. These are always allowed -- writing and running
+    tests is not browsing."""
     if prog == "pytest" or prog in _JS_RUNNERS:
         return True
     if prog in ("python", "python3") and args[:2] == ["-m", "pytest"]:
         return True
-    if prog in ("npm", "pnpm", "yarn") and args[:1] in (["test"], ["run"]):
-        return True
+    if prog in ("npm", "pnpm", "yarn"):
+        if args[:1] == ["test"]:
+            return True
+        if args[:1] == ["run"] and len(args) > 1 and _PW_TEST_SCRIPT_RE.search(args[1]):
+            return True
     if prog == "npx" and args[:1] and args[0] in _JS_RUNNERS:
         return True
     return False
+
+
+def _pw_package_script(prog, args, cwd):
+    """The command line behind `npm run <name>`, or "". `npm run scrape` says
+    nothing about Playwright by itself; the script it names might. One
+    bounded read of package.json in the working directory. Never raises."""
+    try:
+        if prog not in ("npm", "pnpm", "yarn") or args[:1] != ["run"] or len(args) < 2:
+            return ""
+        name = args[1]
+        path = os.path.join(cwd or "", "package.json")
+        if not os.path.isfile(path) or os.path.getsize(path) > _PW_MAX_SCRIPT_BYTES:
+            return ""
+        with open(path, "r", errors="replace") as f:
+            data = json.load(f)
+        script = ((data or {}).get("scripts") or {}).get(name)
+        return script if isinstance(script, str) else ""
+    except Exception:
+        return ""
 
 
 def prefilter_browser_driving(ctx):
@@ -1729,7 +1757,14 @@ def prefilter_browser_driving(ctx):
         if prog == "cd" and any("jev-ultrafast" in a or "jev_ultrafast" in a for a in args):
             return None
 
-    for seg in ctx["segments"]:
+    return _pw_scan(ctx["segments"], ctx.get("cwd") or "", 0)
+
+
+def _pw_scan(segments, cwd, depth):
+    """Look for a browser-driving segment. `depth` bounds the one recursion:
+    a package script named by `npm run <name>` is scanned once, and what that
+    script itself names is not followed further."""
+    for seg in segments:
         if any(marker in seg for marker in _PW_JEV_MARKERS):
             continue
         prog, args = program_of(seg)
@@ -1741,6 +1776,14 @@ def prefilter_browser_driving(ctx):
                 continue
         if _pw_is_test_run(prog, args):
             continue
+
+        if depth == 0:
+            script = _pw_package_script(prog, args, cwd)
+            if script:
+                found = _pw_scan(split_segments(strip_heredocs(script)), cwd, depth + 1)
+                if found is not None:
+                    return found
+                continue
 
         sub = ""
         if prog == "playwright":
@@ -1764,16 +1807,17 @@ def prefilter_browser_driving(ctx):
                     R11_SUGGESTION, ask=True, extra={"how": "inline %s script" % prog},
                 )
             continue
+        # Every script-extension argument is checked, not just the first that
+        # happens to be readable: `node loader.mjs worker.mjs` can carry the
+        # Playwright import in either of them.
         for a in args:
-            src = _pw_script_source(a, ctx.get("cwd") or "")
+            src = _pw_script_source(a, cwd)
             if src and _PW_IMPORT_RE.search(src):
                 return Match(
                     "`%s %s` runs a script that imports Playwright and drives a browser"
                     % (prog, a),
                     R11_SUGGESTION, ask=True, extra={"how": "%s %s" % (prog, a)},
                 )
-            if src:
-                break
     return None
 
 

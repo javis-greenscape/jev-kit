@@ -923,6 +923,33 @@ class TestR11BrowseViaJev(unittest.TestCase):
         self.assertEqual(rules._uv_run_program(["--env-file=.env", "node", "a.js"]),
                          ("node", ["a.js"]))
 
+    def test_a_package_script_that_drives_a_browser_is_followed(self):
+        """`npm run scrape` says nothing by itself. The script it names does."""
+        self._script("scrape.js", "const { chromium } = require('playwright');\n")
+        self._script("build.js", "const fs = require('fs');\n")
+        self._script("package.json", json.dumps({"scripts": {
+            "scrape": "node scrape.js",
+            "build": "node build.js",
+            "test:e2e": "node scrape.js",
+        }}))
+        for c in ("npm run scrape", "pnpm run scrape", "yarn run scrape"):
+            self.assert_asks(self.ctx(c), c)
+        self.assert_silent(self.ctx("npm run build"))
+        # A script whose NAME says tests is still a test run, unfollowed.
+        self.assert_silent(self.ctx("npm run test:e2e"))
+        self.assert_silent(self.ctx("npm run nonexistent"))
+
+    def test_a_later_script_argument_is_checked_too(self):
+        self._script("loader.mjs", "import './worker.mjs';\n")
+        self._script("worker.mjs", "import { chromium } from 'playwright';\n")
+        self.assert_asks(self.ctx("node %s/loader.mjs %s/worker.mjs" % (self.tmp, self.tmp)))
+
+    def test_uv_run_boolean_flags_are_not_given_a_value(self):
+        path = self._script("verify.py", "from playwright.sync_api import sync_playwright\n")
+        for c in ("uv run --no-project python3 %s" % path,
+                  "uv run --frozen python3 %s" % path):
+            self.assert_asks(self.ctx(c), c)
+
     def test_non_browsing_mcp_and_other_servers_are_ignored(self):
         self.assert_silent(self.ctx_mcp("mcp__playwright__browser_install"), "browser_install")
         self.assert_silent(self.ctx_mcp("mcp__playwright__browser_close"), "browser_close")

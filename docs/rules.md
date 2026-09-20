@@ -173,7 +173,9 @@ The code pre-filter recognises three ways of driving a browser:
 - a shell command running a script that imports `playwright` or
   `playwright-core`, whether the script is a file (`node verify.cjs`,
   `python3 verify.py`, `uv run python3 verify.py`) or inline (`node -e`,
-  `python3 -c`).
+  `python3 -c`). `npm run <name>` is followed one step into `package.json`,
+  because the script name alone says nothing, unless the name itself says
+  tests (`test`, `test:e2e`, `e2e`, `spec`).
 
 This is the one rule that reads a file the command names, because `node
 verify.cjs` says nothing about Playwright from the command line alone. The
