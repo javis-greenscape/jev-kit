@@ -43,8 +43,6 @@ None for "not available").
 """
 import json
 import os
-import shutil
-import subprocess
 import time
 
 #: The rule id and the action a headless machine wants it set to.
@@ -56,8 +54,18 @@ def _run_loginctl():
     """stdout of `loginctl list-sessions --no-legend`, or None if unavailable.
 
     None means "no evidence", never "headless". Any failure -- binary absent,
-    no logind, D-Bus unreachable, a hang -- returns None."""
+    no logind, D-Bus unreachable, a hang -- returns None.
+
+    `shutil` and `subprocess` are imported here, not at module top: this is
+    the only code in this module that needs them, and headless.py is now
+    imported unconditionally on the hook's hot path (for is_small_host /
+    cpu_count) whether or not any rule ever fires. A module-level import of
+    both cost enough to push an already-tight entry point over its 100ms
+    budget (measured 91.5ms -> 120.5ms median; see rules.py's import of this
+    module and airlock/tests/test_entry_point_is_fast)."""
     try:
+        import shutil
+        import subprocess
         if not shutil.which("loginctl"):
             return None
         out = subprocess.run(
@@ -73,6 +81,7 @@ def _run_loginctl():
 
 def _loginctl_show(session_id):
     try:
+        import subprocess
         out = subprocess.run(
             ["loginctl", "show-session", session_id, "-p", "Type", "-p", "Class", "-p", "Seat"],
             stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=5,
@@ -127,6 +136,213 @@ def is_wsl(env=None, proc_version=None):
         except Exception:
             proc_version = ""
     return "microsoft" in (proc_version or "").lower()
+
+
+# --- host capacity ------------------------------------------------------------
+
+#: Cores at/below which a box counts as "small" for R3's uncapped-run warning.
+#: Measured 2026-09-20: gs, the shared VPS R3's messages were written for, has
+#: `nproc` = 4 (7GB RAM) and should keep warning; MasterRig, Jonathan's WSL
+#: workstation, has `nproc` = 12 (15GB RAM) and should not. 6 leaves headroom
+#: on both sides of that gap.
+SMALL_HOST_CPU_THRESHOLD = 6
+
+
+def _affinity_cpu_count():
+    """CPUs this process may actually schedule on, per its affinity mask
+    (`taskset`, a container's `--cpuset-cpus`). None when the platform has
+    no `os.sched_getaffinity` (macOS, native Windows) or it fails."""
+    try:
+        return len(os.sched_getaffinity(0))
+    except Exception:
+        return None
+
+
+def _proc_cgroup_relpaths(proc_cgroup="/proc/self/cgroup"):
+    """(v2_relpath, v1_cpu_relpath) for THIS process, each "/" when unknown.
+
+    A process is rarely in the root cgroup: under systemd it sits in a slice
+    or a scope, and that is where a `CPUQuota=` lands. Reading only the mount
+    root's `cpu.max` therefore sees `max` on a capped host and reports the
+    machine as unconstrained.
+    """
+    v2 = v1 = "/"
+    try:
+        with open(proc_cgroup) as f:
+            for line in f:
+                parts = line.strip().split(":", 2)
+                if len(parts) != 3:
+                    continue
+                hid, controllers, path = parts
+                if hid == "0" and controllers == "":
+                    v2 = path or "/"
+                elif "cpu" in controllers.split(","):
+                    v1 = path or "/"
+    except Exception:
+        pass
+    return v2, v1
+
+
+def _ancestor_dirs(root, relpath):
+    """Every cgroup directory from `relpath` up to `root`, nearest first."""
+    parts = [p for p in (relpath or "/").split("/") if p]
+    out = []
+    while True:
+        out.append(os.path.join(root, *parts) if parts else root)
+        if not parts:
+            return out
+        parts.pop()
+
+
+def _cgroup_mount(cgroup_root, mountinfo, v2=True):
+    """(mountpoint, mount_root) for the visible cgroup hierarchy, or None.
+
+    `/proc/self/cgroup` gives a path in the HIERARCHY, which is not the path
+    under the mount point when only a subtree is mounted -- a container
+    without its own cgroup namespace sees mountinfo root `/docker/abc` at
+    `/sys/fs/cgroup`, and its own `/docker/abc/child` lives at
+    `/sys/fs/cgroup/child`. mountinfo's fields 4 and 5 are exactly that
+    translation. For v1 this also finds the CPU controller wherever it is
+    mounted, including the common `cpu,cpuacct` pairing.
+
+    Only a mount at or under `cgroup_root` is accepted, so a test passing a
+    temporary directory gets no match and the plain layout is used.
+    """
+    try:
+        with open(mountinfo) as f:
+            lines = f.readlines()
+    except Exception:
+        return None
+    for line in lines:
+        try:
+            left, right = line.split(" - ", 1)
+            fields = left.split()
+            mount_root, mountpoint = fields[3], fields[4]
+            rfields = right.split()
+            fstype, super_opts = rfields[0], rfields[-1]
+        except Exception:
+            continue
+        if mountpoint != cgroup_root and not mountpoint.startswith(
+                cgroup_root.rstrip("/") + "/"):
+            continue
+        if v2:
+            if fstype == "cgroup2":
+                return mountpoint, mount_root
+        elif fstype == "cgroup" and "cpu" in super_opts.split(","):
+            return mountpoint, mount_root
+    return None
+
+
+def _mount_relative(cgroup_path, mount_root):
+    """`cgroup_path` expressed relative to a mount whose root is
+    `mount_root`, or None when the path is outside that subtree."""
+    mount_root = mount_root or "/"
+    if mount_root == "/":
+        return cgroup_path or "/"
+    if not cgroup_path or cgroup_path == "/":
+        # A private cgroup namespace reports the path relative to the
+        # namespace root, so "/" means "the mount point itself" even when
+        # mountinfo's root is a subtree such as /docker/abc. Reading it as
+        # outside the mount would skip the only quota there is
+        # (Codex P2, PR #2).
+        return "/"
+    if cgroup_path == mount_root:
+        return "/"
+    if cgroup_path.startswith(mount_root.rstrip("/") + "/"):
+        return cgroup_path[len(mount_root.rstrip("/")):]
+    return None
+
+
+def _read_quota_count(directory, v2=True):
+    """CPUs implied by one cgroup directory's quota, or None for no limit."""
+    try:
+        if v2:
+            with open(os.path.join(directory, "cpu.max")) as f:
+                quota_str, period_str = f.read().split()
+            if quota_str == "max":
+                return None
+            quota, period = int(quota_str), int(period_str)
+        else:
+            with open(os.path.join(directory, "cpu.cfs_quota_us")) as f:
+                quota = int(f.read().strip())
+            with open(os.path.join(directory, "cpu.cfs_period_us")) as f:
+                period = int(f.read().strip())
+    except Exception:
+        return None
+    if quota <= 0 or period <= 0:
+        return None
+    return max(1, -(-quota // period))  # ceil division, no float/math import
+
+
+def _cgroup_cpu_quota_count(cgroup_root="/sys/fs/cgroup",
+                            proc_cgroup="/proc/self/cgroup",
+                            mountinfo="/proc/self/mountinfo"):
+    """CPUs implied by a cgroup CPU quota (a container's `--cpus=N` or a
+    systemd `CPUQuota=`, neither of which an affinity mask sees).
+
+    Walks this process's own cgroup and every ancestor up to the mount point,
+    in both the v2 layout (`cpu.max`) and the v1 one (`cpu.cfs_quota_us` /
+    `cpu.cfs_period_us`), and returns the TIGHTEST limit found, since an
+    ancestor's cap binds its descendants. Hierarchy paths are translated
+    through mountinfo where it is readable. Absent, `max`, unreadable or
+    non-positive all mean "no evidence", never a count.
+    """
+    v2_path, v1_path = _proc_cgroup_relpaths(proc_cgroup)
+    counts = []
+    for path, v2, fallback_base in (
+            (v2_path, True, cgroup_root),
+            (v1_path, False, os.path.join(cgroup_root, "cpu"))):
+        mount = _cgroup_mount(cgroup_root, mountinfo, v2=v2)
+        if mount:
+            base, rel = mount[0], _mount_relative(path, mount[1])
+            if rel is None:
+                continue
+        else:
+            base, rel = fallback_base, path
+        for directory in _ancestor_dirs(base, rel):
+            n = _read_quota_count(directory, v2=v2)
+            if n:
+                counts.append(n)
+    return min(counts) if counts else None
+
+
+def cpu_count(override=None):
+    """Number of CPUs available to this process.
+
+    `override` is the injection point every caller forwards, matching
+    `is_wsl`'s `env`/`proc_version` arguments: pass an int to force the
+    answer in a test. Otherwise the SMALLEST of: the affinity mask, a
+    cgroup CPU quota, and `os.cpu_count()` -- a host's logical core count
+    overstates what a constrained process (a container capped at `--cpus`,
+    a taskset job) can actually use, which is exactly the case
+    is_small_host() below exists to catch. Falls back to 2 (a conservative
+    small number) if none of the three can tell."""
+    if override is not None:
+        return override
+    candidates = []
+    n = _affinity_cpu_count()
+    if n:
+        candidates.append(n)
+    n = _cgroup_cpu_quota_count()
+    if n:
+        candidates.append(n)
+    try:
+        n = os.cpu_count()
+    except Exception:
+        n = None
+    if n:
+        candidates.append(n)
+    return min(candidates) if candidates else 2
+
+
+def is_small_host(cpus=None):
+    """True when this machine has few enough cores that an uncapped test
+    suite or build genuinely contends with everything else running on it.
+
+    `cpus` is the injection point for tests: pass an int to force the core
+    count instead of detecting it. See `SMALL_HOST_CPU_THRESHOLD`."""
+    n = cpus if cpus is not None else cpu_count()
+    return n <= SMALL_HOST_CPU_THRESHOLD
 
 
 def detect_headless(env=None, system=None, proc_version=None, loginctl=None):

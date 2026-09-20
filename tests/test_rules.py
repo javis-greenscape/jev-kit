@@ -161,15 +161,76 @@ class TestOtherRules(unittest.TestCase):
         c = rules.build_ctx({"tool_name": "Skill", "tool_input": {"skill": "graphify"}}, "Skill")
         self.assertEqual(fired(c, "R2-claude-api-skill"), [])
 
-    def test_r3_whole_suite_and_near_misses(self):
+    # R3 only warns on a small host (see TestR3HostCapacity); these two tests
+    # exercise the rest of the matching logic and must not depend on the
+    # real machine's core count, so they pin it to gs-sized (4 cores).
+    @mock.patch("airlock.rules.is_small_host", return_value=True)
+    @mock.patch("airlock.rules.cpu_count", return_value=4)
+    def test_r3_whole_suite_and_near_misses(self, _cpu_count, _is_small_host):
         for c in ("pytest", "python3 -m pytest", "make -j", "npm test", "cargo build --release"):
             self.assertTrue(fired(ctx_bash(c), "R3-whole-suite-or-uncapped-build"), c)
         for c in ("pytest tests/test_rules.py -q", "pytest -k redact", "make -j2",
                   "cargo build -j2", "npm run lint"):
             self.assertEqual(fired(ctx_bash(c), "R3-whole-suite-or-uncapped-build"), [], c)
 
-    def test_r3_is_warn_only(self):
+    @mock.patch("airlock.rules.is_small_host", return_value=True)
+    @mock.patch("airlock.rules.cpu_count", return_value=4)
+    def test_r3_is_warn_only(self, _cpu_count, _is_small_host):
         self.assertEqual(fired(ctx_bash("pytest"), "R3-whole-suite-or-uncapped-build")[0]["action"], "warn")
+
+
+class TestR3HostCapacity(unittest.TestCase):
+    """R3 was written for gs (4 cores) and must stay silent on a bigger box
+    like MasterRig (12 cores): airlock/headless.py:is_small_host gates it."""
+
+    def test_matches_bare_pytest_on_a_4core_host(self):
+        match = rules.prefilter_wide_run(ctx_bash("pytest"), cpus=4)
+        self.assertIsNotNone(match)
+
+    def test_does_not_match_bare_pytest_on_a_12core_host(self):
+        match = rules.prefilter_wide_run(ctx_bash("pytest"), cpus=12)
+        self.assertIsNone(match)
+
+    def test_does_not_match_at_the_threshold_boundary(self):
+        # SMALL_HOST_CPU_THRESHOLD = 6: 6 is still "small", 7 is not.
+        self.assertIsNotNone(rules.prefilter_wide_run(ctx_bash("pytest"), cpus=6))
+        self.assertIsNone(rules.prefilter_wide_run(ctx_bash("pytest"), cpus=7))
+
+    def test_message_carries_the_detected_core_count(self):
+        match = rules.prefilter_wide_run(ctx_bash("pytest"), cpus=4)
+        self.assertIn("4-core box", match.detail)
+
+        match = rules.prefilter_wide_run(ctx_bash("make -j"), cpus=5)
+        self.assertIn("5-core shared box", match.detail)
+
+        match = rules.prefilter_wide_run(ctx_bash("cargo build"), cpus=3)
+        self.assertIn("3-core shared box", match.detail)
+
+        match = rules.prefilter_wide_run(ctx_bash("npm test"), cpus=4)
+        self.assertIn("4 shared cores", match.detail)
+
+    def test_ctx_cpus_pins_the_count_for_a_caller_holding_only_a_ctx(self):
+        # The eval harness pins capacity this way, so a case's label does not
+        # depend on the machine scoring it (Codex, PR #2).
+        ctx = ctx_bash("pytest")
+        ctx["cpus"] = 4
+        self.assertIsNotNone(rules.prefilter_wide_run(ctx))
+        ctx["cpus"] = 12
+        self.assertIsNone(rules.prefilter_wide_run(ctx))
+
+    def test_capacity_is_not_probed_for_a_command_that_cannot_match(self):
+        # The probe reads cgroup files, and this runs on every Bash call.
+        from unittest import mock
+        with mock.patch("airlock.rules.cpu_count") as probe:
+            self.assertIsNone(rules.prefilter_wide_run(ctx_bash("git status")))
+            self.assertIsNone(rules.prefilter_wide_run(ctx_bash("ls -la")))
+        probe.assert_not_called()
+
+    def test_capacity_is_probed_once_for_a_matching_command(self):
+        from unittest import mock
+        with mock.patch("airlock.rules.cpu_count", return_value=4) as probe:
+            self.assertIsNotNone(rules.prefilter_wide_run(ctx_bash("make -j")))
+        self.assertEqual(probe.call_count, 1)
 
     def test_r4_long_work(self):
         for c in ("pnpm install", "npx playwright install chromium", "docker build -t x .", "uv sync"):
@@ -311,8 +372,12 @@ class TestEnforcePath(unittest.TestCase):
         self.assertTrue(self.logged[-1]["loop_allow"])
 
     def test_warn_never_blocks_and_returns_advice(self):
+        # R3 (the `pytest` vehicle here) only fires on a small host; pin it
+        # to gs's size (4 cores) so this does not depend on the real machine.
         with mock.patch.object(enforce, "emit_deny") as deny, \
-             mock.patch.object(enforce, "emit_warn") as warn:
+             mock.patch.object(enforce, "emit_warn") as warn, \
+             mock.patch("airlock.rules.is_small_host", return_value=True), \
+             mock.patch("airlock.rules.cpu_count", return_value=4):
             denied = enforce.handle(self._payload("pytest"), "Bash")
         self.assertFalse(denied)
         deny.assert_not_called()
