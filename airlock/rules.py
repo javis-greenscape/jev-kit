@@ -1653,7 +1653,28 @@ _PW_CLI_ALLOWED = {"test", "install", "install-deps", "uninstall", "show-report"
 # own Playwright script can name a directory and get past it. The guard's
 # safety model says the same thing about every rule here.
 _PW_JEV_PATH_MARKERS = ("jev-ultrafast", "jev_ultrafast")
-_PW_CDP_ASSIGN_RE = re.compile(r"(?:^|[;&|(\s])(?:export\s+)?BU_CDP_URL=")
+_PW_CDP_VAR = "BU_CDP_URL="
+
+
+def _pw_sets_cdp(seg):
+    """True only for a real assignment of BU_CDP_URL in this segment: a
+    leading `VAR=val` prefix, or a word of an `export`. A regex over the raw
+    text was too loose -- `echo "note: BU_CDP_URL=... was set"` matched it,
+    and words() splits on whitespace, so the quoted text is tokens too. What
+    makes it an assignment is its POSITION, not the string."""
+    toks = words(seg)
+    i = 0
+    while i < len(toks) and _ASSIGN_RE.match(toks[i]):
+        if toks[i].startswith(_PW_CDP_VAR):
+            return True
+        i += 1
+    if i < len(toks) and toks[i] == "export":
+        for tok in toks[i + 1:]:
+            if not _ASSIGN_RE.match(tok):
+                break
+            if tok.startswith(_PW_CDP_VAR):
+                return True
+    return False
 
 # uv flags that take a separate value. `uv run --with playwright-stealth
 # python3 verify.py` runs python3, not playwright-stealth, and dropping only
@@ -1837,7 +1858,7 @@ def _pw_scan(segments, cwd, depth, cdp=False):
                 target = _expand(target)
                 cur_cwd = target if os.path.isabs(target) else os.path.join(cur_cwd or "", target)
             continue
-        if _PW_CDP_ASSIGN_RE.search(seg):
+        if _pw_sets_cdp(seg):
             # An assignment or export carries into the segments AFTER it,
             # exactly as a `cd` does. It does not bless the command sharing
             # its own segment: `BU_CDP_URL=... node hand-rolled.js` is still a

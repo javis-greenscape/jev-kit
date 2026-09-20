@@ -1031,6 +1031,18 @@ class TestR11BrowseViaJev(unittest.TestCase):
         self.assertFalse(rules._pw_names_the_agent("--with=jev-ultrafast"))
         self.assertTrue(rules._pw_names_the_agent("~/code/jev-ultrafast/run_goal.py"))
 
+    def test_only_a_real_cdp_assignment_carries(self):
+        path = self._script("hand_rolled.js", "const { chromium } = require('playwright');\n")
+        for c in ('echo "note: BU_CDP_URL=http://127.0.0.1:9333 was set earlier" && node %s' % path,
+                  "echo BU_CDP_URL=x ; node %s" % path,
+                  "grep BU_CDP_URL=x notes.txt && node %s" % path):
+            self.assert_asks(self.ctx(c), c)
+        self.assertTrue(rules._pw_sets_cdp("BU_CDP_URL=http://127.0.0.1:9333 node x.js"))
+        self.assertTrue(rules._pw_sets_cdp("export BU_CDP_URL=http://127.0.0.1:9333"))
+        self.assertTrue(rules._pw_sets_cdp("export FOO=1 BU_CDP_URL=x"))
+        self.assertFalse(rules._pw_sets_cdp('echo "BU_CDP_URL=x"'))
+        self.assertFalse(rules._pw_sets_cdp("node x.js BU_CDP_URL=x"))
+
     def test_non_browsing_mcp_and_other_servers_are_ignored(self):
         self.assert_silent(self.ctx_mcp("mcp__playwright__browser_install"), "browser_install")
         self.assert_silent(self.ctx_mcp("mcp__playwright__browser_close"), "browser_close")
