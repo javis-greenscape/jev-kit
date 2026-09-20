@@ -976,6 +976,31 @@ class TestR11BrowseViaJev(unittest.TestCase):
                   "uv run --frozen python3 %s" % path):
             self.assert_asks(self.ctx(c), c)
 
+    def test_env_wrapping_is_unwrapped(self):
+        path = self._script("verify.js", "const { chromium } = require('playwright');\n")
+        for c in ("env NODE_ENV=production node %s" % path,
+                  "env -u DISPLAY node %s" % path,
+                  "env node %s" % path):
+            self.assert_asks(self.ctx(c), c)
+        self.assertEqual(rules._env_program([]), (None, []))
+        self.assertEqual(rules._env_program(["A=1", "B=2"]), (None, []))
+        self.assertEqual(rules._env_program(["-u", "X", "node", "a.js"]), ("node", ["a.js"]))
+
+    def test_the_cdp_export_carries_into_a_package_script(self):
+        """The recipe's own shape: export the CDP url, then run it through a
+        package script. The inner scan must know the export happened."""
+        self._script("scrape.js", "const { chromium } = require('playwright');\n")
+        self._script("package.json", json.dumps({"scripts": {"scrape": "node scrape.js"}}))
+        self.assert_asks(self.ctx("npm run scrape"))
+        self.assert_silent(self.ctx(
+            "export BU_CDP_URL=http://127.0.0.1:9333 && npm run scrape"))
+
+    def test_more_mcp_browsing_verbs(self):
+        for action in ("browser_run_code_unsafe", "browser_find", "browser_drop",
+                       "browser_network_request", "browser_scroll"):
+            tool = "mcp__plugin_playwright_playwright__" + action
+            self.assert_asks(self.ctx_mcp(tool), tool)
+
     def test_non_browsing_mcp_and_other_servers_are_ignored(self):
         self.assert_silent(self.ctx_mcp("mcp__playwright__browser_install"), "browser_install")
         self.assert_silent(self.ctx_mcp("mcp__playwright__browser_close"), "browser_close")

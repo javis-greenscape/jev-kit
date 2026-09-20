@@ -1598,6 +1598,8 @@ _PW_MCP_BROWSING = {
     "browser_snapshot", "browser_take_screenshot", "browser_evaluate",
     "browser_wait_for", "browser_file_upload", "browser_handle_dialog",
     "browser_console_messages", "browser_network_requests", "browser_pdf_save",
+    "browser_network_request", "browser_run_code", "browser_run_code_unsafe",
+    "browser_find", "browser_drop", "browser_scroll", "browser_extract",
     "browser_tabs",
     # the shorter names older builds of the server used
     "navigate", "navigate_back", "click", "type", "hover", "select_option",
@@ -1658,6 +1660,22 @@ _UV_RUN_VALUE_FLAGS = {
     "--group", "--package", "--env-file", "--index-url", "--find-links",
     "--constraint", "--override", "--refresh-package",
 }
+
+
+def _env_program(args):
+    """(prog, args) for what `env ...` actually runs, or (None, []). Steps
+    over env's own flags and over the VAR=value assignments."""
+    i = 0
+    while i < len(args):
+        a = args[i]
+        if a in ("-u", "--unset", "-C", "--chdir", "-S", "--split-string"):
+            i += 2
+            continue
+        if a.startswith("-") or "=" in a:
+            i += 1
+            continue
+        return a, args[i + 1:]
+    return None, []
 
 
 def _uv_run_program(args):
@@ -1769,12 +1787,11 @@ def prefilter_browser_driving(ctx):
     return _pw_scan(ctx["segments"], ctx.get("cwd") or "", 0)
 
 
-def _pw_scan(segments, cwd, depth):
+def _pw_scan(segments, cwd, depth, cdp=False):
     """Look for a browser-driving segment. `depth` bounds the one recursion:
     a package script named by `npm run <name>` is scanned once, and what that
     script itself names is not followed further."""
     cur_cwd = cwd
-    cdp = False
     for seg in segments:
         prog, args = program_of(seg)
         if prog == "cd":
@@ -1801,6 +1818,12 @@ def _pw_scan(segments, cwd, depth):
             continue
         if any(m in prog for m in _PW_JEV_PATH_MARKERS):
             continue
+        if prog == "env":
+            # `env VAR=val node x.js` runs node. program_of's _SKIP_PREFIX
+            # does not cover env, because env also takes flags of its own.
+            prog, args = _env_program(args)
+            if prog is None:
+                continue
         if prog == "uv" and args[:1] == ["run"]:
             prog, args = _uv_run_program(args[1:])
             if prog is None:
@@ -1811,7 +1834,10 @@ def _pw_scan(segments, cwd, depth):
         if depth == 0:
             script = _pw_package_script(prog, args, cur_cwd)
             if script:
-                found = _pw_scan(split_segments(strip_heredocs(script)), cur_cwd, depth + 1)
+                # `cdp` carries in: a script reached through `npm run` is
+                # no less CDP-attached than one named directly.
+                found = _pw_scan(split_segments(strip_heredocs(script)), cur_cwd,
+                                 depth + 1, cdp)
                 if found is not None:
                     return found
                 continue
