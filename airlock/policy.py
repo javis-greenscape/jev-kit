@@ -932,52 +932,15 @@ _CMD_SEPARATOR_OPS = ("&&", "||", ";", "&", "|", "\n")
 
 
 def _strip_shell_comment(command):
-    """`command` with a trailing shell comment removed.
-
-    Bash ignores everything from an unquoted `#` that starts a word, so
-    `find /mnt/c -name x # ; es placeholder` runs find alone. Reading the
-    comment as shell made `es` look like a second command and suppressed
-    the deny the crawl should have got (Codex P2, PR #1). A `#` inside
-    quotes, or attached to a word as in `-name a#b`, is not a comment."""
-    if not command:
+    """scope.strip_shell_comment(), so policy and the scope parser read a
+    shell comment the same way. Two copies drifted apart once already: the
+    comment fix landed here and not in scope, and a commented-out stage was
+    still accumulated as a real search root (Codex P2, PR #1)."""
+    try:
+        from . import scope as _scope
+        return _scope.strip_shell_comment(command)
+    except Exception:
         return command
-    out = []
-    quote = None
-    i = 0
-    n = len(command)
-    while i < n:
-        c = command[i]
-        if quote:
-            if c == "\\" and quote == '"' and i + 1 < n:
-                out.append(c)
-                out.append(command[i + 1])
-                i += 2
-                continue
-            out.append(c)
-            if c == quote:
-                quote = None
-            i += 1
-            continue
-        if c == "\\" and i + 1 < n:
-            out.append(c)
-            out.append(command[i + 1])
-            i += 2
-            continue
-        if c in ("'", '"'):
-            quote = c
-            out.append(c)
-            i += 1
-            continue
-        if c == "#" and (not out or out[-1].isspace()):
-            # Comment runs to the end of the line; later lines still count.
-            newline = command.find("\n", i)
-            if newline == -1:
-                break
-            i = newline
-            continue
-        out.append(c)
-        i += 1
-    return "".join(out)
 
 
 def _split_command_segments(command):

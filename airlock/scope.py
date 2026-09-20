@@ -115,6 +115,55 @@ _SEQUENTIAL_OPS = ("&&", "||", ";")
 _PIPE_OP = ("|",)
 
 
+def strip_shell_comment(command):
+    """`command` with a trailing shell comment removed.
+
+    Bash ignores everything from an unquoted `#` that starts a word, so
+    `find /mnt/c -name x # ; es placeholder` runs find alone. Reading the
+    comment as shell made `es` look like a second command and suppressed
+    the deny the crawl should have got (Codex P2, PR #1). A `#` inside
+    quotes, or attached to a word as in `-name a#b`, is not a comment."""
+    if not command:
+        return command
+    out = []
+    quote = None
+    i = 0
+    n = len(command)
+    while i < n:
+        c = command[i]
+        if quote:
+            if c == "\\" and quote == '"' and i + 1 < n:
+                out.append(c)
+                out.append(command[i + 1])
+                i += 2
+                continue
+            out.append(c)
+            if c == quote:
+                quote = None
+            i += 1
+            continue
+        if c == "\\" and i + 1 < n:
+            out.append(c)
+            out.append(command[i + 1])
+            i += 2
+            continue
+        if c in ("'", '"'):
+            quote = c
+            out.append(c)
+            i += 1
+            continue
+        if c == "#" and (not out or out[-1].isspace()):
+            # Comment runs to the end of the line; later lines still count.
+            newline = command.find("\n", i)
+            if newline == -1:
+                break
+            i = newline
+            continue
+        out.append(c)
+        i += 1
+    return "".join(out)
+
+
 def _split_top_level(s, ops):
     """Split `s` on any operator in `ops` that appears outside quotes.
     Operators are tried longest-first per position so '&&' isn't split as
@@ -676,6 +725,12 @@ def classify_command(command, cwd=None, windows=None, _depth=0):
         windows = is_windows()
     if not command or not isinstance(command, str):
         return {"scope": "unknown", "program": None, "roots": []}
+
+    # A commented-out stage is not a search. `find /opt -name x # ; find
+    # "$HOME" -name x` runs the /opt search alone, and accumulating the
+    # commented $HOME root turned a single directory into a disk-wide
+    # verdict (Codex P2, PR #1).
+    command = strip_shell_comment(command)
 
     try:
         statements = _split_top_level(command, _SEQUENTIAL_OPS)

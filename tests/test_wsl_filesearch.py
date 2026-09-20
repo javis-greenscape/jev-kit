@@ -576,6 +576,31 @@ class TestTheAdviceMatchesTheMachine(unittest.TestCase):
             "find /mnt/c -name x # comment\nes -path C:/ x",
             roots=["/mnt/c"], windows=False, wsl=True))
 
+    def test_a_commented_out_stage_is_not_a_search_root(self):
+        # Only the /opt search runs. Accumulating the commented $HOME root
+        # turned a single directory into a disk-wide verdict, which the
+        # deny bar then answered with the whole-filesystem suggestion.
+        from airlock import scope
+        result = scope.classify_command(
+            'find /opt -name x # ; find "$HOME" -name x')
+        self.assertEqual(result["scope"], "single_dir")
+        self.assertEqual(result["roots"], ["/opt"])
+        # A quoted `#` is part of a filename, so the stage still counts.
+        self.assertEqual(
+            scope.classify_command('find /opt -name "a#b"')["roots"], ["/opt"])
+
+    def test_policy_and_scope_share_one_comment_parser(self):
+        # The comment fix landed in policy and not in scope, and a
+        # commented-out stage was still read as a real search.
+        from airlock import policy as _p, scope as _s
+        self.assertIs(_p._strip_shell_comment("x # y").__class__, str)
+        for command in ('find /opt -name x # ; es y',
+                        'find /opt -name "a#b"',
+                        "find /opt -name a\\#b",
+                        "find /opt -name x # c\nes -path C:/ y"):
+            self.assertEqual(_p._strip_shell_comment(command),
+                             _s.strip_shell_comment(command), command)
+
     def test_a_prefixed_find_is_still_a_find_stage(self):
         # scope strips these prefixes before naming the program; reading
         # the prefix as the program made the stage look like something
