@@ -1071,6 +1071,22 @@ def _is_a_real_search(tokens):
     return any(not a.startswith("-") for a in args) or bool(args)
 
 
+# `C:\Users\bob`, `d:\data` -- a drive letter followed by backslash-
+# separated segments. Nothing else in a command looks like this, so
+# rewriting only these separators leaves every other escape intact.
+_DRIVE_PATH_RE = re.compile(
+    r"(?<![A-Za-z0-9_])([A-Za-z]:)((?:\\[^\s\\\"';|&<>]+)+)")
+
+
+def _forward_slash_drive_paths(command):
+    """`command` with the backslashes INSIDE a drive-letter path turned
+    into forward slashes, so the lexer cannot eat them as escapes."""
+    if not command or "\\" not in command:
+        return command
+    return _DRIVE_PATH_RE.sub(
+        lambda m: m.group(1) + m.group(2).replace("\\", "/"), command)
+
+
 def _es_path_as_wsl(value):
     """An Everything `-path` value as the WSL path it names, or None when
     the spelling is not one we can place."""
@@ -1114,7 +1130,13 @@ def _es_covers_windows_roots(command, roots, windows=None):
     targets = [r for r in (roots or []) if root_is_windows_host(r, windows)]
     if not targets:
         return True
-    for tokens in _indexed_segments(command, ("es", "es.exe")):
+    # An unquoted `-path C:\Users\bob` loses its backslashes to POSIX
+    # lexing and reads as `C:Usersbob`, so an invocation already scoped to
+    # the crawled directory looked like it covered something else (review
+    # finding, PR #1). Only the separators inside a drive-letter path are
+    # rewritten, so `\;` and `\#` elsewhere keep their meaning.
+    for tokens in _indexed_segments(_forward_slash_drive_paths(command),
+                                    ("es", "es.exe")):
         if not _is_a_real_search(tokens):
             continue
         scopes = _es_scopes(tokens)

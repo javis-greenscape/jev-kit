@@ -124,6 +124,8 @@ def shell_words(command):
     """`command` split into words the way bash splits it, with operators as
     their own tokens. None when it cannot be lexed.
 
+
+
     Quoting, backslash escapes and comments are handled by the lexer rather
     than by pattern-matching the raw text. Four consecutive review rounds
     found the same class of defect in the hand-rolled splitter -- a quoted
@@ -144,7 +146,12 @@ def shell_words(command):
         return None
 
 
-_HEREDOC_RE = re.compile(r"""<<(-?)\s*(?!<)(?:'([^']*)'|"([^"]*)"|\\?([A-Za-z_][\w.-]*))""")
+# A heredoc delimiter is any word, not an identifier: bash takes `~EOF` in
+# `cat <<~EOF` as the literal delimiter `~EOF` (it has no strip-tabs `<<~`
+# form; that is zsh). Rejecting it left the body unstripped and its lines
+# read as commands (review finding, PR #1).
+_HEREDOC_RE = re.compile(
+    r"""<<(-?)[ \t]*(?!<)(?:'([^']*)'|"([^"]*)"|((?:\\.|[^\s;&|<>()'"])+))""")
 
 
 def _heredoc_delimiters(line):

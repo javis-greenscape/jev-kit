@@ -6,6 +6,7 @@ import unittest
 from unittest import mock
 
 from airlock import policy, redact
+from airlock import scope as scope_mod
 
 _ABOVE_BAR_CONFIDENCE = 0.9
 _ABOVE_BAR_MARGIN = 0.6
@@ -1032,6 +1033,52 @@ class IndexedInvocationMustCoverTheRoot(unittest.TestCase):
             roots=["/home/alice"], scope="disk_wide",
             search_intent="filename_search", confidence=0.99, margin=0.9,
             root_has_graphify_graph=False, wsl=True)["would_deny"])
+
+
+class SonnetReviewRoundFive(unittest.TestCase):
+    """Review findings on PR #1: an unquoted Windows path eaten by the
+    POSIX lexer, and a heredoc delimiter the stripper would not recognise."""
+
+    def covers(self, command, root="/mnt/c/Users/bob"):
+        return policy.command_covers_roots(
+            command, roots=[root], wsl=True, db_kind="home", has_es=True)
+
+    def test_unquoted_backslash_path_still_covers_its_root(self):
+        self.assertTrue(self.covers(
+            r'find /mnt/c/Users/bob -iname "*.txt"; '
+            r'es -path C:\Users\bob -n 50 x'))
+
+    def test_quoted_backslash_path_still_covers_its_root(self):
+        self.assertTrue(self.covers(
+            'find /mnt/c/Users/bob -iname "*.txt"; '
+            'es -path "C:\\Users\\bob" -n 50 x'))
+
+    def test_forward_slash_path_still_covers_its_root(self):
+        self.assertTrue(self.covers(
+            'find /mnt/c/Users/bob -iname "*.txt"; '
+            'es -path C:/Users/bob -n 50 x'))
+
+    def test_a_backslash_path_on_another_drive_does_not_cover(self):
+        self.assertFalse(self.covers(
+            r'find /mnt/c/Users/bob -iname "*.txt"; es -path D:\data -n 50 x'))
+
+    def test_preserving_backslashes_does_not_change_command_structure(self):
+        # Round 11's escaped separator must still be one token, so the
+        # escape-free pass is used ONLY to read es -path values.
+        self.assertEqual(
+            scope_mod.shell_segments(r"find /mnt/c -name foo\;es"),
+            [["find", "/mnt/c", "-name", "foo;es"]])
+
+    def test_a_delimiter_that_is_not_an_identifier_is_recognised(self):
+        # bash has no strip-tabs `<<~`; it reads `~EOF` as the literal
+        # delimiter, so `EOF` never ends the body and it runs to the end.
+        command = "cat <<~EOF\nfind / -name secret\nEOF\n"
+        self.assertEqual(scope_mod.shell_segments(command),
+                         [["cat", "<<", "~EOF"]])
+
+    def test_a_body_under_such_a_delimiter_is_not_an_indexed_search(self):
+        self.assertFalse(policy.command_already_uses_indexed_search(
+            "cat <<~EOF\nes results\nEOF\n", windows=False, wsl=True))
 
 
 if __name__ == "__main__":
