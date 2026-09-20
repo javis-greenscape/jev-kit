@@ -809,3 +809,232 @@ class TestR1ProtectsTheKeyFilePointer(unittest.TestCase):
             self.assertEqual(rules.secret_path_res(), tuple(rules.SECRET_PATH_RES))
             self.assertTrue(fired(ctx_bash("cat ~/.config/airlock/env"),
                                   "R1-secret-exposure")[0]["fires"])
+
+
+class TestR11BrowseViaJev(unittest.TestCase):
+    """R11 steers a browse-and-report pass at the Jev-decided browser agent.
+    Detection is code; the browse-or-test half is Jev's; every failure of Jev
+    allows the call and prints the recipe instead."""
+
+    RID = "R11-browse-via-jev"
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(__import__("shutil").rmtree, self.tmp, True)
+
+    def _script(self, name, body):
+        path = os.path.join(self.tmp, name)
+        with open(path, "w") as f:
+            f.write(body)
+        return path
+
+    def ctx_mcp(self, tool_name, **ti):
+        return rules.build_ctx({"tool_name": tool_name, "tool_input": ti, "cwd": self.tmp},
+                               tool_name)
+
+    def ctx(self, command):
+        return rules.build_ctx({"tool_name": "Bash", "tool_input": {"command": command},
+                                "cwd": self.tmp}, "Bash")
+
+    def assert_asks(self, ctx, why=""):
+        rows = fired(ctx, self.RID)
+        self.assertTrue(rows, "R11 did not match: %s" % (why or ctx.get("command")))
+        self.assertIsNone(rows[0]["fires"], "R11 decided without Jev: %s" % why)
+
+    def assert_silent(self, ctx, why=""):
+        self.assertEqual(fired(ctx, self.RID), [], why or ctx.get("command"))
+
+    # --- detection: the positives --------------------------------------------
+
+    def test_a_node_script_importing_playwright_is_caught(self):
+        for name, body in (
+            ("verify.cjs", "const { chromium } = require('playwright');\n"),
+            ("verify.mjs", "import { chromium } from 'playwright-core';\n"),
+            ("verify.js", "const pw = await import('playwright/test');\n"),
+        ):
+            path = self._script(name, body)
+            self.assert_asks(self.ctx("node %s" % path), name)
+
+    def test_a_python_script_importing_playwright_is_caught(self):
+        path = self._script("verify.py", "from playwright.sync_api import sync_playwright\n")
+        self.assert_asks(self.ctx("python3 %s" % path))
+        self.assert_asks(self.ctx("uv run python3 %s" % path))
+
+    def test_an_inline_script_is_caught(self):
+        self.assert_asks(self.ctx("node -e \"const {chromium}=require('playwright')\""))
+        self.assert_asks(self.ctx("python3 -c 'from playwright.sync_api import sync_playwright'"))
+
+    def test_playwright_cli_other_than_the_tooling_verbs_is_caught(self):
+        for c in ("npx playwright open https://example.com",
+                  "npx playwright screenshot https://example.com out.png",
+                  "playwright codegen https://example.com"):
+            self.assert_asks(self.ctx(c), c)
+
+    def test_a_playwright_mcp_browsing_call_is_caught(self):
+        for tool in ("mcp__playwright__browser_navigate",
+                     "mcp__playwright__browser_click",
+                     "mcp__playwright__browser_take_screenshot",
+                     "mcp__plugin_playwright_playwright__browser_navigate",
+                     "mcp__plugin_playwright_playwright__browser_type"):
+            self.assert_asks(self.ctx_mcp(tool, url="https://example.com"), tool)
+
+    # --- detection: the negatives --------------------------------------------
+
+    def test_playwright_test_and_the_tooling_verbs_are_allowed(self):
+        for c in ("npx playwright test", "npx playwright test e2e/login.spec.ts",
+                  "npx playwright install chromium", "npx playwright install-deps",
+                  "npx playwright show-report", "playwright test --grep login"):
+            self.assert_silent(self.ctx(c), c)
+
+    def test_test_runners_are_allowed_even_with_a_playwright_script_named(self):
+        self._script("e2e.spec.ts", "import { test } from 'playwright/test';\n")
+        for c in ("vitest run e2e.spec.ts", "npm test", "pnpm run test:e2e",
+                  "pytest tests/test_browser.py", "python3 -m pytest tests/test_browser.py",
+                  "npx vitest run"):
+            self.assert_silent(self.ctx(c), c)
+
+    def test_a_script_that_does_not_touch_playwright_is_allowed(self):
+        path = self._script("build.js", "const fs = require('fs');\n")
+        self.assert_silent(self.ctx("node %s" % path))
+
+    def test_running_the_jev_browser_agent_is_never_caught(self):
+        path = self._script("run_goal.py", "from playwright.sync_api import sync_playwright\n")
+        self.assert_silent(self.ctx("BU_CDP_URL=http://127.0.0.1:9333 python3 %s" % path))
+        self.assert_silent(self.ctx("cd ~/code/jev-ultrafast && uv run python3 %s" % path))
+
+    def test_non_browsing_mcp_and_other_servers_are_ignored(self):
+        self.assert_silent(self.ctx_mcp("mcp__playwright__browser_install"), "browser_install")
+        self.assert_silent(self.ctx_mcp("mcp__playwright__browser_close"), "browser_close")
+        self.assert_silent(self.ctx_mcp("mcp__github__create_pr", title="x"), "other server")
+
+    def test_an_ordinary_call_costs_nothing(self):
+        for c in ("ls -la", "git status", "node build.js"):
+            self.assert_silent(self.ctx(c), c)
+        c = rules.build_ctx({"tool_name": "Read", "tool_input": {"file_path": "/tmp/x.py"}}, "Read")
+        self.assert_silent(c, "Read")
+
+    def test_a_missing_or_huge_script_is_read_safely(self):
+        self.assertEqual(rules._pw_script_source("/nonexistent/x.js", self.tmp), "")
+        self.assertEqual(rules._pw_script_source("--flag", self.tmp), "")
+        self.assertEqual(rules._pw_script_source("README", self.tmp), "")
+        big = self._script("big.js", "x" * (rules._PW_MAX_SCRIPT_BYTES + 1))
+        self.assertEqual(rules._pw_script_source(big, self.tmp), "")
+
+    # --- config ---------------------------------------------------------------
+
+    def test_the_rule_is_on_by_default_on_every_platform(self):
+        rule = rules.RULES_BY_ID[self.RID]
+        for win in (False, True):
+            self.assertEqual(rules.default_action(rule, windows=win), "deny", win)
+            self.assertEqual(rules.effective_action(rule, overrides={}, windows=win), "deny", win)
+
+    def test_the_documented_off_switch_works(self):
+        path = self._script("rules.json", json.dumps({"R11-browse-via-jev": "off"}))
+        self.assertEqual(rules.load_action_overrides(path), {"R11-browse-via-jev": "off"})
+        ctx = self.ctx("npx playwright open https://x")
+        self.assert_asks(ctx, "sanity: it matches by default")
+        self.assertEqual(rules.prefilter_matches(ctx, {"R11-browse-via-jev": "off"}), [])
+
+    # --- the message ----------------------------------------------------------
+
+    def test_the_message_carries_the_recipe(self):
+        text = rules.R11_SUGGESTION
+        for fragment in ("jev-ultrafast", "BU_CDP_URL", "--remote-debugging-port",
+                         "DOM extraction", "INSIDE the process", "browser/README.md",
+                         "under 3", "no Claude decision calls",
+                         '{"R11-browse-via-jev": "off"}'):
+            self.assertIn(fragment, text, fragment)
+
+
+class TestR11JevPaths(unittest.TestCase):
+    """The Jev half, end to end through the enforce path. Every Jev call is
+    mocked; nothing here reaches the network."""
+
+    def setUp(self):
+        self.logged = []
+        p = mock.patch("airlock.log.append", side_effect=self.logged.append)
+        p.start()
+        self.addCleanup(p.stop)
+        ov = mock.patch("airlock.rules.load_action_overrides", return_value={})
+        ov.start()
+        self.addCleanup(ov.stop)
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(__import__("shutil").rmtree, self.tmp, True)
+        self.script = os.path.join(self.tmp, "verify.cjs")
+        with open(self.script, "w") as f:
+            f.write("const { chromium } = require('playwright');\n")
+
+    def _payload(self):
+        return {"session_id": "sess-r11", "cwd": self.tmp, "tool_name": "Bash",
+                "tool_input": {"command": "node %s" % self.script}}
+
+    @staticmethod
+    def _answers(choice, confidence=0.95):
+        other = (1.0 - confidence) / 2.0
+        probs = {"browse_and_report": other, "test_or_tooling_code": other, "unclear": other}
+        probs[choice] = confidence
+        return {"purpose": {"choice": choice, "confidence": confidence, "probabilities": probs}}
+
+    def _run(self, ask):
+        with mock.patch("airlock.client.ask", side_effect=ask), \
+             mock.patch("airlock.state.was_recently_denied", return_value=False), \
+             mock.patch("airlock.state.record_denial"), \
+             mock.patch.object(enforce, "emit_deny") as deny, \
+             mock.patch.object(enforce, "emit_warn") as warn:
+            denied = enforce.handle(self._payload(), "Bash")
+        return denied, deny, warn
+
+    def test_yes_denies_and_names_the_recipe(self):
+        denied, deny, _ = self._run(lambda p, timeout_s=None: ({"answers": self._answers("browse_and_report")}, 20))
+        self.assertTrue(denied)
+        reason = deny.call_args[0][0]
+        self.assertIn("R11-browse-via-jev", reason)
+        self.assertIn("jev-ultrafast", reason)
+        self.assertIn("BU_CDP_URL", reason)
+
+    def test_no_allows_silently(self):
+        denied, deny, warn = self._run(
+            lambda p, timeout_s=None: ({"answers": self._answers("test_or_tooling_code")}, 20))
+        self.assertFalse(denied)
+        deny.assert_not_called()
+        warn.assert_not_called()
+        self.assertFalse(self.logged[-1]["fires"])
+
+    def test_low_confidence_never_denies(self):
+        denied, deny, _ = self._run(
+            lambda p, timeout_s=None: ({"answers": self._answers("browse_and_report", 0.55)}, 20))
+        self.assertFalse(denied)
+        deny.assert_not_called()
+        self.assertEqual(self.logged[-1].get("gated"), "below_deny_bar")
+
+    def test_jev_unavailable_allows_and_still_prints_the_recipe(self):
+        for exc in (RuntimeError("no key"), RuntimeError("out of tokens"),
+                    OSError("timed out")):
+            self.logged[:] = []
+            denied, deny, warn = self._run(mock.Mock(side_effect=exc))
+            self.assertFalse(denied, exc)
+            deny.assert_not_called()
+            warn.assert_called_once()
+            self.assertIn("jev-ultrafast", warn.call_args[0][0][0])
+            self.assertTrue(self.logged[-1]["advised_on_error"])
+            self.assertIn("error", self.logged[-1])
+
+    def test_an_exhausted_budget_allows_and_still_prints_the_recipe(self):
+        def slow(payload, timeout_s=None):
+            import time as _t
+            _t.sleep(0.05)
+            return {"answers": self._answers("browse_and_report")}, 50
+
+        with mock.patch.dict(os.environ, {"AIRLOCK_BUDGET_MS": "1"}):
+            denied, deny, warn = self._run(slow)
+        self.assertFalse(denied)
+        deny.assert_not_called()
+        warn.assert_called_once()
+        self.assertIn("jev-ultrafast", warn.call_args[0][0][0])
+
+    def test_no_other_rule_advises_on_an_error(self):
+        """`advise_on_error` is opt-in: every other rule stays silent when the
+        judgement cannot be reached, which is the established behaviour."""
+        for rule in rules.RULES:
+            if rule.id != "R11-browse-via-jev":
+                self.assertFalse(rule.advise_on_error, rule.id)

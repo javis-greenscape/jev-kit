@@ -419,6 +419,13 @@ def _run_rule(ctx, rule, match, eff, base, override_reason, b_ms, session_id, mo
             entry["elapsed_ms"] = int((time.monotonic() - start) * 1000)
             entry["fires"] = False
             entry["enforced"] = False
+            # Fail open, as everywhere. A rule that set `advise_on_error` also
+            # gets its suggestion printed here: the advice stands on its own
+            # and needed no judgement, so an unreachable Jev should not mean
+            # the session hears nothing at all. Nothing is blocked either way.
+            if getattr(rule, "advise_on_error", False) and eff in ("deny", "ask", "warn"):
+                entry["advised_on_error"] = True
+                advice.append(_rule_warn_text(rule.id, match.detail, match.suggestion))
             log.append(entry)
             return False
         elapsed_ms = int((time.monotonic() - start) * 1000)
@@ -441,6 +448,12 @@ def _run_rule(ctx, rule, match, eff, base, override_reason, b_ms, session_id, mo
         if elapsed_ms > b_ms:
             fires = False
             entry.setdefault("error", "budget exceeded (%dms > %dms)" % (elapsed_ms, b_ms))
+            # Same reasoning as the except branch above: a rule that opted in
+            # still gets to print its advice when the judgement did not arrive
+            # in time. Never a block.
+            if getattr(rule, "advise_on_error", False) and eff in ("deny", "ask", "warn"):
+                entry["advised_on_error"] = True
+                advice.append(_rule_warn_text(rule.id, match.detail, match.suggestion))
         if not fires:
             # A rule that can explain its own silence says so on the row. R10
             # withholding an earned warn because the human already asked for

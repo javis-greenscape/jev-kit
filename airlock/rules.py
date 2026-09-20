@@ -1,9 +1,11 @@
 """The rules table: one entry per kind of genuinely-wrong tool use.
 
 This module has no network and no logging, and its only filesystem access is
-the cheap upward walk the legacy tool-choice rule already did plus one stat of
+the cheap upward walk the legacy tool-choice rule already did, one stat of
 the key-file pointer for R1 (see `_pointer_secret_path_res`, which caches on
-that stat). It answers, in microseconds, one question for a PreToolUse payload:
+that stat), and one bounded read of a script a command names for R11 (see
+`_pw_script_source`: one isfile, one size check, at most 256KB, and only when
+a segment actually runs a file with a script extension). It answers, in microseconds, one question for a PreToolUse payload:
 
     could any rule possibly fire for this call?
 
@@ -87,10 +89,11 @@ class Match(object):
 
 class Rule(object):
     __slots__ = ("id", "tools", "action", "windows_action", "prefilter", "questions",
-                 "deny_when", "legacy", "fallback", "why")
+                 "deny_when", "legacy", "fallback", "why", "advise_on_error")
 
     def __init__(self, id, tools, action, prefilter=None, questions=None, deny_when=None,
-                 legacy=None, fallback=False, why="", windows_action=None):
+                 legacy=None, fallback=False, why="", windows_action=None,
+                 advise_on_error=False):
         self.id = id
         self.tools = tuple(tools)
         self.action = action
@@ -110,6 +113,13 @@ class Rule(object):
         # the catch-all tier, and running it alongside a specific rule would
         # mean paying twice to say the same thing.
         self.fallback = fallback
+        # When the Jev half cannot be reached -- no key, no tokens, a timeout,
+        # any error -- the call is allowed either way (the guard fails open
+        # everywhere). This flag says the rule's suggestion is still worth
+        # printing as advice on that path, because the advice is useful on its
+        # own and does not depend on the judgement. Off for every other rule,
+        # whose silence on an error is the established behaviour.
+        self.advise_on_error = advise_on_error
         self.why = why
 
     def applies_to(self, tool_name):
@@ -1540,6 +1550,257 @@ def general_risk_suppression(answers):
     return None
 
 
+# --- R11: browsing goes through the Jev-decided browser agent ----------------
+
+# The kit already ships the browser agent (browser/ installs jev-ultrafast at a
+# pin), and the measured gap is large: same goals, same browser, only the
+# decision-maker changes, and the Claude spend per run falls from 0.1868 USD to
+# 0.0008 USD (README, "Jev as the decision-maker"). Nothing steered an agent to
+# it, so sessions kept hand-writing Playwright scripts at Sonnet prices. This
+# rule is that steer.
+#
+# It is the one rule that reads a file the command names: a script path handed
+# to node or python says nothing about Playwright from the command line alone.
+# The read is bounded (one isfile, one size check, at most 256KB) and happens
+# only when a segment actually runs a script with a script extension.
+
+R11_SUGGESTION = (
+    "Browsing goes through the Jev-decided browser agent (browser/install.sh "
+    "puts it in ~/code/jev-ultrafast), not a hand-written Playwright script. "
+    "Jev decides each click, so the Claude bill for the decision loop is close "
+    "to zero.\n"
+    "  1. Log in with a small script that reads the credential INSIDE the "
+    "process, never as an argument, and leave headless Chromium up on a CDP "
+    "port (--remote-debugging-port=9333). Do not call browser.close().\n"
+    "  2. export BU_CDP_URL=http://127.0.0.1:9333 and run each goal through "
+    "jev-ultrafast, which attaches to that already-authenticated browser.\n"
+    "  3. Read the result with a small DOM extraction over the same CDP "
+    "session: Jev decides operations, it does not narrate a page.\n"
+    "Measured 2026-09-20: three LinkOne goals, each finished in under 3 "
+    "seconds, with no Claude decision calls at all. See browser/README.md.\n"
+    "Writing or running e2e test code is not browsing and is never blocked. "
+    "Override with [airlock-ok: <reason>], or turn the rule off with "
+    '{"R11-browse-via-jev": "off"} in ~/.config/airlock/rules.json.'
+)
+
+# Playwright's MCP server, under both names this box has seen it registered
+# with. The hook is wired with matcher "*", so an MCP tool call reaches the
+# rules table exactly like a Bash one; only the tool NAME and tool_input come
+# with it, which is all this rule needs.
+_PW_MCP_PREFIXES = ("mcp__plugin_playwright_playwright__", "mcp__playwright__")
+
+# The navigate / click / type / snapshot family: driving a page. Names that
+# are not browsing (browser_install, browser_close) are deliberately absent.
+_PW_MCP_BROWSING = {
+    "browser_navigate", "browser_navigate_back", "browser_navigate_forward",
+    "browser_click", "browser_type", "browser_fill_form", "browser_press_key",
+    "browser_hover", "browser_select_option", "browser_drag",
+    "browser_snapshot", "browser_take_screenshot", "browser_evaluate",
+    "browser_wait_for", "browser_file_upload", "browser_handle_dialog",
+    "browser_console_messages", "browser_network_requests", "browser_pdf_save",
+    "browser_tabs",
+    # the shorter names older builds of the server used
+    "navigate", "navigate_back", "click", "type", "hover", "select_option",
+    "press_key", "snapshot", "screenshot", "evaluate", "wait_for", "drag",
+}
+
+_PW_IMPORT_RE = re.compile(
+    r"""require\(\s*['"]playwright(?:-core)?(?:/[\w.-]+)?['"]"""
+    r"""|from\s+['"]playwright(?:-core)?(?:/[\w.-]+)?['"]"""
+    r"""|import\s*\(\s*['"]playwright(?:-core)?(?:/[\w.-]+)?['"]"""
+    r"""|^\s*import\s+playwright\b"""
+    r"""|^\s*from\s+playwright(?:\.[\w.]+)?\s+import\b""",
+    re.M,
+)
+
+# The same shapes without the line anchors, for a one-liner passed as `-e` or
+# `-c`: there the import is mid-line, inside a quoted argument, not at the
+# start of a line of its own.
+_PW_IMPORT_INLINE_RE = re.compile(
+    r"""require\(\s*['"]playwright(?:-core)?(?:/[\w.-]+)?['"]"""
+    r"""|from\s+['"]playwright(?:-core)?(?:/[\w.-]+)?['"]"""
+    r"""|import\s*\(\s*['"]playwright(?:-core)?(?:/[\w.-]+)?['"]"""
+    r"""|\bimport\s+playwright\b"""
+    r"""|\bfrom\s+playwright(?:\.[\w.]+)?\s+import\b""",
+)
+
+_PW_SCRIPT_EXTS = (".js", ".cjs", ".mjs", ".ts", ".mts", ".cts", ".py")
+_PW_MAX_SCRIPT_BYTES = 256 * 1024
+_PW_SCRIPT_RUNNERS = {"node", "bun", "deno", "tsx", "ts-node", "python", "python3"}
+_PW_INLINE_FLAGS = {"-e", "--eval", "-c", "--command", "-p", "--print"}
+# `playwright <sub>` that is e2e tooling rather than a browsing session.
+_PW_CLI_ALLOWED = {"test", "install", "install-deps", "uninstall", "show-report", "--version"}
+# Running the Jev browser agent itself is the thing this rule asks for, so it
+# is never the thing this rule catches.
+_PW_JEV_MARKERS = ("jev-ultrafast", "BU_CDP_URL", "jev_ultrafast")
+
+
+def _pw_script_source(tok, cwd):
+    """The text of a script the command names, or "". One isfile, one size
+    check, one bounded read. Never raises."""
+    try:
+        if not tok or tok.startswith("-") or not tok.endswith(_PW_SCRIPT_EXTS):
+            return ""
+        path = _expand(tok)
+        if not os.path.isabs(path) and cwd:
+            path = os.path.join(cwd, path)
+        if not os.path.isfile(path):
+            return ""
+        if os.path.getsize(path) > _PW_MAX_SCRIPT_BYTES:
+            return ""
+        with open(path, "r", errors="replace") as f:
+            return f.read(_PW_MAX_SCRIPT_BYTES)
+    except Exception:
+        return ""
+
+
+def _pw_is_test_run(prog, args):
+    """True for a run of e2e code: a test runner, or a package script. These
+    are always allowed -- writing and running tests is not browsing."""
+    if prog == "pytest" or prog in _JS_RUNNERS:
+        return True
+    if prog in ("python", "python3") and args[:2] == ["-m", "pytest"]:
+        return True
+    if prog in ("npm", "pnpm", "yarn") and args[:1] in (["test"], ["run"]):
+        return True
+    if prog == "npx" and args[:1] and args[0] in _JS_RUNNERS:
+        return True
+    return False
+
+
+def prefilter_browser_driving(ctx):
+    tool_name = ctx["tool_name"] or ""
+
+    if tool_name not in SHELL_TOOLS:
+        for prefix in _PW_MCP_PREFIXES:
+            if tool_name.startswith(prefix):
+                action = tool_name[len(prefix):]
+                if action in _PW_MCP_BROWSING:
+                    return Match(
+                        "Playwright MCP `%s`: driving a browser directly" % action,
+                        R11_SUGGESTION, ask=True,
+                        extra={"how": "playwright mcp tool %s" % action},
+                    )
+                return None
+        return None
+
+    command = ctx["command"]
+    if not command:
+        return None
+    for marker in _PW_JEV_MARKERS:
+        if marker in command:
+            return None
+
+    for seg in ctx["segments"]:
+        prog, args = program_of(seg)
+        if prog is None:
+            continue
+        if prog == "uv" and args[:1] == ["run"]:
+            rest = [a for a in args[1:] if not a.startswith("-")]
+            if not rest:
+                continue
+            prog, args = rest[0], rest[1:]
+        if _pw_is_test_run(prog, args):
+            continue
+
+        sub = ""
+        if prog == "playwright":
+            sub = args[0] if args else ""
+        elif prog == "npx" and args[:1] == ["playwright"]:
+            sub = args[1] if len(args) > 1 else ""
+        if prog == "playwright" or (prog == "npx" and args[:1] == ["playwright"]):
+            if sub in _PW_CLI_ALLOWED or not sub:
+                continue
+            return Match(
+                "`playwright %s` drives a browser from the command line" % sub,
+                R11_SUGGESTION, ask=True, extra={"how": "playwright %s" % sub},
+            )
+
+        if prog not in _PW_SCRIPT_RUNNERS:
+            continue
+        if any(a in _PW_INLINE_FLAGS for a in args):
+            if _PW_IMPORT_INLINE_RE.search(seg):
+                return Match(
+                    "an inline `%s` script drives Playwright itself" % prog,
+                    R11_SUGGESTION, ask=True, extra={"how": "inline %s script" % prog},
+                )
+            continue
+        for a in args:
+            src = _pw_script_source(a, ctx.get("cwd") or "")
+            if src and _PW_IMPORT_RE.search(src):
+                return Match(
+                    "`%s %s` runs a script that imports Playwright and drives a browser"
+                    % (prog, a),
+                    R11_SUGGESTION, ask=True, extra={"how": "%s %s" % (prog, a)},
+                )
+            if src:
+                break
+    return None
+
+
+def questions_browser_driving(ctx, match):
+    state = {
+        "how": match.extra.get("how", ""),
+        "command": (ctx.get("command") or "")[:2000],
+        "tool": ctx.get("tool_name") or "",
+        "description": (ctx.get("description") or "")[:500],
+    }
+    qs = {
+        "purpose": {
+            "type": "choice",
+            "instructions": {
+                "question": (
+                    "A session is about to drive a browser with Playwright. Is it "
+                    "browsing a site to find out what is there, or is it building "
+                    "or running test code?"
+                ),
+                "focus": (
+                    "A browse-and-report pass should go through the Jev-decided "
+                    "browser agent instead. Writing or running e2e tests should not."
+                ),
+            },
+            "criteria": {
+                "browse_and_report": {
+                    "what": (
+                        "Opening pages, clicking through a live site, reading what "
+                        "is on them, checking a deploy, taking a screenshot to look at."
+                    ),
+                    "not_for": "Anything whose output is test code or a test result.",
+                    "examples": [
+                        "open the staging site and tell me whether the table renders",
+                        "log in and screenshot the dashboard",
+                        "click through to Projects and report the row count",
+                    ],
+                },
+                "test_or_tooling_code": {
+                    "what": (
+                        "Writing, editing, debugging or running an automated test "
+                        "suite, a fixture, a scraper that is part of the product, or "
+                        "browser tooling itself."
+                    ),
+                    "not_for": "A one-off look at a live page.",
+                    "examples": [
+                        "run the e2e suite against localhost",
+                        "debug why this spec times out",
+                        "add a Playwright test for the login form",
+                    ],
+                },
+                "unclear": {
+                    "what": "Not enough information to tell.",
+                    "not_for": "Use only when truly stuck.",
+                    "examples": [],
+                },
+            },
+        }
+    }
+    return state, qs
+
+
+def deny_browser_driving(answers):
+    a = (answers or {}).get("purpose") or {}
+    return (a.get("choice") or "") == "browse_and_report"
+
+
 # Rules that can explain their own silence. Keyed by rule id so the hot path
 # pays nothing for the rules that cannot.
 SUPPRESSION_BY_RULE = {"R10-general-risk": general_risk_suppression}
@@ -1657,6 +1918,22 @@ RULES = [
             "(docs/CREDITS.md), narrowed to calls no other rule covers "
             "and that a code pre-filter marks as reaching outside the working tree. "
             "Warn only, never deny.",
+    ),
+    Rule(
+        id="R11-browse-via-jev",
+        # Every tool: Playwright's MCP server is not a shell tool, and its tool
+        # names are not known ahead of time. The pre-filter returns on its
+        # first line for anything that is neither a shell call nor an `mcp__`
+        # one, so the cost of the wide `tools` is a string compare.
+        tools=("*",),
+        action="deny",
+        prefilter=prefilter_browser_driving,
+        questions=questions_browser_driving,
+        deny_when=deny_browser_driving,
+        advise_on_error=True,
+        why="The kit ships a Jev-decided browser agent that reaches the same goals "
+            "for roughly 1/233rd of the Claude spend (README, browser/). Browsing "
+            "should go through it; writing and running e2e tests should not.",
     ),
 ]
 

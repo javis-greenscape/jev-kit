@@ -19,6 +19,7 @@ request, no log row, no subprocess.
 | `R8-tool-choice-guard` | Bash | deny | Jev | a disk-wide filename crawl, or a raw grep where a code graph exists |
 | `R9-commit-secret` | Bash | deny | code + a local credential belt | staging or committing a secret |
 | `R10-general-risk` | Bash | **warn only, never deny** | code pre-filter, then a Jev Score + `user_requested` | the catch-all: a call no other rule covers that plainly reaches outside the working tree |
+| `R11-browse-via-jev` | every tool (Bash and the Playwright MCP server) | deny | code pre-filter, then Jev on browse-or-test | a browse-and-report pass hand-driving Playwright, when the kit already ships a Jev-decided browser agent |
 
 `R8-tool-choice-guard`'s graphify-suggestion branch only exists when the search
 root carries a graph (`graphify-out/graph.json`). With no graph the branch is
@@ -150,6 +151,58 @@ malformed ladder is ignored whole and the built-in one is used, so a broken
 config can never make the guard misjudge a rung. Malformed means any of these:
 not a list of non-empty lists of strings, fewer than two rungs, or one name in
 two rungs.
+
+## `R11-browse-via-jev`: browsing goes through the browser agent
+
+The kit ships a Jev-decided browser agent (`browser/`, which clones
+jev-ultrafast at a pin). On the same nine goals it reaches everything Sonnet
+reaches for roughly 1/233rd of the Claude spend per run. Nothing steered
+anybody to it, so sessions kept writing their own Playwright scripts at Sonnet
+prices. This rule is that steer, and it is on by default.
+
+The code pre-filter recognises three ways of driving a browser:
+
+- a Playwright MCP tool call, under either name the server is registered with
+  (`mcp__playwright__*`, `mcp__plugin_playwright_playwright__*`), and only for
+  the navigate / click / type / snapshot family. `browser_install` and
+  `browser_close` are not browsing and never match. The hook is wired with
+  matcher `*`, so a non-Bash tool call reaches the table with its name and its
+  `tool_input`, which is all this needs;
+- `playwright <verb>` or `npx playwright <verb>` for any verb other than
+  `test`, `install`, `install-deps`, `uninstall` and `show-report`;
+- a shell command running a script that imports `playwright` or
+  `playwright-core`, whether the script is a file (`node verify.cjs`,
+  `python3 verify.py`, `uv run python3 verify.py`) or inline (`node -e`,
+  `python3 -c`).
+
+This is the one rule that reads a file the command names, because `node
+verify.cjs` says nothing about Playwright from the command line alone. The
+read is bounded: one `isfile`, one size check, at most 256KB, and only for a
+segment that actually runs a file with a script extension.
+
+Three things never match at all. A test run (`playwright test`, `vitest`,
+`jest`, `pytest`, `npm test`, `pnpm run test:e2e`) is e2e code, not browsing.
+A script that does not import Playwright is nothing to do with this rule. And
+a command that is already running the Jev agent (it names `jev-ultrafast` or
+sets `BU_CDP_URL`) is the thing the rule asks for, so it is never the thing the
+rule catches.
+
+When the pre-filter fires, Jev is asked one question: is this a
+browse-and-report pass, or is it writing or running test code? Only
+`browse_and_report` denies, and only at the usual bar of confidence 0.8 and
+margin 0.4. The deny prints the recipe measured on 2026-09-20: log in with a
+small script that reads the credential inside the process, leave headless
+Chromium on a CDP port, run each goal through jev-ultrafast with `BU_CDP_URL`,
+and read the result with a small DOM extraction, because Jev decides
+operations and does not narrate a page. Three LinkOne goals that way each
+finished in under three seconds with no Claude decision calls at all.
+
+**It never blocks when Jev cannot answer.** No key, no tokens, a timeout, an
+error of any kind: the call is allowed, and the recipe is printed as advice
+instead. That is the one place this rule differs from the others, which stay
+silent on an error. Turn the whole thing off with
+`{"R11-browse-via-jev": "off"}` in `~/.config/airlock/rules.json`, or get past
+one call with an `[airlock-ok: <reason>]` stamp.
 
 ## `R10-general-risk`: the fallback
 

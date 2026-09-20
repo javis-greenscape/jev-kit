@@ -445,6 +445,14 @@ if [ "$WANT_GUARD" = "1" ]; then
       fi ;;
   esac
 
+  # --- R11: browsing goes through the Jev browser agent --------------------
+  # On by default, on every platform, and it needs no entry in rules.json to
+  # be on. The line is printed because a rule that can block a Playwright
+  # script should not be a surprise, and because the off switch should be on
+  # screen next to it.
+  ok "R11 (browse via the Jev browser agent): ON by default -- a browse-and-report pass driving Playwright is denied with the recipe; test runs are never touched"
+  printf '         turn it off with:  {"R11-browse-via-jev": "off"} in %s\n' "$CONFIG_DIR/rules.json"
+
   if [ ! -f "$CONFIG_DIR/mode" ]; then
     echo "shadow" > "$CONFIG_DIR/mode"
     ok "mode set to shadow (log only). Change it with: echo enforce > $CONFIG_DIR/mode"
