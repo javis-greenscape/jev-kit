@@ -115,6 +115,114 @@ _SEQUENTIAL_OPS = ("&&", "||", ";")
 _PIPE_OP = ("|",)
 
 
+#: Tokens a shell reads as operators rather than as words. `shell_words`
+#: returns each of these as its own token.
+SHELL_OPERATORS = frozenset({";", "&&", "||", "|", "&", "(", ")", "\n"})
+
+
+def shell_words(command):
+    """`command` split into words the way bash splits it, with operators as
+    their own tokens. None when it cannot be lexed.
+
+    Quoting, backslash escapes and comments are handled by the lexer rather
+    than by pattern-matching the raw text. Four consecutive review rounds
+    found the same class of defect in the hand-rolled splitter -- a quoted
+    separator, an escaped separator, a heredoc body and a comment, each
+    read as a command bash would never run -- and each narrow fix was
+    followed by the next construct (Codex, PR #1). `shlex` with
+    `punctuation_chars` already implements all of it.
+    """
+    if not command:
+        return []
+    try:
+        lex = shlex.shlex(str(command), posix=True, punctuation_chars=True)
+        lex.whitespace_split = True
+        return list(lex)
+    except ValueError:
+        # An unterminated quote. The caller decides what to do; guessing
+        # here would be the pattern-matching this function exists to avoid.
+        return None
+
+
+def shell_segments(command):
+    """`shell_words` grouped into one token list per command stage.
+
+    `find /mnt/c -name x; es y` gives [["find", ...], ["es", "y"]]. None
+    when the command cannot be lexed.
+    """
+    segments = []
+    # A plain newline separates commands, but the lexer reads it as
+    # ordinary whitespace, which would join the next line onto this one.
+    # Split on UNQUOTED newlines first, so a newline inside a quoted
+    # argument stays part of that argument.
+    for line in _split_unquoted_newlines(command):
+        words = shell_words(line)
+        if words is None:
+            return None
+        current = []
+        for word in words:
+            if word in SHELL_OPERATORS:
+                if current:
+                    segments.append(current)
+                current = []
+                continue
+            current.append(word)
+        if current:
+            segments.append(current)
+    return segments
+
+
+def _split_unquoted_newlines(command):
+    """`command` split at newlines that fall outside quotes."""
+    lines = []
+    current = []
+    quote = None
+    i = 0
+    text = str(command or "")
+    n = len(text)
+    while i < n:
+        c = text[i]
+        if quote:
+            if c == "\\" and quote == '"' and i + 1 < n:
+                current.append(c)
+                current.append(text[i + 1])
+                i += 2
+                continue
+            current.append(c)
+            if c == quote:
+                quote = None
+            i += 1
+            continue
+        if c == "\\" and i + 1 < n:
+            current.append(c)
+            current.append(text[i + 1])
+            i += 2
+            continue
+        if c in ("'", '"'):
+            quote = c
+            current.append(c)
+            i += 1
+            continue
+        if c == "\n":
+            lines.append("".join(current))
+            current = []
+            i += 1
+            continue
+        current.append(c)
+        i += 1
+    lines.append("".join(current))
+    return lines
+
+
+def segment_program(tokens):
+    """The program a stage actually invokes, with sudo/nice/env and VAR=val
+    stripped, or None for an empty stage."""
+    tokens = _strip_prefixes(list(tokens or []))
+    if not tokens:
+        return None
+    return os.path.basename(tokens[0])
+
+
 def strip_shell_comment(command):
     """`command` with a trailing shell comment removed.
 

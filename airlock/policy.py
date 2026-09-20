@@ -747,29 +747,63 @@ def command_follows_symlinks(command):
         text = str(command)
     except Exception:
         return True
-    for segment in _split_command_segments(text):
-        try:
-            words = shlex.split(segment)
-        except ValueError:
-            words = segment.split()
-        # `sudo find link -name x` is a find stage. scope classification
-        # strips these prefixes before naming the program, and reading the
-        # prefix as the program here made the stage look like something
-        # other than find, so it counted as following symlinks (Codex P2,
-        # PR #1). Uses scope's own stripper, so the two cannot drift.
-        try:
-            from . import scope as _scope
-            words = _scope._strip_prefixes(words)
-        except Exception:
-            pass
-        if not words:
+    try:
+        from . import scope as _scope
+        segments = _scope.shell_segments(text)
+    except Exception:
+        segments = None
+    if segments is None:
+        # Unlexable, so the stages are unknown. Treat the command as not
+        # following: the roots then stay unresolved and the crawl is
+        # allowed, which is the harmless direction.
+        return False
+    for tokens in segments:
+        if _scope.segment_program(tokens) != "find":
             continue
-        program = os.path.basename(words[0])
-        if program != "find":
-            continue
-        if not any(w in ("-L", "-H") for w in words[1:]):
+        if not _find_dereferences(_scope._strip_prefixes(list(tokens))[1:]):
             return False
     return True
+
+
+def _find_dereferences(args):
+    """Does this find stage follow a symlinked root?
+
+    Only find's LEADING global options answer that. `-L` later in the
+    command line is an argument: in `find link -name -L` it is the pattern
+    -name matches, and scanning the whole stage read it as dereferencing
+    and classified a symlink into /mnt/c as Windows-host ground (Codex P2,
+    PR #1)."""
+    follows = False
+    skip_value = False
+    for tok in args:
+        if skip_value:
+            skip_value = False
+            continue
+        # "If more than one of -H, -L, -P is specified, each overrides the
+        # others; the last one takes effect" -- find(1).
+        if tok in ("-L", "-H"):
+            follows = True
+            continue
+        if tok == "-P":
+            follows = False
+            continue
+        if tok in _scope_find_value_flags():
+            skip_value = True
+            continue
+        if len(tok) > 2 and tok[:2] in _scope_find_value_flags():
+            continue
+        # The first token that is not a global option ends them: from here
+        # on come the roots and then the expression.
+        break
+    return follows
+
+
+def _scope_find_value_flags():
+    try:
+        from . import scope as _scope
+        return _scope._FIND_GLOBAL_FLAGS_WITH_VALUE
+    except Exception:
+        return {"-D", "-O"}
 
 
 def root_is_plocate_covered(root, home=None, db_kind=None):
@@ -922,15 +956,6 @@ _LOCATE_RE = re.compile(r"(?<![A-Za-z0-9_])(plocate|locate)(?![A-Za-z0-9_])")
 # for a segment shlex itself cannot parse.
 _ES_RE = re.compile(r"(?:^|[\n;&|(])\s*es(?:\.exe)?(?=\s|$)", re.I)
 
-# Separators _ES_RE treats as starting a new shell command. Split on these
-# OUTSIDE quotes before token-matching `es`, so a quoted argument that merely
-# CONTAINS one of them -- `find /mnt/c -name "foo; es bar"` -- is never read
-# as two commands (Codex P2, PR #1: the raw regex ignored quoting entirely
-# and treated that `;` as a real separator, misreading the filename argument
-# as an invocation of `es`).
-_CMD_SEPARATOR_OPS = ("&&", "||", ";", "&", "|", "\n")
-
-
 def _strip_shell_comment(command):
     """scope.strip_shell_comment(), so policy and the scope parser read a
     shell comment the same way. Two copies drifted apart once already: the
@@ -943,81 +968,49 @@ def _strip_shell_comment(command):
         return command
 
 
-def _split_command_segments(command):
-    """Split `command` on shell statement/pipe separators that fall OUTSIDE
-    single/double quotes, longest operator first so '&&' isn't split as two
-    '&'. Never raises: an unterminated quote just keeps everything collected
-    so far as the trailing segment."""
-    command = _strip_shell_comment(command or "")
-    ops = sorted(_CMD_SEPARATOR_OPS, key=len, reverse=True)
-    parts = []
-    current = []
-    i = 0
-    n = len(command)
-    quote = None
-    while i < n:
-        c = command[i]
-        if quote:
-            # Inside double quotes a backslash still escapes the next
-            # character; inside single quotes it does not.
-            if c == "\\" and quote == '"' and i + 1 < n:
-                current.append(c)
-                current.append(command[i + 1])
-                i += 2
-                continue
-            current.append(c)
-            if c == quote:
-                quote = None
-            i += 1
-            continue
-        if c == "\\" and i + 1 < n:
-            # `find /mnt/c -name foo\;es` is ONE filename argument to find:
-            # the escaped `;` starts no new command, so the trailing `es` is
-            # not an invocation of Everything (Codex P2, PR #1).
-            current.append(c)
-            current.append(command[i + 1])
-            i += 2
-            continue
-        if c in ("'", '"'):
-            quote = c
-            current.append(c)
-            i += 1
-            continue
-        matched = None
-        for op in ops:
-            if command.startswith(op, i):
-                matched = op
-                break
-        if matched:
-            parts.append("".join(current))
-            current = []
-            i += len(matched)
-            continue
-        current.append(c)
-        i += 1
-    parts.append("".join(current))
-    return parts
+def _invokes_program(command, names):
+    """Does any stage of `command` actually INVOKE one of `names`?
+
+    Answered from scope's shell lexer, so a quoted separator, an escaped
+    separator or a comment cannot turn an argument into a command. Falls
+    back to the raw regexes only when the command cannot be lexed at all,
+    which is an unterminated quote.
+    """
+    wanted = {n.lower() for n in names}
+    try:
+        from . import scope as _scope
+        segments = _scope.shell_segments(command)
+        if segments is not None:
+            for tokens in segments:
+                program = _scope.segment_program(tokens)
+                if program and program.lower() in wanted:
+                    return True
+            return False
+    except Exception:
+        pass
+    text = command or ""
+    if wanted & {"es", "es.exe"} and _ES_RE.search(text):
+        return True
+    if wanted & {"locate", "plocate"} and _LOCATE_RE.search(text):
+        return True
+    return False
 
 
 def _command_position_is_es(command):
-    """Quote-aware: is `es`/`es.exe` actually the program invoked somewhere
-    in `command`, rather than text that merely follows a ;/&/| which turned
-    out to sit inside a quoted argument?"""
-    for segment in _split_command_segments(command):
-        segment = segment.strip()
-        if not segment:
-            continue
-        try:
-            tokens = shlex.split(segment)
-        except ValueError:
-            # Unterminated quote in this segment: fall back to the raw regex
-            # rather than silently skipping it.
-            if _ES_RE.search(segment):
-                return True
-            continue
-        if tokens and tokens[0].lower() in ("es", "es.exe"):
-            return True
-    return False
+    """Is `es`/`es.exe` the program invoked somewhere in `command`, rather
+    than text that merely follows a ;/&/| sitting inside a quoted argument,
+    an escape or a comment?"""
+    return _invokes_program(command, ("es", "es.exe"))
+
+
+def _command_position_is_locate(command):
+    """Is `locate`/`plocate` actually invoked?
+
+    `find "$HOME" /mnt/c -name plocate; es -path C:/ x` names plocate as a
+    filename pattern. Matching it anywhere in the text concluded that both
+    indexes were present and left the Linux-side crawl unsteered (Codex P2,
+    PR #1)."""
+    return _invokes_program(command, ("locate", "plocate"))
 
 
 def command_already_uses_locate(command):
@@ -1032,7 +1025,7 @@ def command_already_uses_locate(command):
 
 def command_already_uses_indexed_search(command, windows=None, wsl=None):
     command = command or ""
-    if _LOCATE_RE.search(command):
+    if _command_position_is_locate(command):
         return True
     if is_windows(windows):
         if _command_position_is_es(command):
@@ -1084,7 +1077,8 @@ def command_covers_roots(command, roots=None, windows=None, wsl=None):
         # the crawl is not already covered however many indexes appear.
         return False
     needs_windows = any_root_is_windows_host(roots, windows)
-    if any_root_is_plocate_covered(roots) and not _LOCATE_RE.search(command):
+    if any_root_is_plocate_covered(roots) \
+            and not _command_position_is_locate(command):
         return False
     if needs_windows and not _command_position_is_es(command):
         return False

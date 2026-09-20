@@ -601,6 +601,64 @@ class TestTheAdviceMatchesTheMachine(unittest.TestCase):
             self.assertEqual(_p._strip_shell_comment(command),
                              _s.strip_shell_comment(command), command)
 
+    def test_only_finds_leading_options_decide_dereferencing(self):
+        # `-L` after the roots is an argument. In `find link -name -L` it
+        # is the pattern -name matches, and scanning the whole stage read
+        # it as dereferencing.
+        self.assertFalse(policy.command_follows_symlinks("find link -name -L"))
+        self.assertFalse(policy.command_follows_symlinks("find link -name -H"))
+        # find(1): the last of -H, -L, -P takes effect.
+        self.assertTrue(policy.command_follows_symlinks("find -P -L link -name x"))
+        self.assertFalse(policy.command_follows_symlinks("find -L -P link -name x"))
+        # A global option with a value does not hide the one after it.
+        self.assertTrue(policy.command_follows_symlinks("find -O2 -L link -name x"))
+        self.assertTrue(policy.command_follows_symlinks("find -D search -L link -name x"))
+        self.assertTrue(policy.command_follows_symlinks("find -L -- link -name x"))
+
+    def test_locate_must_be_invoked_not_merely_named(self):
+        # `-name plocate` is a filename pattern. Matching it anywhere in
+        # the text concluded both indexes were present and left the
+        # Linux-side crawl unsteered.
+        self.assertFalse(policy.command_covers_roots(
+            'find "$HOME" /mnt/c -name plocate; es -path C:/ x',
+            roots=[os.path.expanduser("~"), "/mnt/c"],
+            windows=False, wsl=True))
+        # Actually invoking it still counts.
+        self.assertTrue(policy.command_covers_roots(
+            'plocate -i x; es -path C:/ x',
+            roots=[os.path.expanduser("~"), "/mnt/c"],
+            windows=False, wsl=True))
+
+    def test_a_comment_needs_no_space_before_it(self):
+        # `;` delimits a word without whitespace, so `x;#` starts a comment.
+        from airlock import scope
+        self.assertEqual(
+            scope.shell_segments("find /mnt/c -name x;# ; es placeholder"),
+            [["find", "/mnt/c", "-name", "x"]])
+        self.assertFalse(policy.command_covers_roots(
+            "find /mnt/c -name x;# ; es placeholder",
+            roots=["/mnt/c"], windows=False, wsl=True))
+
+    def test_the_lexer_reads_what_bash_would_run(self):
+        # One lexer now answers every construct that took a round each:
+        # quoted separators, escaped separators, comments and newlines.
+        from airlock import scope
+        self.assertEqual(
+            scope.shell_segments('find /mnt/c -name "foo; es bar"'),
+            [["find", "/mnt/c", "-name", "foo; es bar"]])
+        self.assertEqual(
+            scope.shell_segments(r"find /mnt/c -name foo\;es"),
+            [["find", "/mnt/c", "-name", "foo;es"]])
+        self.assertEqual(
+            scope.shell_segments("find /mnt/c -name x\nes -path C:/ y"),
+            [["find", "/mnt/c", "-name", "x"], ["es", "-path", "C:/", "y"]])
+        # A newline INSIDE quotes stays part of the argument.
+        self.assertEqual(
+            scope.shell_segments('find /mnt/c -name "a\nb"'),
+            [["find", "/mnt/c", "-name", "a\nb"]])
+        # An unterminated quote cannot be lexed, and says so.
+        self.assertIsNone(scope.shell_segments('find /mnt/c -name "x'))
+
     def test_a_prefixed_find_is_still_a_find_stage(self):
         # scope strips these prefixes before naming the program; reading
         # the prefix as the program made the stage look like something
