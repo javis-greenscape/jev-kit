@@ -29,11 +29,24 @@ byte what it was. Every Windows test in this repository injects
 `windows=True` instead of needing a Windows machine.
 """
 import os
+import re
 import shlex
 from pathlib import Path
 
 from . import winpath
 from .platform_compat import is_windows
+
+# A WSL drive-root mount (`/mnt/c`, `/mnt/d/`), the counterpart of a native
+# Windows drive root (`C:\`): the whole volume, not a directory within it.
+_WSL_DRIVE_ROOT_RE = re.compile(r"^/mnt/[A-Za-z]$")
+
+
+def _is_wsl():
+    try:
+        from . import headless
+        return headless.is_wsl()
+    except Exception:
+        return False
 
 # Programs this module knows how to extract a root from.
 SEARCH_PROGRAMS = {
@@ -100,6 +113,235 @@ _SKIP_PREFIX_TOKENS = {"sudo", "nice", "time", "env"}
 
 _SEQUENTIAL_OPS = ("&&", "||", ";")
 _PIPE_OP = ("|",)
+
+
+#: Tokens a shell reads as operators rather than as words. `shell_words`
+#: returns each of these as its own token.
+SHELL_OPERATORS = frozenset({";", "&&", "||", "|", "&", "(", ")", "\n"})
+
+
+def shell_words(command):
+    """`command` split into words the way bash splits it, with operators as
+    their own tokens. None when it cannot be lexed.
+
+
+
+    Quoting, backslash escapes and comments are handled by the lexer rather
+    than by pattern-matching the raw text. Four consecutive review rounds
+    found the same class of defect in the hand-rolled splitter -- a quoted
+    separator, an escaped separator, a heredoc body and a comment, each
+    read as a command bash would never run -- and each narrow fix was
+    followed by the next construct (Codex, PR #1). `shlex` with
+    `punctuation_chars` already implements all of it.
+    """
+    if not command:
+        return []
+    try:
+        lex = shlex.shlex(str(command), posix=True, punctuation_chars=True)
+        lex.whitespace_split = True
+        return list(lex)
+    except ValueError:
+        # An unterminated quote. The caller decides what to do; guessing
+        # here would be the pattern-matching this function exists to avoid.
+        return None
+
+
+# A heredoc delimiter is any word, not an identifier: bash takes `~EOF` in
+# `cat <<~EOF` as the literal delimiter `~EOF` (it has no strip-tabs `<<~`
+# form; that is zsh). Rejecting it left the body unstripped and its lines
+# read as commands (review finding, PR #1).
+_HEREDOC_RE = re.compile(
+    r"""<<(-?)[ \t]*(?!<)(?:'([^']*)'|"([^"]*)"|((?:\\.|[^\s;&|<>()'"])+))""")
+
+
+def _heredoc_delimiters(line):
+    """The heredoc delimiters opened on `line`, as (delimiter, dashed)."""
+    found = []
+    for match in _HEREDOC_RE.finditer(line):
+        # A `<<` inside a quoted argument opens no heredoc.
+        if _inside_quotes(line, match.start()):
+            continue
+        delim = match.group(2) or match.group(3) or match.group(4)
+        if delim:
+            found.append((delim, match.group(1) == "-"))
+    return found
+
+
+def strip_heredocs(command):
+    """`command` with every heredoc BODY removed, the opening line kept.
+
+    A heredoc body is data, never commands: `cat <<EOF` followed by a line
+    reading `es results here` does not run Everything. The lexer has no
+    concept of a heredoc and emitted that body as its own stage, so the
+    word `es` in documentation or a test fixture read as an indexed search
+    and suppressed the deny for a real crawl in the same command (review
+    finding, PR #1).
+    """
+    if not command or "<<" not in command:
+        return command
+    lines = str(command).split("\n")
+    kept = []
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        kept.append(line)
+        i += 1
+        for delim, dashed in _heredoc_delimiters(line):
+            while i < len(lines):
+                body = lines[i]
+                i += 1
+                probe = body.lstrip("\t") if dashed else body
+                if probe.rstrip("\r") == delim:
+                    break
+    return "\n".join(kept)
+
+
+def _inside_quotes(text, index):
+    """Is `text[index]` inside a single- or double-quoted run?"""
+    quote = None
+    escaped = False
+    for pos, char in enumerate(text):
+        if pos >= index:
+            break
+        if escaped:
+            escaped = False
+            continue
+        if char == "\\" and quote != "'":
+            escaped = True
+            continue
+        if quote is None and char in "'\"":
+            quote = char
+        elif char == quote:
+            quote = None
+    return quote is not None
+
+
+def shell_segments(command):
+    """`shell_words` grouped into one token list per command stage.
+
+    `find /mnt/c -name x; es y` gives [["find", ...], ["es", "y"]]. None
+    when the command cannot be lexed.
+    """
+    segments = []
+    # A plain newline separates commands, but the lexer reads it as
+    # ordinary whitespace, which would join the next line onto this one.
+    # Split on UNQUOTED newlines first, so a newline inside a quoted
+    # argument stays part of that argument.
+    for line in _split_unquoted_newlines(strip_heredocs(command)):
+        words = shell_words(line)
+        if words is None:
+            return None
+        current = []
+        for word in words:
+            if word in SHELL_OPERATORS:
+                if current:
+                    segments.append(current)
+                current = []
+                continue
+            current.append(word)
+        if current:
+            segments.append(current)
+    return segments
+
+
+def _split_unquoted_newlines(command):
+    """`command` split at newlines that fall outside quotes."""
+    lines = []
+    current = []
+    quote = None
+    i = 0
+    text = str(command or "")
+    n = len(text)
+    while i < n:
+        c = text[i]
+        if quote:
+            if c == "\\" and quote == '"' and i + 1 < n:
+                current.append(c)
+                current.append(text[i + 1])
+                i += 2
+                continue
+            current.append(c)
+            if c == quote:
+                quote = None
+            i += 1
+            continue
+        if c == "\\" and i + 1 < n:
+            current.append(c)
+            current.append(text[i + 1])
+            i += 2
+            continue
+        if c in ("'", '"'):
+            quote = c
+            current.append(c)
+            i += 1
+            continue
+        if c == "\n":
+            lines.append("".join(current))
+            current = []
+            i += 1
+            continue
+        current.append(c)
+        i += 1
+    lines.append("".join(current))
+    return lines
+
+
+def segment_program(tokens):
+    """The program a stage actually invokes, with sudo/nice/env and VAR=val
+    stripped, or None for an empty stage."""
+    tokens = _strip_prefixes(list(tokens or []))
+    if not tokens:
+        return None
+    return os.path.basename(tokens[0])
+
+
+def strip_shell_comment(command):
+    """`command` with a trailing shell comment removed.
+
+    Bash ignores everything from an unquoted `#` that starts a word, so
+    `find /mnt/c -name x # ; es placeholder` runs find alone. Reading the
+    comment as shell made `es` look like a second command and suppressed
+    the deny the crawl should have got (Codex P2, PR #1). A `#` inside
+    quotes, or attached to a word as in `-name a#b`, is not a comment."""
+    if not command:
+        return command
+    out = []
+    quote = None
+    i = 0
+    n = len(command)
+    while i < n:
+        c = command[i]
+        if quote:
+            if c == "\\" and quote == '"' and i + 1 < n:
+                out.append(c)
+                out.append(command[i + 1])
+                i += 2
+                continue
+            out.append(c)
+            if c == quote:
+                quote = None
+            i += 1
+            continue
+        if c == "\\" and i + 1 < n:
+            out.append(c)
+            out.append(command[i + 1])
+            i += 2
+            continue
+        if c in ("'", '"'):
+            quote = c
+            out.append(c)
+            i += 1
+            continue
+        if c == "#" and (not out or out[-1].isspace()):
+            # Comment runs to the end of the line; later lines still count.
+            newline = command.find("\n", i)
+            if newline == -1:
+                break
+            i = newline
+            continue
+        out.append(c)
+        i += 1
+    return "".join(out)
 
 
 def _split_top_level(s, ops):
@@ -323,9 +565,16 @@ def _scope_for_roots(roots, windows=False):
     if windows:
         return _scope_for_roots_windows(roots)
     home = os.path.normpath(os.environ.get("HOME") or str(Path.home()))
+    wsl = _is_wsl()
     for r in roots:
         rp = os.path.normpath(r)
         if rp == "/" or rp == home:
+            return "disk_wide"
+        # Under WSL a drive-root mount (`/mnt/c`) IS the whole Windows C:
+        # drive, the same disk-wide ground a native `C:\` root covers --
+        # without this, `find /mnt/c -name x` classified single_dir and the
+        # WSL-aware suggestion below it was never reached (Codex P1, PR #1).
+        if wsl and _WSL_DRIVE_ROOT_RE.match(rp):
             return "disk_wide"
     for r in roots:
         if _contains_multiple_repos(r):
@@ -390,9 +639,39 @@ def _has_flag(tokens, *names):
     return False
 
 
+#: find's global options, which precede the search roots. -H, -L and -P take
+#: no value; -D and -O take one. Stopping at the first "-" token recorded the
+#: working directory as the root of `find -L /mnt/c/Users -name x`, so the
+#: prefilter saw neither a disk-wide nor a Windows-host search and skipped it
+#: (Codex P2, PR #1).
+_FIND_GLOBAL_FLAGS = {"-H", "-L", "-P"}
+_FIND_GLOBAL_FLAGS_WITH_VALUE = {"-D", "-O"}
+
+
 def _classify_find(args, cwd, windows=False):
+    idx = 0
+    while idx < len(args):
+        tok = args[idx]
+        if tok in _FIND_GLOBAL_FLAGS:
+            idx += 1
+            continue
+        if tok in _FIND_GLOBAL_FLAGS_WITH_VALUE:
+            idx += 2
+            continue
+        # -O2 and -Dsearch attach their value to the flag.
+        if len(tok) > 2 and tok[:2] in _FIND_GLOBAL_FLAGS_WITH_VALUE:
+            idx += 1
+            continue
+        # `--` ends the options; the paths follow it. Reading it as the
+        # start of the expression fell back to the working directory, so
+        # `find -- /mnt/c/Users -name x` run from $HOME was classified with
+        # $HOME as its root (Codex P1, PR #1).
+        if tok == "--":
+            idx += 1
+            break
+        break
     roots = []
-    for tok in args:
+    for tok in args[idx:]:
         if tok.startswith("-"):
             break
         roots.append(_expand(tok, cwd, windows))
@@ -599,6 +878,16 @@ def _widest(current, candidate):
     return current
 
 
+def _root_is_windows_host(root):
+    """policy.root_is_windows_host, imported lazily so scope.py keeps no
+    import-time dependency on policy (which imports this module)."""
+    try:
+        from . import policy
+        return policy.root_is_windows_host(root)
+    except Exception:
+        return False
+
+
 def classify_command(command, cwd=None, windows=None, _depth=0):
     """Classify the search scope of a shell command.
 
@@ -617,6 +906,12 @@ def classify_command(command, cwd=None, windows=None, _depth=0):
     if not command or not isinstance(command, str):
         return {"scope": "unknown", "program": None, "roots": []}
 
+    # A commented-out stage is not a search. `find /opt -name x # ; find
+    # "$HOME" -name x` runs the /opt search alone, and accumulating the
+    # commented $HOME root turned a single directory into a disk-wide
+    # verdict (Codex P2, PR #1).
+    command = strip_shell_comment(command)
+
     try:
         statements = _split_top_level(command, _SEQUENTIAL_OPS)
     except Exception:
@@ -625,6 +920,23 @@ def classify_command(command, cwd=None, windows=None, _depth=0):
     current_cwd = cwd or ""
     last = {"scope": "unknown", "program": None, "roots": []}
     found_any = False
+    # `last` only ever carries ONE stage's roots -- the widest-scoped one --
+    # so a compound command searching two places reported only one of them.
+    # That's fine for scope/program (only the widest stage matters there),
+    # but the WSL index-suggestion logic needs every root that actually got
+    # searched, on both sides of the filesystem, or it silently drops half
+    # the search when replacing it with a suggestion (Codex, PR #1). Every
+    # stage contributes, whatever its own scope: the narrow stage is exactly
+    # the one that gets dropped, since a Windows-host subdirectory
+    # classifies as single_dir and is still ground plocate cannot answer.
+    # Substituted in at the end only when the final verdict is disk_wide, so
+    # a narrower verdict keeps reporting its own root.
+    searched_roots = []
+
+    def _extend_searched_roots(roots):
+        for r in roots or []:
+            if r not in searched_roots:
+                searched_roots.append(r)
 
     for statement in statements:
         statement = statement.strip()
@@ -661,6 +973,7 @@ def classify_command(command, cwd=None, windows=None, _depth=0):
                                               _depth=_depth + 1)
                     if nested.get("program"):
                         found_any = True
+                        _extend_searched_roots(nested.get("roots"))
                         last = _widest(last, nested)
                 continue
 
@@ -730,15 +1043,36 @@ def classify_command(command, cwd=None, windows=None, _depth=0):
             if forced_scope == "stdin":
                 candidate = {"scope": "stdin", "program": program, "roots": []}
             else:
+                candidate_scope = _scope_for_roots(roots, windows)
                 candidate = {
-                    "scope": _scope_for_roots(roots, windows),
+                    "scope": candidate_scope,
                     "program": program,
                     "roots": roots,
                 }
+                _extend_searched_roots(roots)
             last = _widest(last, candidate)
 
     if not found_any:
         return {"scope": "unknown", "program": None, "roots": []}
+    if searched_roots:
+        scope_name = last.get("scope")
+        if scope_name == "disk_wide":
+            last = dict(last)
+            last["roots"] = searched_roots
+        elif scope_name in ("single_dir", "single_repo"):
+            # Both stages of `find /mnt/c/Users -name x; find ~/docs -name x`
+            # are single_dir, so publishing the accumulator only for a
+            # disk-wide verdict handed policy the first stage's root alone
+            # and lost the other half of the search (Codex P1, PR #1). Only
+            # a command that touched the Windows host gets the full set,
+            # since that is the case where the two halves need different
+            # indexes. Everything else keeps the widest stage's roots,
+            # because `roots` also feeds root_has_graphify_graph and
+            # widening it unconditionally would change which commands reach
+            # the unrelated graphify deny.
+            if any(_root_is_windows_host(r) for r in searched_roots):
+                last = dict(last)
+                last["roots"] = searched_roots
     return last
 
 

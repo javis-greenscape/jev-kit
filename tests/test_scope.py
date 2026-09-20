@@ -329,3 +329,92 @@ class PipelineWidestScopeTests(unittest.TestCase):
         home = os.path.expanduser("~")
         result = scope.classify_command("plocate -i foo; find %s -name foo" % home, home)
         self.assertEqual(result["program"], "find")
+
+
+class WslDriveRootScopeTests(unittest.TestCase):
+    """Codex P1 on PR #1: `find /mnt/c -name x` classified single_dir, so the
+    scope == "disk_wide" gate in policy.evaluate_search never even called the
+    WSL-aware suggestion logic -- a crawl of the whole C: drive was never
+    steered to `es`. A WSL drive-root mount is the same disk-wide ground a
+    native `C:\\` root is."""
+
+    def test_mnt_drive_root_is_disk_wide_under_wsl(self):
+        from unittest import mock
+        from airlock import scope
+        with mock.patch("airlock.headless.is_wsl", return_value=True):
+            result = scope.classify_command("find /mnt/c -name x", "/mnt/c")
+            self.assertEqual(result["scope"], "disk_wide")
+            self.assertEqual(result["roots"], ["/mnt/c"])
+
+    def test_mnt_drive_root_with_trailing_slash_is_disk_wide_under_wsl(self):
+        from unittest import mock
+        from airlock import scope
+        with mock.patch("airlock.headless.is_wsl", return_value=True):
+            result = scope.classify_command("find /mnt/c/ -name x", "/mnt/c")
+            self.assertEqual(result["scope"], "disk_wide")
+
+    def test_mnt_drive_subdirectory_is_not_disk_wide(self):
+        # /mnt/c/Users is a directory WITHIN the drive, not the drive root.
+        from unittest import mock
+        from airlock import scope
+        with mock.patch("airlock.headless.is_wsl", return_value=True):
+            result = scope.classify_command("find /mnt/c/Users -name x", "/mnt/c/Users")
+            self.assertNotEqual(result["scope"], "disk_wide")
+
+    def test_mnt_drive_root_is_not_disk_wide_off_wsl(self):
+        # A non-WSL Linux box with something manually mounted at /mnt/c has
+        # no Windows drive semantics attached to that path.
+        from unittest import mock
+        from airlock import scope
+        with mock.patch("airlock.headless.is_wsl", return_value=False):
+            result = scope.classify_command("find /mnt/c -name x", "/mnt/c")
+            self.assertNotEqual(result["scope"], "disk_wide")
+
+    def test_two_disk_wide_stages_report_both_sides_roots(self):
+        # Codex, PR #1: a compound command searching both filesystems kept
+        # only the widest single stage's roots, so the WSL suggestion saw one
+        # side and would have replaced a two-sided search with a one-sided
+        # index.
+        from unittest import mock
+        from airlock import scope
+        with mock.patch("airlock.headless.is_wsl", return_value=True):
+            result = scope.classify_command(
+                'find "$HOME" -name x; find /mnt/c -name x', "/home/alice")
+            self.assertEqual(result["scope"], "disk_wide")
+            self.assertIn("/mnt/c", result["roots"])
+            self.assertEqual(len(result["roots"]), 2)
+
+    def test_a_narrow_stage_contributes_its_root_too(self):
+        # Codex P1, PR #1: a Windows-host subdirectory classifies as
+        # single_dir, so an accumulator that took only disk-wide stages
+        # dropped exactly the root the suggestion needs.
+        from unittest import mock
+        from airlock import scope
+        cmd = 'find "$HOME" -name x; find %s -name x' % "/mnt/c/Users"
+        with mock.patch("airlock.headless.is_wsl", return_value=True):
+            result = scope.classify_command(cmd, "/home/alice")
+            self.assertEqual(result["scope"], "disk_wide")
+            self.assertIn("/mnt/c/Users", result["roots"])
+
+    def test_two_single_dir_stages_keep_the_windows_root(self):
+        # Codex P1, PR #1: both stages scope as single_dir, so publishing
+        # the accumulator only for a disk-wide verdict handed policy one
+        # stage's root and dropped the other half of the search.
+        from unittest import mock
+        from airlock import scope
+        win = "/mnt/c/Users"
+        for cmd in ('find %s -name x; find /home/alice/docs -name x' % win,
+                    'find /home/alice/docs -name x; find %s -name x' % win):
+            with self.subTest(cmd=cmd):
+                with mock.patch("airlock.headless.is_wsl", return_value=True):
+                    result = scope.classify_command(cmd, "/home/alice")
+                self.assertIn(win, result["roots"])
+                self.assertIn("/home/alice/docs", result["roots"])
+
+    def test_roots_are_deduplicated_across_stages(self):
+        from unittest import mock
+        from airlock import scope
+        with mock.patch("airlock.headless.is_wsl", return_value=True):
+            result = scope.classify_command(
+                "find /mnt/c -name x; find /mnt/c -name y", "/mnt/c")
+            self.assertEqual(result["roots"], ["/mnt/c"])

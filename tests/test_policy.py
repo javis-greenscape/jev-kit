@@ -189,6 +189,22 @@ class TestMargin(unittest.TestCase):
         self.assertFalse(policy.meets_deny_bar(None, 0.5))
 
 
+# The plocate advice follows the database the machine has, so pin it: this
+# file asserts the policy, not the box it runs on.
+_DB = mock.patch.object(policy, "plocate_db_kind", lambda *a, **k: "home")
+_ES = mock.patch.object(policy, "es_available", lambda *a, **k: True)
+
+
+def setUpModule():
+    _DB.start()
+    _ES.start()
+
+
+def tearDownModule():
+    _ES.stop()
+    _DB.stop()
+
+
 class TestSearchPolicy(unittest.TestCase):
     def test_disk_wide_filename_search_denies_without_locate(self):
         verdict = policy.evaluate_search(

@@ -176,10 +176,13 @@ class TestEverythingIsTheIndexedTool(unittest.TestCase):
                 command)
 
     def test_es_is_not_recognised_on_linux(self):
-        """`es` is not a Linux program; matching it there would be a false
-        positive on anything that happened to contain the word."""
+        """`es` is not a plain-Linux program; matching it there would be a
+        false positive on anything that happened to contain the word.
+        wsl=False pins this to non-WSL Linux explicitly -- under WSL `es` is
+        a real program on PATH (voidtools Everything's client), which is
+        covered separately in tests/test_wsl_filesearch.py."""
         self.assertFalse(policy.command_already_uses_indexed_search(
-            "es report", windows=False))
+            "es report", windows=False, wsl=False))
 
 
 class TestTheSuggestion(unittest.TestCase):

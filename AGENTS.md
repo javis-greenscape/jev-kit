@@ -8,10 +8,19 @@ switch modes, the kill switch and rollback. The three-command version is the
 [Quickstart](README.md#quickstart) in the README.
 
 **On native Windows (no WSL)**, follow
-[docs/INSTALL-WINDOWS.md](docs/INSTALL-WINDOWS.md) instead: the installer is
-Python rather than bash, the warm daemon does not exist there, and `es.exe`
-(voidtools Everything) replaces `plocate` for file search. Detect it, never
-install it.
+[docs/INSTALL-WINDOWS.md](docs/INSTALL-WINDOWS.md) instead. The installer is
+Python rather than bash, and the warm daemon does not exist there.
+
+For file search, `es.exe` from voidtools Everything replaces `plocate`
+throughout. The guard detects it and never installs it.
+
+**Under WSL**, both indexes are in play at once:
+
+- `plocate` covers the Linux side.
+- A root under `/mnt/<drive>` is on the Windows host and needs `es`, the same
+  Everything client reached under its bare name on PATH.
+- A search spanning both, such as `find "$HOME" /mnt/c/Users -name x`, needs
+  both commands. Neither index covers the other's ground.
 
 **Do not** turn on compaction, or arm `enforce` on a machine that is not
 yours, without asking first. `docs/install.md` lists the rest.
@@ -24,7 +33,7 @@ detail is [docs/components.md](docs/components.md), the rules table is
 
 **Working on the code?** Three checks have to pass.
 
-- `python3 -m unittest discover -s tests`. 1072 tests on Linux. The same suite
+- `python3 -m unittest discover -s tests`. 1160 tests on Linux. The same suite
   on native Windows Python skips the POSIX-only ones and passes the rest, and
   no test requires Windows to pass.
 - `python3 tools/check_docs.py`. It resolves every relative link in the README

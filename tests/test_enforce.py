@@ -14,6 +14,25 @@ from pathlib import Path
 from unittest import mock
 
 from airlock import enforce
+from airlock import policy as _policy_mod
+
+# These tests assert the guard's behaviour, not what this machine happens to
+# have installed. The live guard detects its replacement commands, so a runner
+# without a plocate database would see every deny-path test fail for a reason
+# that has nothing to do with the code under test (Codex P1, PR #1). Pin the
+# detection for the file; the tests that check detection itself live in
+# tests/test_wsl_filesearch.py.
+_AVAIL = mock.patch.object(_policy_mod, "detect_availability",
+                           lambda *a, **k: ("home", True))
+
+
+def setUpModule():
+    _AVAIL.start()
+
+
+def tearDownModule():
+    _AVAIL.stop()
+
 
 
 def _bash_data(command, description="", session_id="s1"):
@@ -90,8 +109,12 @@ class TestDenyJsonShape(EnforceTestBase):
         # The indexed tool the deny points at is per-platform: plocate on
         # Linux, es.exe on Windows. The shape of the deny is not.
         from airlock import policy as _policy
-        self.assertIn(_policy.filename_search_suggestion().splitlines()[0],
-                      out["permissionDecisionReason"])
+        # The live guard detects what this machine has, so compare against
+        # the same detected values rather than the assumed defaults.
+        _db, _es = _policy.detect_availability()
+        self.assertIn(_policy.filename_search_suggestion(
+            db_kind=_db, has_es=_es).splitlines()[0],
+            out["permissionDecisionReason"])
         entry = self._logged[-1]
         self.assertTrue(entry["enforced"])
         self.assertEqual(entry["mode"], "enforce")
@@ -206,7 +229,9 @@ class TestOverride(EnforceTestBase):
         self.assertEqual(entry["override_reason"], "already scoped")
 
     def test_override_stamp_on_agent_prompt_allows(self):
-        buf = self._stdout()
+        # Captures stdout so the hook's JSON does not reach the test output;
+        # this test asserts on the return value, not on what was printed.
+        self._stdout()
         with mock.patch("airlock.client.ask") as ask:
             denied = enforce.handle(
                 _agent_data("fable", "d", "prior attempts failed [jev-ok: two failed workers already]"),

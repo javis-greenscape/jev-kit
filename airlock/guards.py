@@ -181,8 +181,18 @@ def compute_search_entry(data, timeout_s=None):
         },
     }
 
+    # The POLICY parsers read `command`, not `command_r`. Redaction and the
+    # 2000-character truncation exist for what leaves this machine -- the
+    # Jev payload and the log line below -- and these functions send
+    # nothing: they lex the command locally to decide which roots it
+    # searches and whether it already reaches for an index. Handing them
+    # the truncated copy denied a command that was already doing the right
+    # thing, because `roots` came from the full text while the `es` stage
+    # that answered them sat past the cutoff (review finding, PR #1).
     sampled = False
-    if not policy.deny_possible_bash(command_scope, program, has_graph):
+    if not policy.deny_possible_bash(command_scope, program, has_graph,
+                                     roots=scope_result.get("roots"),
+                                     command=command):
         sampled = random.random() < policy.sample_rate()
         if not sampled:
             entry = dict(entry_base)
@@ -216,13 +226,20 @@ def compute_search_entry(data, timeout_s=None):
     search_intent_conf = search_intent_answer.get("confidence", 0.0)
     margin = policy.compute_margin(search_intent_answer.get("probabilities"))
 
+    # The live guard is the ONE caller that detects what this machine has.
+    # Everywhere else keeps policy.ASSUMED_*, so the generated policy and its
+    # pinned fingerprint read the same on every host (Codex P1, PR #1).
+    db_kind, has_es = policy.detect_availability()
     verdict = policy.evaluate_search(
         scope=command_scope,
         search_intent=search_intent,
         confidence=search_intent_conf,
-        command=command_r,
+        command=command,
         root_has_graphify_graph=has_graph,
         margin=margin,
+        roots=scope_result.get("roots"),
+        db_kind=db_kind,
+        has_es=has_es,
     )
     entry["would_deny"] = verdict["would_deny"] and not sampled
     entry["suggestion"] = verdict.get("suggestion")
