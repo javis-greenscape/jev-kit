@@ -144,6 +144,71 @@ def shell_words(command):
         return None
 
 
+_HEREDOC_RE = re.compile(r"""<<(-?)\s*(?!<)(?:'([^']*)'|"([^"]*)"|\\?([A-Za-z_][\w.-]*))""")
+
+
+def _heredoc_delimiters(line):
+    """The heredoc delimiters opened on `line`, as (delimiter, dashed)."""
+    found = []
+    for match in _HEREDOC_RE.finditer(line):
+        # A `<<` inside a quoted argument opens no heredoc.
+        if _inside_quotes(line, match.start()):
+            continue
+        delim = match.group(2) or match.group(3) or match.group(4)
+        if delim:
+            found.append((delim, match.group(1) == "-"))
+    return found
+
+
+def strip_heredocs(command):
+    """`command` with every heredoc BODY removed, the opening line kept.
+
+    A heredoc body is data, never commands: `cat <<EOF` followed by a line
+    reading `es results here` does not run Everything. The lexer has no
+    concept of a heredoc and emitted that body as its own stage, so the
+    word `es` in documentation or a test fixture read as an indexed search
+    and suppressed the deny for a real crawl in the same command (review
+    finding, PR #1).
+    """
+    if not command or "<<" not in command:
+        return command
+    lines = str(command).split("\n")
+    kept = []
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        kept.append(line)
+        i += 1
+        for delim, dashed in _heredoc_delimiters(line):
+            while i < len(lines):
+                body = lines[i]
+                i += 1
+                probe = body.lstrip("\t") if dashed else body
+                if probe.rstrip("\r") == delim:
+                    break
+    return "\n".join(kept)
+
+
+def _inside_quotes(text, index):
+    """Is `text[index]` inside a single- or double-quoted run?"""
+    quote = None
+    escaped = False
+    for pos, char in enumerate(text):
+        if pos >= index:
+            break
+        if escaped:
+            escaped = False
+            continue
+        if char == "\\" and quote != "'":
+            escaped = True
+            continue
+        if quote is None and char in "'\"":
+            quote = char
+        elif char == quote:
+            quote = None
+    return quote is not None
+
+
 def shell_segments(command):
     """`shell_words` grouped into one token list per command stage.
 
@@ -155,7 +220,7 @@ def shell_segments(command):
     # ordinary whitespace, which would join the next line onto this one.
     # Split on UNQUOTED newlines first, so a newline inside a quoted
     # argument stays part of that argument.
-    for line in _split_unquoted_newlines(command):
+    for line in _split_unquoted_newlines(strip_heredocs(command)):
         words = shell_words(line)
         if words is None:
             return None

@@ -181,10 +181,18 @@ def compute_search_entry(data, timeout_s=None):
         },
     }
 
+    # The POLICY parsers read `command`, not `command_r`. Redaction and the
+    # 2000-character truncation exist for what leaves this machine -- the
+    # Jev payload and the log line below -- and these functions send
+    # nothing: they lex the command locally to decide which roots it
+    # searches and whether it already reaches for an index. Handing them
+    # the truncated copy denied a command that was already doing the right
+    # thing, because `roots` came from the full text while the `es` stage
+    # that answered them sat past the cutoff (review finding, PR #1).
     sampled = False
     if not policy.deny_possible_bash(command_scope, program, has_graph,
                                      roots=scope_result.get("roots"),
-                                     command=command_r):
+                                     command=command):
         sampled = random.random() < policy.sample_rate()
         if not sampled:
             entry = dict(entry_base)
@@ -226,7 +234,7 @@ def compute_search_entry(data, timeout_s=None):
         scope=command_scope,
         search_intent=search_intent,
         confidence=search_intent_conf,
-        command=command_r,
+        command=command,
         root_has_graphify_graph=has_graph,
         margin=margin,
         roots=scope_result.get("roots"),

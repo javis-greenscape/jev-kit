@@ -908,7 +908,12 @@ def filename_search_suggestion(windows=None, roots=None, wsl=None,
                                follow_symlinks=True):
     """The command to run INSTEAD of a disk-wide filename crawl.
 
-    Native Windows always gets ES_SUGGESTION. Otherwise, under WSL, a root
+    Native Windows gets ES_SUGGESTION, unless Everything is unusable on
+    this machine -- the client missing, or the service stopped so that it
+    answers every query with nothing. There is then no replacement to name
+    and the answer is None, which its callers read as "no deny", leaving
+    the slow crawl to do the job (review finding, PR #1: the docstring
+    still said "always" after that gate was added). Otherwise, under WSL, a root
     that lives on the Windows host (/mnt/<drive>/...) gets ES_WSL_SUGGESTION
     instead of the plocate suggestion, since plocate's index never covers
     that ground; roots on BOTH sides get ES_WSL_MIXED_SUGGESTION, which names

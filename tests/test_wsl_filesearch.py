@@ -5,7 +5,7 @@ import tempfile
 import unittest
 from unittest import mock
 
-from airlock import policy
+from airlock import policy, redact
 
 _ABOVE_BAR_CONFIDENCE = 0.9
 _ABOVE_BAR_MARGIN = 0.6
@@ -914,6 +914,65 @@ class SonnetReviewRoundOne(unittest.TestCase):
         self.assertFalse(policy.command_covers_roots(
             command, roots=["/mnt/c/Users"], wsl=True,
             db_kind="home", has_es=False))
+
+
+class SonnetReviewRoundTwo(unittest.TestCase):
+    """Review findings on PR #1: a heredoc body read as a command, the
+    truncated command reaching the local parsers, and the Windows
+    docstring."""
+
+    def test_heredoc_body_is_not_a_command(self):
+        command = ("find / -name secret 2>/dev/null || cat <<EOF\n"
+                   "es results here\n"
+                   "EOF\n")
+        self.assertFalse(policy.command_already_uses_indexed_search(
+            command, windows=False, wsl=True))
+
+    def test_quoted_heredoc_delimiter_body_is_not_a_command(self):
+        command = "cat <<'EOF'\nplocate -i x\nEOF\nfind / -name y"
+        self.assertFalse(policy.command_already_uses_indexed_search(
+            command, windows=False, wsl=True))
+
+    def test_dash_heredoc_with_tab_indented_terminator(self):
+        command = "cat <<-EOF\n\tes x\n\tEOF\nfind / -name y"
+        self.assertFalse(policy.command_already_uses_indexed_search(
+            command, windows=False, wsl=True))
+
+    def test_a_real_command_after_a_heredoc_is_still_found(self):
+        command = "cat <<EOF\ndata\nEOF\nes -path 'C:/' y"
+        self.assertTrue(policy.command_already_uses_indexed_search(
+            command, windows=False, wsl=True))
+
+    def test_heredoc_marker_inside_a_quoted_argument_opens_nothing(self):
+        command = 'find /mnt/c -name "a <<EOF b"'
+        self.assertFalse(policy.command_already_uses_indexed_search(
+            command, windows=False, wsl=True))
+
+    def test_an_es_stage_past_the_truncation_point_still_counts(self):
+        # guards.py hands the POLICY parsers the full command. Reading the
+        # truncated copy denied a command already using Everything, because
+        # the roots came from the full text and the es stage did not.
+        padding = "; ".join("echo %d" % i for i in range(260))
+        command = ("find /mnt/c/Users/foo -name x; %s; es -path 'C:/' bar"
+                   % padding)
+        truncated = redact.redact_and_truncate_command(command)
+        self.assertGreater(len(command), len(truncated))
+        self.assertNotIn("es -path", truncated)
+        roots = ["/mnt/c/Users/foo"]
+        self.assertTrue(policy.command_covers_roots(
+            command, roots=roots, wsl=True))
+        verdict = policy.evaluate_search(
+            scope="single_dir", search_intent="filename_search",
+            confidence=0.99, margin=0.9, command=command,
+            root_has_graphify_graph=False, roots=roots, wsl=True)
+        self.assertFalse(verdict["would_deny"])
+
+    def test_windows_without_everything_gets_no_suggestion(self):
+        # The documented contract, which used to read "always".
+        self.assertIsNone(policy.filename_search_suggestion(
+            windows=True, has_es=False))
+        self.assertIs(policy.filename_search_suggestion(
+            windows=True, has_es=True), policy.ES_SUGGESTION)
 
 
 if __name__ == "__main__":
