@@ -188,9 +188,23 @@ A script that does not import Playwright is nothing to do with this rule. And
 a command that is already running the Jev agent is the thing the rule asks
 for, so it is never the thing the rule catches: a script resolving inside the
 agent's own checkout, or a segment that assigns or exports `BU_CDP_URL`, which
-only the harness reads. Both an assignment and a `cd` carry into the segments
-after them, and neither blesses a script somewhere else on the same line. A
-bare mention of the agent in an `echo` or a heredoc exempts nothing.
+only the harness reads.
+
+Those two exemptions are not the same strength, and the difference is
+deliberate. A path into the checkout is evidence. `BU_CDP_URL` is a
+declaration: setting it exempts the segments after it whatever they then run,
+because the recipe's own runner script lives wherever the person put it rather
+than inside the checkout, and requiring the checkout path there would flag the
+very workflow this rule recommends. So it is an escape hatch somebody can type
+on purpose, sitting beside the `[airlock-ok: <reason>]` stamp and the off
+switch. This rule is a cost steer that fails open, not a lock, and the safety
+model says the same of every rule here.
+
+Both an assignment and a `cd` carry into the segments after them. Neither
+blesses the command sharing its own segment, so `BU_CDP_URL=... node
+hand-rolled.js` is still a hand-rolled script unless its path says otherwise,
+and a bare mention of the agent or the variable in an `echo` or a heredoc
+exempts nothing at all.
 
 When the pre-filter fires, Jev is asked one question: is this a
 browse-and-report pass, or is it writing or running test code? Only

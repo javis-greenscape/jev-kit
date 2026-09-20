@@ -899,7 +899,10 @@ class TestR11BrowseViaJev(unittest.TestCase):
 
     def test_running_the_jev_browser_agent_is_never_caught(self):
         path = self._script("run_goal.py", "from playwright.sync_api import sync_playwright\n")
-        # An export carries into the segments after it.
+        # An export carries into the segments after it, whatever they run.
+        # That is a declared escape hatch, not a proof, and it is documented
+        # as one: see the note on the markers in airlock/rules.py and the R11
+        # section of docs/rules.md.
         self.assert_silent(self.ctx("export BU_CDP_URL=http://127.0.0.1:9333 ; python3 %s" % path))
         self.assert_silent(self.ctx("python3 ~/code/jev-ultrafast/run_goal.py"))
         # An inline assignment does NOT bless the command it shares a segment

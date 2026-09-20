@@ -1630,6 +1630,9 @@ _PW_IMPORT_INLINE_RE = re.compile(
 _NPX_VALUE_FLAGS = {"-p", "--package", "-c", "--call", "--userconfig", "--shell",
                     "--cache", "--registry", "--node-arg", "--scripts-prepend-node-path"}
 
+# env's own flags that take a separate value.
+_ENV_VALUE_FLAGS = {"-u", "--unset", "-C", "--chdir", "-S", "--split-string"}
+
 _PW_SCRIPT_EXTS = (".js", ".cjs", ".mjs", ".ts", ".mts", ".cts", ".py")
 _PW_MAX_SCRIPT_BYTES = 256 * 1024
 _PW_SCRIPT_RUNNERS = {"node", "bun", "deno", "tsx", "ts-node", "python", "python3"}
@@ -1647,6 +1650,15 @@ _PW_CLI_ALLOWED = {"test", "install", "install-deps", "uninstall", "show-report"
 #  - an actual assignment or export of BU_CDP_URL, which only the harness
 #    reads. A substring match anywhere in the segment was too loose: the
 #    string appears in the rule's own advice text.
+#
+# The BU_CDP_URL one is deliberately a DECLARATION, not a proof. Setting it
+# exempts the rest of the command line, whatever those segments then run,
+# because the recipe's own runner is an ad-hoc script that lives wherever the
+# person put it, not inside the agent's checkout: requiring the checkout path
+# there would flag the exact workflow this rule recommends. So it is an
+# escape hatch somebody can type on purpose, and it is meant to be: it sits
+# beside `[airlock-ok: <reason>]` and the rules.json off switch rather than
+# pretending to be a lock.
 #
 # Neither is a security boundary, and this rule does not pretend to be one.
 # It is a cost steer that fails open, and somebody determined to write their
@@ -1697,58 +1709,49 @@ def _pw_names_the_agent(tok):
     return "/" in tok or os.sep in tok or tok.endswith(_PW_SCRIPT_EXTS)
 
 
-def _npx_arguments(args):
-    """npx's arguments with npx's own flags stripped, so the first element is
-    the package or binary it runs."""
+def _unwrap_args(args, value_flags, skip_assignments=False):
+    """Walk a wrapper's arguments, step over its own flags (and the values of
+    the flags that take one), and return the arguments from the first bare
+    token on. `skip_assignments` also steps over `VAR=val`, which is `env`.
+    Returns [] when the wrapper runs nothing.
+
+    The three wrappers R11 unwraps -- npx, env and uv run -- differ only in
+    their flag set and that one switch, so they share this loop rather than
+    keeping three copies of it in step with each other."""
     i = 0
     while i < len(args):
         a = args[i]
         if a == "--":
             return args[i + 1:]
         if a.startswith("-"):
-            if "=" not in a and a in _NPX_VALUE_FLAGS:
+            if "=" not in a and a in value_flags:
                 i += 2
             else:
                 i += 1
+            continue
+        if skip_assignments and "=" in a:
+            i += 1
             continue
         return args[i:]
     return []
 
 
+def _npx_arguments(args):
+    """npx's arguments with npx's own flags stripped, so the first element is
+    the package or binary it runs."""
+    return _unwrap_args(args, _NPX_VALUE_FLAGS)
+
+
 def _env_program(args):
-    """(prog, args) for what `env ...` actually runs, or (None, []). Steps
-    over env's own flags and over the VAR=value assignments."""
-    i = 0
-    while i < len(args):
-        a = args[i]
-        if a in ("-u", "--unset", "-C", "--chdir", "-S", "--split-string"):
-            i += 2
-            continue
-        if a.startswith("-") or "=" in a:
-            i += 1
-            continue
-        return a, args[i + 1:]
-    return None, []
+    """(prog, args) for what `env ...` actually runs, or (None, [])."""
+    rest = _unwrap_args(args, _ENV_VALUE_FLAGS, skip_assignments=True)
+    return (rest[0], rest[1:]) if rest else (None, [])
 
 
 def _uv_run_program(args):
-    """(prog, args) for the command `uv run ...` actually runs, or (None, []).
-    Flags and their values are stepped over; the first bare token left is the
-    program."""
-    i = 0
-    while i < len(args):
-        a = args[i]
-        if a == "--":
-            i += 1
-            continue
-        if a.startswith("-"):
-            if "=" not in a and a in _UV_RUN_VALUE_FLAGS:
-                i += 2
-            else:
-                i += 1
-            continue
-        return a, args[i + 1:]
-    return None, []
+    """(prog, args) for the command `uv run ...` actually runs, or (None, [])."""
+    rest = _unwrap_args(args, _UV_RUN_VALUE_FLAGS)
+    return (rest[0], rest[1:]) if rest else (None, [])
 
 
 def _pw_resolve_script(tok, cwd):
@@ -1860,11 +1863,17 @@ def _pw_scan(segments, cwd, depth, cdp=False):
                 cur_cwd = target if os.path.isabs(target) else os.path.join(cur_cwd or "", target)
             continue
         if _pw_sets_cdp(seg):
-            # An assignment or export carries into the segments AFTER it,
-            # exactly as a `cd` does. It does not bless the command sharing
-            # its own segment: `BU_CDP_URL=... node hand-rolled.js` is still a
-            # hand-rolled script, and only a path inside the agent's checkout
-            # says otherwise.
+            # An assignment or export exempts the segments AFTER it, whatever
+            # they run: handing a CDP port to a harness is a declaration that
+            # the agent is driving, and the recipe's runner script lives
+            # wherever the person put it. See the note on the markers above:
+            # this is a typed escape hatch, not a proof, and it is one on
+            # purpose.
+            #
+            # It does NOT bless the command sharing its own segment.
+            # `BU_CDP_URL=... node hand-rolled.js` is still a hand-rolled
+            # script unless its path is inside the agent's checkout, so the
+            # shortest form of the bypass does not work by accident.
             cdp = True
         elif cdp:
             continue
