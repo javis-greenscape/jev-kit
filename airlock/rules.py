@@ -1631,11 +1631,23 @@ _PW_INLINE_FLAGS = {"-e", "--eval", "-c", "--command", "-p", "--print"}
 # `playwright <sub>` that is e2e tooling rather than a browsing session.
 _PW_CLI_ALLOWED = {"test", "install", "install-deps", "uninstall", "show-report", "--version"}
 # Running the Jev browser agent itself is the thing this rule asks for, so it
-# is never the thing this rule catches. The marker is looked for in the
-# SEGMENT, not the whole command line: `echo "not using jev-ultrafast yet" &&
-# node verify.cjs` must not exempt the node call because of what the echo
-# says.
-_PW_JEV_MARKERS = ("jev-ultrafast", "BU_CDP_URL", "jev_ultrafast")
+# is never the thing this rule catches. Two ways a segment says so, and both
+# are deliberately narrow: a bare mention of the agent in an echo, a comment
+# or a heredoc must not exempt a sibling segment that really does drive a
+# browser.
+#
+#  - the agent's own directory, either in a token of the segment or in the
+#    working directory a previous `cd` in the same command line set;
+#  - an actual assignment or export of BU_CDP_URL, which only the harness
+#    reads. A substring match anywhere in the segment was too loose: the
+#    string appears in the rule's own advice text.
+#
+# Neither is a security boundary, and this rule does not pretend to be one.
+# It is a cost steer that fails open, and somebody determined to write their
+# own Playwright script can name a directory and get past it. The guard's
+# safety model says the same thing about every rule here.
+_PW_JEV_PATH_MARKERS = ("jev-ultrafast", "jev_ultrafast")
+_PW_CDP_ASSIGN_RE = re.compile(r"(?:^|[;&|(\s])(?:export\s+)?BU_CDP_URL=")
 
 # uv flags that take a separate value. `uv run --with playwright-stealth
 # python3 verify.py` runs python3, not playwright-stealth, and dropping only
@@ -1668,23 +1680,28 @@ def _uv_run_program(args):
     return None, []
 
 
-def _pw_script_source(tok, cwd):
-    """The text of a script the command names, or "". One isfile, one size
-    check, one bounded read. Never raises."""
+def _pw_resolve_script(tok, cwd):
+    """(resolved path, text) for a script the command names, or ("", "").
+    One isfile, one size check, one bounded read. Never raises."""
     try:
         if not tok or tok.startswith("-") or not tok.endswith(_PW_SCRIPT_EXTS):
-            return ""
+            return "", ""
         path = _expand(tok)
         if not os.path.isabs(path) and cwd:
             path = os.path.join(cwd, path)
         if not os.path.isfile(path):
-            return ""
+            return "", ""
         if os.path.getsize(path) > _PW_MAX_SCRIPT_BYTES:
-            return ""
+            return "", ""
         with open(path, "r", errors="replace") as f:
-            return f.read(_PW_MAX_SCRIPT_BYTES)
+            return path, f.read(_PW_MAX_SCRIPT_BYTES)
     except Exception:
-        return ""
+        return "", ""
+
+
+def _pw_script_source(tok, cwd):
+    """Just the text. Kept for readability where the path is not wanted."""
+    return _pw_resolve_script(tok, cwd)[1]
 
 
 # A package script whose NAME says it runs tests. `npm run scrape` is not one
@@ -1749,14 +1766,6 @@ def prefilter_browser_driving(ctx):
     if not command:
         return None
 
-    # A `cd` into the agent's own checkout applies to every later segment, so
-    # it is the one marker read across the whole command rather than within
-    # one segment.
-    for seg in ctx["segments"]:
-        prog, args = program_of(seg)
-        if prog == "cd" and any("jev-ultrafast" in a or "jev_ultrafast" in a for a in args):
-            return None
-
     return _pw_scan(ctx["segments"], ctx.get("cwd") or "", 0)
 
 
@@ -1764,11 +1773,31 @@ def _pw_scan(segments, cwd, depth):
     """Look for a browser-driving segment. `depth` bounds the one recursion:
     a package script named by `npm run <name>` is scanned once, and what that
     script itself names is not followed further."""
+    cur_cwd = cwd
+    cdp = False
     for seg in segments:
-        if any(marker in seg for marker in _PW_JEV_MARKERS):
-            continue
         prog, args = program_of(seg)
+        if prog == "cd":
+            # A `cd` carries into the segments after it, so a later `node
+            # run_goal.js` inside the agent's checkout is still the agent.
+            # It changes nothing about the `cd` segment itself.
+            target = args[0] if args else ""
+            if target and not target.startswith("-"):
+                target = _expand(target)
+                cur_cwd = target if os.path.isabs(target) else os.path.join(cur_cwd or "", target)
+            continue
+        if _PW_CDP_ASSIGN_RE.search(seg):
+            # An export carries into the segments after it, exactly as a `cd`
+            # does. Handing the harness a CDP port IS running the agent.
+            cdp = True
+            continue
+        if cdp:
+            continue
+        if any(m in a for a in args for m in _PW_JEV_PATH_MARKERS):
+            continue
         if prog is None:
+            continue
+        if any(m in prog for m in _PW_JEV_PATH_MARKERS):
             continue
         if prog == "uv" and args[:1] == ["run"]:
             prog, args = _uv_run_program(args[1:])
@@ -1778,9 +1807,9 @@ def _pw_scan(segments, cwd, depth):
             continue
 
         if depth == 0:
-            script = _pw_package_script(prog, args, cwd)
+            script = _pw_package_script(prog, args, cur_cwd)
             if script:
-                found = _pw_scan(split_segments(strip_heredocs(script)), cwd, depth + 1)
+                found = _pw_scan(split_segments(strip_heredocs(script)), cur_cwd, depth + 1)
                 if found is not None:
                     return found
                 continue
@@ -1811,7 +1840,12 @@ def _pw_scan(segments, cwd, depth):
         # happens to be readable: `node loader.mjs worker.mjs` can carry the
         # Playwright import in either of them.
         for a in args:
-            src = _pw_script_source(a, cwd)
+            spath, src = _pw_resolve_script(a, cur_cwd)
+            # A script that lives inside the agent's own checkout is the
+            # agent. A script somewhere else is not, whatever directory the
+            # command line happened to `cd` into first.
+            if spath and any(m in spath for m in _PW_JEV_PATH_MARKERS):
+                continue
             if src and _PW_IMPORT_RE.search(src):
                 return Match(
                     "`%s %s` runs a script that imports Playwright and drives a browser"

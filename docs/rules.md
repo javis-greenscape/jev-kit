@@ -185,9 +185,12 @@ segment that actually runs a file with a script extension.
 Three things never match at all. A test run (`playwright test`, `vitest`,
 `jest`, `pytest`, `npm test`, `pnpm run test:e2e`) is e2e code, not browsing.
 A script that does not import Playwright is nothing to do with this rule. And
-a command that is already running the Jev agent (it names `jev-ultrafast` or
-sets `BU_CDP_URL`) is the thing the rule asks for, so it is never the thing the
-rule catches.
+a command that is already running the Jev agent is the thing the rule asks
+for, so it is never the thing the rule catches: a script resolving inside the
+agent's own checkout, or a segment that assigns or exports `BU_CDP_URL`, which
+only the harness reads. Both an assignment and a `cd` carry into the segments
+after them, and neither blesses a script somewhere else on the same line. A
+bare mention of the agent in an `echo` or a heredoc exempts nothing.
 
 When the pre-filter fires, Jev is asked one question: is this a
 browse-and-report pass, or is it writing or running test code? Only

@@ -900,7 +900,27 @@ class TestR11BrowseViaJev(unittest.TestCase):
     def test_running_the_jev_browser_agent_is_never_caught(self):
         path = self._script("run_goal.py", "from playwright.sync_api import sync_playwright\n")
         self.assert_silent(self.ctx("BU_CDP_URL=http://127.0.0.1:9333 python3 %s" % path))
-        self.assert_silent(self.ctx("cd ~/code/jev-ultrafast && uv run python3 %s" % path))
+        self.assert_silent(self.ctx("export BU_CDP_URL=http://127.0.0.1:9333 ; python3 %s" % path))
+        self.assert_silent(self.ctx("python3 ~/code/jev-ultrafast/run_goal.py"))
+
+    def test_a_cd_into_the_agent_carries_only_to_what_runs_inside_it(self):
+        """A `cd` sets the working directory for the segments after it. It
+        does not bless a script somewhere else on the same line."""
+        import shutil as _shutil
+        agent = os.path.join(self.tmp, "jev-ultrafast")
+        os.makedirs(agent, exist_ok=True)
+        self.addCleanup(_shutil.rmtree, agent, True)
+        with open(os.path.join(agent, "run_goal.py"), "w") as f:
+            f.write("from playwright.sync_api import sync_playwright\n")
+        outside = self._script("hand_written.js", "const { chromium } = require('playwright');\n")
+        self.assert_silent(self.ctx("cd %s && uv run python3 run_goal.py" % agent))
+        self.assert_asks(self.ctx("cd %s && node %s" % (agent, outside)),
+                         "a cd into the agent does not bless a script elsewhere")
+
+    def test_a_mention_of_the_agent_in_text_does_not_exempt_a_sibling(self):
+        path = self._script("verify.cjs", "const { chromium } = require('playwright');\n")
+        self.assert_asks(self.ctx("echo 'set BU_CDP_URL first' && node %s" % path))
+        self.assert_asks(self.ctx("echo jev-ultrafast is installed ; node %s" % path))
 
     def test_a_mention_of_the_agent_elsewhere_does_not_exempt_the_line(self):
         """The marker is read per segment. A segment that merely TALKS about
