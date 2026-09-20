@@ -902,6 +902,27 @@ class TestR11BrowseViaJev(unittest.TestCase):
         self.assert_silent(self.ctx("BU_CDP_URL=http://127.0.0.1:9333 python3 %s" % path))
         self.assert_silent(self.ctx("cd ~/code/jev-ultrafast && uv run python3 %s" % path))
 
+    def test_a_mention_of_the_agent_elsewhere_does_not_exempt_the_line(self):
+        """The marker is read per segment. A segment that merely TALKS about
+        the agent must not exempt a sibling segment that drives a browser."""
+        path = self._script("verify.cjs", "const { chromium } = require('playwright');\n")
+        self.assert_asks(self.ctx("echo 'not using jev-ultrafast yet' && node %s" % path))
+        self.assert_asks(self.ctx("echo BU_CDP_URL is unset ; node %s" % path))
+
+    def test_uv_run_flag_values_are_not_mistaken_for_the_program(self):
+        """`uv run --with <pkg> python3 verify.py` runs python3. Dropping only
+        the tokens starting with a dash would make the program `<pkg>`."""
+        path = self._script("verify.py", "from playwright.sync_api import sync_playwright\n")
+        for c in ("uv run --with playwright-stealth python3 %s" % path,
+                  "uv run --python 3.12 python3 %s" % path,
+                  "uv run --env-file .env python3 %s" % path,
+                  "uv run --no-sync -- python3 %s" % path):
+            self.assert_asks(self.ctx(c), c)
+        self.assertEqual(rules._uv_run_program([]), (None, []))
+        self.assertEqual(rules._uv_run_program(["--with", "x"]), (None, []))
+        self.assertEqual(rules._uv_run_program(["--env-file=.env", "node", "a.js"]),
+                         ("node", ["a.js"]))
+
     def test_non_browsing_mcp_and_other_servers_are_ignored(self):
         self.assert_silent(self.ctx_mcp("mcp__playwright__browser_install"), "browser_install")
         self.assert_silent(self.ctx_mcp("mcp__playwright__browser_close"), "browser_close")

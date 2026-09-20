@@ -1631,8 +1631,41 @@ _PW_INLINE_FLAGS = {"-e", "--eval", "-c", "--command", "-p", "--print"}
 # `playwright <sub>` that is e2e tooling rather than a browsing session.
 _PW_CLI_ALLOWED = {"test", "install", "install-deps", "uninstall", "show-report", "--version"}
 # Running the Jev browser agent itself is the thing this rule asks for, so it
-# is never the thing this rule catches.
+# is never the thing this rule catches. The marker is looked for in the
+# SEGMENT, not the whole command line: `echo "not using jev-ultrafast yet" &&
+# node verify.cjs` must not exempt the node call because of what the echo
+# says.
 _PW_JEV_MARKERS = ("jev-ultrafast", "BU_CDP_URL", "jev_ultrafast")
+
+# uv flags that take a separate value. `uv run --with playwright-stealth
+# python3 verify.py` runs python3, not playwright-stealth, and dropping only
+# the tokens that start with "-" would get that wrong.
+_UV_RUN_VALUE_FLAGS = {
+    "--with", "--with-editable", "--with-requirements", "--python", "-p",
+    "--project", "--directory", "--index", "--extra-index-url", "--extra",
+    "--group", "--package", "--env-file", "--index-url", "--find-links",
+    "--constraint", "--override", "--refresh-package", "--no-project",
+}
+
+
+def _uv_run_program(args):
+    """(prog, args) for the command `uv run ...` actually runs, or (None, []).
+    Flags and their values are stepped over; the first bare token left is the
+    program."""
+    i = 0
+    while i < len(args):
+        a = args[i]
+        if a == "--":
+            i += 1
+            continue
+        if a.startswith("-"):
+            if "=" not in a and a in _UV_RUN_VALUE_FLAGS:
+                i += 2
+            else:
+                i += 1
+            continue
+        return a, args[i + 1:]
+    return None, []
 
 
 def _pw_script_source(tok, cwd):
@@ -1687,19 +1720,25 @@ def prefilter_browser_driving(ctx):
     command = ctx["command"]
     if not command:
         return None
-    for marker in _PW_JEV_MARKERS:
-        if marker in command:
+
+    # A `cd` into the agent's own checkout applies to every later segment, so
+    # it is the one marker read across the whole command rather than within
+    # one segment.
+    for seg in ctx["segments"]:
+        prog, args = program_of(seg)
+        if prog == "cd" and any("jev-ultrafast" in a or "jev_ultrafast" in a for a in args):
             return None
 
     for seg in ctx["segments"]:
+        if any(marker in seg for marker in _PW_JEV_MARKERS):
+            continue
         prog, args = program_of(seg)
         if prog is None:
             continue
         if prog == "uv" and args[:1] == ["run"]:
-            rest = [a for a in args[1:] if not a.startswith("-")]
-            if not rest:
+            prog, args = _uv_run_program(args[1:])
+            if prog is None:
                 continue
-            prog, args = rest[0], rest[1:]
         if _pw_is_test_run(prog, args):
             continue
 
