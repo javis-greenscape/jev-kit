@@ -659,6 +659,39 @@ class TestTheAdviceMatchesTheMachine(unittest.TestCase):
         # An unterminated quote cannot be lexed, and says so.
         self.assertIsNone(scope.shell_segments('find /mnt/c -name "x'))
 
+    def test_coverage_check_honours_the_availability_it_is_given(self):
+        # command_covers_roots is the sole gate for would_deny, and it was
+        # detecting the live database even when the caller had pinned one.
+        # The verdict then changed with the host: an explicit db_kind of
+        # "system" answered False on a host with a system database and True
+        # on a host with only home.db.
+        verdicts = set()
+        for host_kind in ("system", "home", None):
+            with mock.patch.object(policy, "plocate_db_kind",
+                                   lambda *a, **k: host_kind):
+                verdicts.add(policy.evaluate_search(
+                    scope="disk_wide", search_intent="filename_search",
+                    confidence=_ABOVE_BAR_CONFIDENCE,
+                    command="plocate -i x; find /opt -name y",
+                    root_has_graphify_graph=False, margin=_ABOVE_BAR_MARGIN,
+                    roots=["/opt"], wsl=True,
+                    db_kind="system", has_es=True)["would_deny"])
+        self.assertEqual(verdicts, {False})
+
+    def test_coverage_check_never_probes_when_told(self):
+        probes = []
+        real = policy.plocate_db_kind
+        with mock.patch.object(policy, "plocate_db_kind",
+                               lambda *a, **k: probes.append(1) or real()):
+            policy.evaluate_search(
+                scope="disk_wide", search_intent="filename_search",
+                confidence=_ABOVE_BAR_CONFIDENCE,
+                command="find /home/alice -name x",
+                root_has_graphify_graph=False, margin=_ABOVE_BAR_MARGIN,
+                roots=["/home/alice"], wsl=True,
+                db_kind="home", has_es=True)
+        self.assertEqual(probes, [])
+
     def test_a_prefixed_find_is_still_a_find_stage(self):
         # scope strips these prefixes before naming the program; reading
         # the prefix as the program made the stage look like something

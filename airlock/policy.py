@@ -1054,9 +1054,17 @@ def _wsl_default(wsl):
         return False
 
 
-def command_covers_roots(command, roots=None, windows=None, wsl=None):
+def command_covers_roots(command, roots=None, windows=None, wsl=None,
+                         db_kind=UNSET, has_es=UNSET):
     """Does the command already reach for an index that covers EVERY root it
     searches?
+
+    `db_kind` and `has_es` carry what the CALLER knows about the machine,
+    exactly as they do for filename_search_suggestion(). Detecting here
+    instead put live host state back into a verdict the caller had already
+    pinned: with an explicit db_kind of "system", `plocate -i x; find /opt
+    -name y` answered would_deny False on a host with a system database and
+    True on a host with only home.db (review finding, PR #1).
 
     `command_already_uses_indexed_search` answers "is an indexed tool in this
     command at all", which is the wrong question for a mixed WSL search:
@@ -1070,14 +1078,15 @@ def command_covers_roots(command, roots=None, windows=None, wsl=None):
         return command_already_uses_indexed_search(command, windows, wsl)
     if not _wsl_default(wsl) or not roots:
         return command_already_uses_indexed_search(command, windows, wsl)
+    kind = ASSUMED_DB_KIND if db_kind is UNSET else db_kind
     roots = resolve_roots(roots,
                           follow_symlinks=command_follows_symlinks(command))
-    if any_root_is_uncovered_linux(roots):
+    if any_root_is_uncovered_linux(roots, db_kind=kind):
         # Ground no index holds: naming plocate and es cannot answer it, so
         # the crawl is not already covered however many indexes appear.
         return False
     needs_windows = any_root_is_windows_host(roots, windows)
-    if any_root_is_plocate_covered(roots) \
+    if any_root_is_plocate_covered(roots, db_kind=kind) \
             and not _command_position_is_locate(command):
         return False
     if needs_windows and not _command_position_is_es(command):
@@ -1132,7 +1141,8 @@ def evaluate_search(scope, search_intent, confidence, command, root_has_graphify
         if (
             (scope == "disk_wide" or windows_host_root)
             and search_intent == "filename_search"
-            and not command_covers_roots(command, roots, windows, wsl)
+            and not command_covers_roots(command, roots, windows, wsl,
+                                         db_kind=db_kind, has_es=has_es)
         ):
             suggestion = filename_search_suggestion(
                 windows, roots, wsl, db_kind=db_kind, has_es=has_es,
