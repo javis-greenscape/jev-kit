@@ -1,6 +1,7 @@
 import tests  # noqa: F401 -- MUST be the first import; see test_policy.py.
 
 import os
+import tempfile
 import unittest
 from unittest import mock
 
@@ -255,10 +256,16 @@ class TestMixedRootsNameBothIndexes(unittest.TestCase):
     def test_a_linux_root_outside_home_is_not_plocate_ground(self):
         # Codex P1, PR #1: home.db indexes $HOME only, so promising plocate
         # for /opt reports every file there as absent.
+        #
+        # A Linux-only pair gets the Linux form. It used to get the
+        # whole-filesystem text, which names `es` for /mnt/<drive> roots
+        # this search never touches (review finding, PR #1).
         self.assertIs(
             policy.filename_search_suggestion(
                 windows=False, roots=["/home/alice", "/opt"], wsl=True),
-            policy.ES_WSL_WHOLE_FS_SUGGESTION)
+            policy.LINUX_MIXED_SUGGESTION)
+        self.assertNotIn("es -path", policy.LINUX_MIXED_SUGGESTION)
+        # Add a Windows-host root and Everything belongs in the advice.
         self.assertIs(
             policy.filename_search_suggestion(
                 windows=False, roots=["/opt", "/mnt/c"], wsl=True),
@@ -830,6 +837,83 @@ class TestEsQuotingIsHonored(unittest.TestCase):
     def test_native_windows_also_honors_quoting(self):
         self.assertFalse(policy.command_already_uses_indexed_search(
             'find /mnt/c -name "foo; es bar"', windows=True))
+
+
+class SonnetReviewRoundOne(unittest.TestCase):
+    """Review findings on PR #1: the suggestion for a pure-Linux root no
+    index covers, the symlink rule in the paid-call pre-filter, and the
+    has_es parameter command_covers_roots accepted without reading."""
+
+    def test_uncovered_linux_only_root_gets_no_suggestion(self):
+        # /opt is outside home.db, and Everything cannot see the Linux side.
+        # No index can answer it, so the crawl the user typed is the answer.
+        for has_es in (True, False):
+            with self.subTest(has_es=has_es):
+                self.assertIsNone(policy.filename_search_suggestion(
+                    windows=False, roots=["/opt"], wsl=True,
+                    has_es=has_es, db_kind="home"))
+
+    def test_uncovered_linux_only_root_never_names_everything(self):
+        # The old branch returned the whole-filesystem advice here, whose
+        # `es` line points at /mnt/<drive> roots this command never touched.
+        suggestion = policy.filename_search_suggestion(
+            windows=False, roots=["/opt"], wsl=True,
+            has_es=True, db_kind="home") or ""
+        self.assertNotIn("es -path", suggestion)
+
+    def test_mixed_uncovered_root_still_gets_the_whole_fs_advice(self):
+        suggestion = policy.filename_search_suggestion(
+            windows=False, roots=["/opt", "/mnt/c/Users"], wsl=True,
+            has_es=True, db_kind="home") or ""
+        self.assertIn("es -path", suggestion)
+
+    def test_filesystem_root_still_gets_the_whole_fs_advice(self):
+        suggestion = policy.filename_search_suggestion(
+            windows=False, roots=["/"], wsl=True,
+            has_es=True, db_kind="home") or ""
+        self.assertIn("es -path", suggestion)
+
+    def test_deny_possible_follows_the_commands_own_symlink_rule(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            link = os.path.join(tmp, "vault")
+            os.symlink("/mnt/c/Users", link)
+            plain = "find %s -name x" % link
+            follows = "find -L %s -name x" % link
+            # A plain find never enters the Windows tree, and
+            # evaluate_search will not deny it, so the pre-filter must not
+            # buy a Jev call for it.
+            self.assertFalse(policy.deny_possible_bash(
+                "single_dir", "find", False, roots=[link], wsl=True,
+                command=plain))
+            self.assertFalse(policy.evaluate_search(
+                scope="single_dir", search_intent="filename", confidence=0.99,
+                command=plain, root_has_graphify_graph=False,
+                roots=[link], wsl=True)["would_deny"])
+            # -L does enter it, and that IS deny-eligible.
+            self.assertTrue(policy.deny_possible_bash(
+                "single_dir", "find", False, roots=[link], wsl=True,
+                command=follows))
+
+    def test_deny_possible_resolves_when_no_command_is_given(self):
+        # Without the command the pre-filter cannot know, and must stay on
+        # the safe side: a needless call costs money, a missed one costs
+        # the deny.
+        with tempfile.TemporaryDirectory() as tmp:
+            link = os.path.join(tmp, "vault")
+            os.symlink("/mnt/c/Users", link)
+            self.assertTrue(policy.deny_possible_bash(
+                "single_dir", "find", False, roots=[link], wsl=True))
+
+    def test_command_covers_roots_honours_has_es(self):
+        command = 'es -path "C:/Users" x'
+        self.assertTrue(policy.command_covers_roots(
+            command, roots=["/mnt/c/Users"], wsl=True,
+            db_kind="home", has_es=True))
+        # Everything unusable: naming es covers nothing, because the client
+        # runs and reports every file as absent.
+        self.assertFalse(policy.command_covers_roots(
+            command, roots=["/mnt/c/Users"], wsl=True,
+            db_kind="home", has_es=False))
 
 
 if __name__ == "__main__":

@@ -457,6 +457,17 @@ ES_WSL_WHOLE_FS_SUGGESTION = (
     "     other mount. Neither index holds any of that, so name the\n"
     "     directories you actually need and crawl only those)"
 )
+#: A WSL search that stays on the Linux side but reaches BOTH $HOME and a
+#: directory outside it. Everything is not named: it indexes the Windows
+#: host alone, so offering it for /opt sends the reader to a tool that
+#: reports every file there as absent (review finding, PR #1).
+LINUX_MIXED_SUGGESTION = (
+    "plocate -d ~/.cache/plocate/home.db -i '<pattern>'    # $HOME, Linux side\n"
+    "find <dir> -xdev -name '<pattern>'                    # any Linux path outside $HOME\n"
+    "    (the index holds $HOME and nothing else -- /etc, /opt, /usr, /srv\n"
+    "     and every other mount need a crawl, so name the directories you\n"
+    "     actually need rather than searching from /)"
+)
 GRAPHIFY_SUGGESTION = "graphify query"
 
 
@@ -507,6 +518,10 @@ def _mixed_suggestion(plocate_line):
 
 def _whole_fs_suggestion(plocate_line):
     return _with_plocate_line(ES_WSL_WHOLE_FS_SUGGESTION, plocate_line)
+
+
+def _linux_mixed_suggestion(plocate_line):
+    return _with_plocate_line(LINUX_MIXED_SUGGESTION, plocate_line)
 
 # A WSL mount point for a Windows drive: "/mnt/c", "/mnt/c/Users/...".
 _WSL_MOUNT_RE = re.compile(r"^/mnt/([A-Za-z])(?=/|$)")
@@ -925,13 +940,32 @@ def filename_search_suggestion(windows=None, roots=None, wsl=None,
             # would block the one command that does work.
             return None
         if uncovered:
-            # The whole-filesystem advice names plocate for the Linux half.
-            # With no database that line is a command the machine cannot
-            # run, and the remaining `find <dir>` line is described as
-            # covering Linux paths OUTSIDE $HOME, so following it drops the
-            # home-side results (Codex P1, PR #1). No database, no deny.
-            if not has_es or kind is None:
+            # Ground no index holds. When the search never leaves the Linux
+            # side, the crawl the user typed IS the answer: plocate cannot
+            # see the root, Everything cannot see the Linux side, and the
+            # whole-filesystem advice would name `es` for /mnt/<drive> roots
+            # this command never searched (review finding, PR #1). Denying a
+            # working crawl to recommend the same crawl back helps nobody.
+            #
+            # The whole-filesystem advice applies to the MIXED case alone,
+            # where a Windows-host root or `/` is in play. It names plocate
+            # for the Linux half, so with no database that line is a command
+            # the machine cannot run and the remaining `find <dir>` line
+            # covers only paths outside $HOME, dropping the home-side
+            # results (Codex P1, PR #1). No database, no deny.
+            if kind is None:
                 return None
+            if not needs_es:
+                # Linux side only. Everything indexes the Windows host, so
+                # the whole-filesystem advice would name `es` for
+                # /mnt/<drive> roots this command never searched (review
+                # finding, PR #1). With an indexed root in the search there
+                # is still better advice; with none there is nothing to
+                # offer, and denying a working crawl to recommend the same
+                # crawl back helps nobody.
+                if not covered:
+                    return None
+                return _linux_mixed_suggestion(plocate_line)
             return _whole_fs_suggestion(plocate_line)
         if needs_es:
             if covered:
@@ -1079,6 +1113,7 @@ def command_covers_roots(command, roots=None, windows=None, wsl=None,
     if not _wsl_default(wsl) or not roots:
         return command_already_uses_indexed_search(command, windows, wsl)
     kind = ASSUMED_DB_KIND if db_kind is UNSET else db_kind
+    es_ok = ASSUMED_HAS_ES if has_es is UNSET else bool(has_es)
     roots = resolve_roots(roots,
                           follow_symlinks=command_follows_symlinks(command))
     if any_root_is_uncovered_linux(roots, db_kind=kind):
@@ -1089,7 +1124,12 @@ def command_covers_roots(command, roots=None, windows=None, wsl=None,
     if any_root_is_plocate_covered(roots, db_kind=kind) \
             and not _command_position_is_locate(command):
         return False
-    if needs_windows and not _command_position_is_es(command):
+    if needs_windows and not (es_ok and _command_position_is_es(command)):
+        # Naming `es` covers a Windows-host root only while Everything can
+        # answer: with the service stopped the client runs and reports every
+        # file as absent. `has_es` was accepted here and never read, so the
+        # es half of this function ignored the machine while the plocate
+        # half honoured it (review finding, PR #1).
         return False
     return True
 
@@ -1178,7 +1218,7 @@ SAMPLE_RATE_ENV_LEGACY = ("PLUMBLINE_SAMPLE_RATE", "JEV_GUARD_SAMPLE_RATE")
 
 
 def deny_possible_bash(scope, program, root_has_graphify_graph,
-                       roots=None, windows=None, wsl=None):
+                       roots=None, windows=None, wsl=None, command=None):
     """True iff a Bash search-command judgement could possibly end in a deny,
     mirroring evaluate_search's own two deny branches:
 
@@ -1191,7 +1231,18 @@ def deny_possible_bash(scope, program, root_has_graphify_graph,
     Everything else -- single_repo/single_dir/stdin/unknown scope with no
     graph, or an already-locate command -- can never deny regardless of what
     Jev answers, so it is safe to skip the call."""
-    resolved = resolve_roots(roots)
+    # `command` decides whether a symlinked root counts as its target, on
+    # the same rule evaluate_search uses: a plain `find ~/notes/vault` never
+    # enters the tree the link points at. Resolving regardless said "deny
+    # possible" for a command evaluate_search would never deny, and every
+    # search through such a link then paid for a Jev call that could only
+    # come back allow (review finding, PR #1). Omitted, it resolves, which
+    # keeps the pre-filter on the safe side: a needless call costs money, a
+    # missed one costs the deny.
+    resolved = resolve_roots(
+        roots,
+        follow_symlinks=True if command is None
+        else command_follows_symlinks(command))
     on_wsl = not is_windows(windows) and _wsl_default(wsl)
     # An indexed program in the command excuses the call only when that
     # index covers every root searched: naming plocate while another stage

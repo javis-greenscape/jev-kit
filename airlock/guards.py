@@ -183,7 +183,8 @@ def compute_search_entry(data, timeout_s=None):
 
     sampled = False
     if not policy.deny_possible_bash(command_scope, program, has_graph,
-                                     roots=scope_result.get("roots")):
+                                     roots=scope_result.get("roots"),
+                                     command=command_r):
         sampled = random.random() < policy.sample_rate()
         if not sampled:
             entry = dict(entry_base)
