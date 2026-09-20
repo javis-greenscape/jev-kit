@@ -451,10 +451,11 @@ ES_WSL_MIXED_SUGGESTION = (
 ES_WSL_WHOLE_FS_SUGGESTION = (
     "plocate -d ~/.cache/plocate/home.db -i '<pattern>'    # $HOME, Linux side\n"
     'es -path "<folder>" -n 50 "<pattern>"                 # the /mnt/<drive> roots\n'
-    "find /etc /opt /usr /var -xdev -name '<pattern>'      # Linux ground neither indexes\n"
+    "find <dir> -xdev -name '<pattern>'                    # any Linux path outside $HOME\n"
     "    (a search from / crosses both filesystems AND Linux directories\n"
-    "     outside $HOME. No index covers that last part, so name the\n"
-    "     directories you need rather than dropping them)"
+    "     outside $HOME -- /etc, /opt, /usr, /srv, /root, /tmp and every\n"
+    "     other mount. Neither index holds any of that, so name the\n"
+    "     directories you actually need and crawl only those)"
 )
 GRAPHIFY_SUGGESTION = "graphify query"
 
@@ -497,6 +498,46 @@ def any_root_is_linux_side(roots):
     this AND to any_root_is_windows_host, and neither index alone will do."""
     for root in roots or []:
         if not root_is_windows_host(root):
+            return True
+    return False
+
+
+def root_is_home_indexed(root, home=None):
+    """True when plocate's `~/.cache/plocate/home.db` actually covers `root`.
+
+    That database indexes $HOME and nothing else, so a Linux-side root such
+    as /opt or /etc is NOT covered by it -- reading every non-Windows root
+    as "plocate's ground" made the mixed suggestion promise results it
+    cannot return (Codex P1, PR #1)."""
+    if not root:
+        return False
+    try:
+        base = os.path.normpath(home or os.path.expanduser("~"))
+        r = os.path.normpath(str(root))
+    except Exception:
+        return False
+    if root_is_windows_host(r):
+        return False
+    return r == base or r.startswith(base.rstrip("/") + "/")
+
+
+def any_root_is_home_indexed(roots, home=None):
+    """root_is_home_indexed over a possibly-None/empty list of roots."""
+    for root in roots or []:
+        if root_is_home_indexed(root, home):
+            return True
+    return False
+
+
+def any_root_is_uncovered_linux(roots, home=None):
+    """True when a root is Linux-side ground that NEITHER index holds: a
+    Linux path outside $HOME, or '/' itself (which also reaches every
+    /mnt/<drive>). These are the roots a replacement command must keep
+    crawling, or it reports files there as absent."""
+    for root in roots or []:
+        if root_is_wsl_fs_root(root):
+            return True
+        if not root_is_windows_host(root) and not root_is_home_indexed(root, home):
             return True
     return False
 
@@ -552,10 +593,10 @@ def filename_search_suggestion(windows=None, roots=None, wsl=None):
         except Exception:
             wsl = False
     if wsl:
-        if any_root_is_wsl_fs_root(roots):
+        if any_root_is_uncovered_linux(roots):
             return ES_WSL_WHOLE_FS_SUGGESTION
         if any_root_is_windows_host(roots):
-            if any_root_is_linux_side(roots):
+            if any_root_is_home_indexed(roots):
                 return ES_WSL_MIXED_SUGGESTION
             return ES_WSL_SUGGESTION
     return PLOCATE_SUGGESTION
@@ -713,10 +754,12 @@ def command_covers_roots(command, roots=None, windows=None, wsl=None):
         return command_already_uses_indexed_search(command, windows, wsl)
     if not _wsl_default(wsl) or not roots:
         return command_already_uses_indexed_search(command, windows, wsl)
-    both_sides = any_root_is_wsl_fs_root(roots)
-    needs_linux = both_sides or any_root_is_linux_side(roots)
-    needs_windows = both_sides or any_root_is_windows_host(roots)
-    if needs_linux and not _LOCATE_RE.search(command):
+    if any_root_is_uncovered_linux(roots):
+        # Ground no index holds: naming plocate and es cannot answer it, so
+        # the crawl is not already covered however many indexes appear.
+        return False
+    needs_windows = any_root_is_windows_host(roots)
+    if any_root_is_home_indexed(roots) and not _LOCATE_RE.search(command):
         return False
     if needs_windows and not _command_position_is_es(command):
         return False
@@ -797,7 +840,8 @@ SAMPLE_RATE_ENV = "AIRLOCK_SAMPLE_RATE"
 SAMPLE_RATE_ENV_LEGACY = ("PLUMBLINE_SAMPLE_RATE", "JEV_GUARD_SAMPLE_RATE")
 
 
-def deny_possible_bash(scope, program, root_has_graphify_graph):
+def deny_possible_bash(scope, program, root_has_graphify_graph,
+                       roots=None, windows=None, wsl=None):
     """True iff a Bash search-command judgement could possibly end in a deny,
     mirroring evaluate_search's own two deny branches:
 
@@ -811,6 +855,16 @@ def deny_possible_bash(scope, program, root_has_graphify_graph):
     graph, or an already-locate command -- can never deny regardless of what
     Jev answers, so it is safe to skip the call."""
     if scope == "disk_wide" and program not in SKIP_LOCATE_FAMILY:
+        return True
+    # A root on the Windows host is deny-eligible whatever the scope says,
+    # matching evaluate_search's own branch: `find /mnt/c/Users -name x`
+    # scopes as single_dir and is still a crawl of the Windows filesystem.
+    # Without this the guard skipped the call as "no deny possible" and the
+    # branch below could never run (Codex P1, PR #1).
+    if (program not in SKIP_LOCATE_FAMILY
+            and not is_windows(windows)
+            and _wsl_default(wsl)
+            and any_root_is_windows_host(roots)):
         return True
     if program in GREP_LIKE_PROGRAMS and root_has_graphify_graph:
         return True

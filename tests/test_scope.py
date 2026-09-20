@@ -384,6 +384,18 @@ class WslDriveRootScopeTests(unittest.TestCase):
             self.assertIn("/mnt/c", result["roots"])
             self.assertEqual(len(result["roots"]), 2)
 
+    def test_a_narrow_stage_contributes_its_root_too(self):
+        # Codex P1, PR #1: a Windows-host subdirectory classifies as
+        # single_dir, so an accumulator that took only disk-wide stages
+        # dropped exactly the root the suggestion needs.
+        from unittest import mock
+        from airlock import scope
+        cmd = 'find "$HOME" -name x; find %s -name x' % "/mnt/c/Users"
+        with mock.patch("airlock.headless.is_wsl", return_value=True):
+            result = scope.classify_command(cmd, "/home/alice")
+            self.assertEqual(result["scope"], "disk_wide")
+            self.assertIn("/mnt/c/Users", result["roots"])
+
     def test_roots_are_deduplicated_across_stages(self):
         from unittest import mock
         from airlock import scope

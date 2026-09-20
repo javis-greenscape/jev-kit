@@ -646,21 +646,22 @@ def classify_command(command, cwd=None, windows=None, _depth=0):
     last = {"scope": "unknown", "program": None, "roots": []}
     found_any = False
     # `last` only ever carries ONE stage's roots -- the widest-scoped one --
-    # so a compound command with two disk-wide search stages
-    # (`find "$HOME" -name x; find /mnt/c/Users -name x`) previously reported
-    # only one side's roots. That's fine for scope/program (only the widest
-    # stage matters there), but the WSL index-suggestion logic needs every
-    # root that actually got searched, on both sides of the filesystem, or it
-    # silently drops half the search when replacing it with a suggestion
-    # (Codex, PR #1). This accumulates roots from every disk-wide stage seen,
-    # in order, deduplicated, and is substituted in at the end only when the
-    # final verdict is itself disk_wide.
-    disk_wide_roots = []
+    # so a compound command searching two places reported only one of them.
+    # That's fine for scope/program (only the widest stage matters there),
+    # but the WSL index-suggestion logic needs every root that actually got
+    # searched, on both sides of the filesystem, or it silently drops half
+    # the search when replacing it with a suggestion (Codex, PR #1). Every
+    # stage contributes, whatever its own scope: the narrow stage is exactly
+    # the one that gets dropped, since a Windows-host subdirectory
+    # classifies as single_dir and is still ground plocate cannot answer.
+    # Substituted in at the end only when the final verdict is disk_wide, so
+    # a narrower verdict keeps reporting its own root.
+    searched_roots = []
 
-    def _extend_disk_wide_roots(roots):
+    def _extend_searched_roots(roots):
         for r in roots or []:
-            if r not in disk_wide_roots:
-                disk_wide_roots.append(r)
+            if r not in searched_roots:
+                searched_roots.append(r)
 
     for statement in statements:
         statement = statement.strip()
@@ -697,8 +698,7 @@ def classify_command(command, cwd=None, windows=None, _depth=0):
                                               _depth=_depth + 1)
                     if nested.get("program"):
                         found_any = True
-                        if nested.get("scope") == "disk_wide":
-                            _extend_disk_wide_roots(nested.get("roots"))
+                        _extend_searched_roots(nested.get("roots"))
                         last = _widest(last, nested)
                 continue
 
@@ -774,15 +774,14 @@ def classify_command(command, cwd=None, windows=None, _depth=0):
                     "program": program,
                     "roots": roots,
                 }
-                if candidate_scope == "disk_wide":
-                    _extend_disk_wide_roots(roots)
+                _extend_searched_roots(roots)
             last = _widest(last, candidate)
 
     if not found_any:
         return {"scope": "unknown", "program": None, "roots": []}
-    if last.get("scope") == "disk_wide" and disk_wide_roots:
+    if last.get("scope") == "disk_wide" and searched_roots:
         last = dict(last)
-        last["roots"] = disk_wide_roots
+        last["roots"] = searched_roots
     return last
 
 

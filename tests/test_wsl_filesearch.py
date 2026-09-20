@@ -1,11 +1,27 @@
 import tests  # noqa: F401 -- MUST be the first import; see test_policy.py.
 
+import os
 import unittest
+from unittest import mock
 
 from airlock import policy
 
 _ABOVE_BAR_CONFIDENCE = 0.9
 _ABOVE_BAR_MARGIN = 0.6
+
+# Every fixture root here is under /home/alice, matching winpath.py's
+# docstring convention. plocate's home.db covers $HOME and nothing else, so
+# whether /home/alice counts as indexed ground depends on HOME (Codex P1,
+# PR #1: /opt was being reported as plocate's ground). Pin it for the file.
+_HOME = mock.patch.dict(os.environ, {"HOME": "/home/alice"})
+
+
+def setUpModule():
+    _HOME.start()
+
+
+def tearDownModule():
+    _HOME.stop()
 
 
 class TestFilenameSearchSuggestionWsl(unittest.TestCase):
@@ -195,7 +211,7 @@ class TestMixedRootsNameBothIndexes(unittest.TestCase):
 
     def test_mixed_roots_get_both_commands(self):
         s = policy.filename_search_suggestion(
-            windows=False, roots=["/home/someone", "/mnt/c/Users"], wsl=True)
+            windows=False, roots=["/home/alice/notes", "/mnt/c/Users"], wsl=True)
         self.assertIs(s, policy.ES_WSL_MIXED_SUGGESTION)
         self.assertIn("plocate", s)
         self.assertIn("es -path", s)
@@ -206,17 +222,29 @@ class TestMixedRootsNameBothIndexes(unittest.TestCase):
                 windows=False, roots=["/mnt/c/Users", "/mnt/d/data"], wsl=True),
             policy.ES_WSL_SUGGESTION)
 
-    def test_linux_only_roots_still_get_plocate_alone(self):
+    def test_home_only_roots_still_get_plocate_alone(self):
         self.assertIs(
             policy.filename_search_suggestion(
-                windows=False, roots=["/home/someone", "/opt"], wsl=True),
+                windows=False, roots=["/home/alice", "/home/alice/notes"], wsl=True),
             policy.PLOCATE_SUGGESTION)
+
+    def test_a_linux_root_outside_home_is_not_plocate_ground(self):
+        # Codex P1, PR #1: home.db indexes $HOME only, so promising plocate
+        # for /opt reports every file there as absent.
+        self.assertIs(
+            policy.filename_search_suggestion(
+                windows=False, roots=["/home/alice", "/opt"], wsl=True),
+            policy.ES_WSL_WHOLE_FS_SUGGESTION)
+        self.assertIs(
+            policy.filename_search_suggestion(
+                windows=False, roots=["/opt", "/mnt/c"], wsl=True),
+            policy.ES_WSL_WHOLE_FS_SUGGESTION)
 
     def test_the_command_that_started_this(self):
         """`find "$HOME" /mnt/c/Users -name x` -- the real failing call."""
         self.assertIs(
             policy.filename_search_suggestion(
-                windows=False, roots=["/home/someone", "/mnt/c/Users"], wsl=True),
+                windows=False, roots=["/home/alice/notes", "/mnt/c/Users"], wsl=True),
             policy.ES_WSL_MIXED_SUGGESTION)
 
     def test_any_root_is_linux_side(self):
@@ -273,6 +301,28 @@ class TestWslFsRootSpansBothIndexes(unittest.TestCase):
         )
         self.assertTrue(verdict["would_deny"])
         self.assertEqual(verdict["suggestion"], policy.ES_WSL_WHOLE_FS_SUGGESTION)
+
+
+class TestPrefilterLetsWindowsHostRootsThrough(unittest.TestCase):
+    """Codex P1 on PR #1: evaluate_search grew a Windows-host branch, but
+    compute_search_entry asks deny_possible_bash first and that still said
+    no deny was reachable below disk_wide, so the branch never ran live."""
+
+    def test_windows_host_root_below_disk_wide_is_deny_possible(self):
+        self.assertTrue(policy.deny_possible_bash(
+            "single_dir", "find", False, roots=["/mnt/c/Users"], wsl=True))
+
+    def test_the_same_root_off_wsl_is_not(self):
+        self.assertFalse(policy.deny_possible_bash(
+            "single_dir", "find", False, roots=["/mnt/c/Users"], wsl=False))
+
+    def test_a_linux_side_single_dir_is_still_skipped(self):
+        self.assertFalse(policy.deny_possible_bash(
+            "single_dir", "find", False, roots=["/home/alice/notes"], wsl=True))
+
+    def test_an_es_command_is_still_skipped(self):
+        self.assertFalse(policy.deny_possible_bash(
+            "single_dir", "es", False, roots=["/mnt/c/Users"], wsl=True))
 
 
 class TestEsOnlyInCommandPosition(unittest.TestCase):
