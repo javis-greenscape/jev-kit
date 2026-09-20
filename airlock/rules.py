@@ -1853,7 +1853,8 @@ def _pw_scan(segments, cwd, depth, cdp=False):
             # A `cd` carries into the segments after it, so a later `node
             # run_goal.js` inside the agent's checkout is still the agent.
             # It changes nothing about the `cd` segment itself.
-            target = args[0] if args else ""
+            # A bare `cd` goes home, as it does in a real shell.
+            target = args[0] if args else "~"
             if target and not target.startswith("-"):
                 target = _expand(target)
                 cur_cwd = target if os.path.isabs(target) else os.path.join(cur_cwd or "", target)
@@ -1909,6 +1910,10 @@ def _pw_scan(segments, cwd, depth, cdp=False):
             rest = _npx_arguments(args)
             if rest[:1] == ["playwright"]:
                 pw_args = rest[1:]
+            elif rest[:1] and rest[0] in _PW_SCRIPT_RUNNERS:
+                # `npx tsx run_goal.ts` runs tsx, and tsx runs the script.
+                # Same unwrap as `uv run` and `env`.
+                prog, args = rest[0], rest[1:]
         if pw_args is not None:
             sub = pw_args[0] if pw_args else ""
             if sub in _PW_CLI_ALLOWED or not sub:

@@ -1001,6 +1001,22 @@ class TestR11BrowseViaJev(unittest.TestCase):
             tool = "mcp__plugin_playwright_playwright__" + action
             self.assert_asks(self.ctx_mcp(tool), tool)
 
+    def test_npx_wrapping_an_interpreter_is_unwrapped(self):
+        path = self._script("run_goal.ts", "import { chromium } from 'playwright';\n")
+        for c in ("npx tsx %s" % path, "npx ts-node %s" % path,
+                  "npx -y tsx %s" % path, "npx node %s" % path):
+            self.assert_asks(self.ctx(c), c)
+        self.assert_silent(self.ctx("npx tsx %s" % self._script("plain.ts", "export const x = 1;\n")))
+
+    def test_a_bare_cd_goes_home(self):
+        import shutil as _shutil
+        home = os.path.expanduser("~")
+        path = os.path.join(home, ".airlock-r11-test-run_goal.js")
+        with open(path, "w") as f:
+            f.write("const { chromium } = require('playwright');\n")
+        self.addCleanup(lambda: os.path.exists(path) and os.unlink(path))
+        self.assert_asks(self.ctx("cd && node .airlock-r11-test-run_goal.js"))
+
     def test_the_playwright_test_package_counts_as_an_import(self):
         for name, body in (
             ("a.js", "const { chromium } = require('@playwright/test');\n"),
