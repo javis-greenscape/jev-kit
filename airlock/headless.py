@@ -239,6 +239,13 @@ def _mount_relative(cgroup_path, mount_root):
     mount_root = mount_root or "/"
     if mount_root == "/":
         return cgroup_path or "/"
+    if not cgroup_path or cgroup_path == "/":
+        # A private cgroup namespace reports the path relative to the
+        # namespace root, so "/" means "the mount point itself" even when
+        # mountinfo's root is a subtree such as /docker/abc. Reading it as
+        # outside the mount would skip the only quota there is
+        # (Codex P2, PR #2).
+        return "/"
     if cgroup_path == mount_root:
         return "/"
     if cgroup_path.startswith(mount_root.rstrip("/") + "/"):

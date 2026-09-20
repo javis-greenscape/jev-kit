@@ -310,6 +310,15 @@ class TestCgroupCpuQuotaCount(unittest.TestCase):
             "36 25 0:31 /docker/abc %s rw - cgroup2 cgroup2 rw\n" % root)
         self.assertIsNone(headless._cgroup_cpu_quota_count(root, proc, mi))
 
+    def test_private_namespace_reports_a_root_relative_path(self):
+        # /proc/self/cgroup says "/" while mountinfo's root is a subtree:
+        # the quota lives at the mount point itself (Codex P2, PR #2).
+        root = self._cgroup({"cpu.max": "500000 100000\n"})
+        proc = self._proc_cgroup("0::/\n")
+        mi = self._mountinfo(
+            "36 25 0:31 /docker/abc %s rw - cgroup2 cgroup2 rw\n" % root)
+        self.assertEqual(headless._cgroup_cpu_quota_count(root, proc, mi), 5)
+
     def test_unreadable_mountinfo_uses_the_plain_layout(self):
         root = self._cgroup({"user.slice/cpu.max": "200000 100000\n"})
         proc = self._proc_cgroup("0::/user.slice\n")
