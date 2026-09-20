@@ -274,6 +274,48 @@ class TestCgroupCpuQuotaCount(unittest.TestCase):
         self.assertEqual(
             headless._cgroup_cpu_quota_count(root, "/nonexistent/cgroup"), 4)
 
+    # --- hierarchy paths are not mount paths (Codex, PR #2) ---------------
+
+    def _mountinfo(self, text):
+        d = tempfile.mkdtemp()
+        path = Path(d) / "mountinfo"
+        path.write_text(text)
+        return str(path)
+
+    def test_v2_subtree_mount_translates_the_hierarchy_path(self):
+        # A container without its own cgroup namespace: mountinfo root is
+        # /docker/abc, so hierarchy path /docker/abc/child is visible at
+        # <mountpoint>/child, not <mountpoint>/docker/abc/child.
+        root = self._cgroup({"child/cpu.max": "200000 100000\n"})
+        proc = self._proc_cgroup("0::/docker/abc/child\n")
+        mi = self._mountinfo(
+            "36 25 0:31 /docker/abc %s rw - cgroup2 cgroup2 rw\n" % root)
+        self.assertEqual(
+            headless._cgroup_cpu_quota_count(root, proc, mi), 2)
+
+    def test_v1_cpu_controller_mounted_as_cpu_cpuacct(self):
+        root = self._cgroup({"cpu,cpuacct/abc/cpu.cfs_quota_us": "300000\n",
+                             "cpu,cpuacct/abc/cpu.cfs_period_us": "100000\n"})
+        proc = self._proc_cgroup("4:cpu,cpuacct:/abc\n")
+        mi = self._mountinfo(
+            "31 25 0:27 / %s/cpu,cpuacct rw - cgroup cgroup rw,cpu,cpuacct\n"
+            % root)
+        self.assertEqual(
+            headless._cgroup_cpu_quota_count(root, proc, mi), 3)
+
+    def test_path_outside_the_mounted_subtree_is_no_evidence(self):
+        root = self._cgroup({"cpu.max": "100000 100000\n"})
+        proc = self._proc_cgroup("0::/elsewhere\n")
+        mi = self._mountinfo(
+            "36 25 0:31 /docker/abc %s rw - cgroup2 cgroup2 rw\n" % root)
+        self.assertIsNone(headless._cgroup_cpu_quota_count(root, proc, mi))
+
+    def test_unreadable_mountinfo_uses_the_plain_layout(self):
+        root = self._cgroup({"user.slice/cpu.max": "200000 100000\n"})
+        proc = self._proc_cgroup("0::/user.slice\n")
+        self.assertEqual(
+            headless._cgroup_cpu_quota_count(root, proc, "/nonexistent/mi"), 2)
+
 
 class TestMergeIntoRulesJson(unittest.TestCase):
     def setUp(self):

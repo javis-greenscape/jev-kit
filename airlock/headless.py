@@ -194,6 +194,58 @@ def _ancestor_dirs(root, relpath):
         parts.pop()
 
 
+def _cgroup_mount(cgroup_root, mountinfo, v2=True):
+    """(mountpoint, mount_root) for the visible cgroup hierarchy, or None.
+
+    `/proc/self/cgroup` gives a path in the HIERARCHY, which is not the path
+    under the mount point when only a subtree is mounted -- a container
+    without its own cgroup namespace sees mountinfo root `/docker/abc` at
+    `/sys/fs/cgroup`, and its own `/docker/abc/child` lives at
+    `/sys/fs/cgroup/child`. mountinfo's fields 4 and 5 are exactly that
+    translation. For v1 this also finds the CPU controller wherever it is
+    mounted, including the common `cpu,cpuacct` pairing.
+
+    Only a mount at or under `cgroup_root` is accepted, so a test passing a
+    temporary directory gets no match and the plain layout is used.
+    """
+    try:
+        with open(mountinfo) as f:
+            lines = f.readlines()
+    except Exception:
+        return None
+    for line in lines:
+        try:
+            left, right = line.split(" - ", 1)
+            fields = left.split()
+            mount_root, mountpoint = fields[3], fields[4]
+            rfields = right.split()
+            fstype, super_opts = rfields[0], rfields[-1]
+        except Exception:
+            continue
+        if mountpoint != cgroup_root and not mountpoint.startswith(
+                cgroup_root.rstrip("/") + "/"):
+            continue
+        if v2:
+            if fstype == "cgroup2":
+                return mountpoint, mount_root
+        elif fstype == "cgroup" and "cpu" in super_opts.split(","):
+            return mountpoint, mount_root
+    return None
+
+
+def _mount_relative(cgroup_path, mount_root):
+    """`cgroup_path` expressed relative to a mount whose root is
+    `mount_root`, or None when the path is outside that subtree."""
+    mount_root = mount_root or "/"
+    if mount_root == "/":
+        return cgroup_path or "/"
+    if cgroup_path == mount_root:
+        return "/"
+    if cgroup_path.startswith(mount_root.rstrip("/") + "/"):
+        return cgroup_path[len(mount_root.rstrip("/")):]
+    return None
+
+
 def _read_quota_count(directory, v2=True):
     """CPUs implied by one cgroup directory's quota, or None for no limit."""
     try:
@@ -216,27 +268,34 @@ def _read_quota_count(directory, v2=True):
 
 
 def _cgroup_cpu_quota_count(cgroup_root="/sys/fs/cgroup",
-                            proc_cgroup="/proc/self/cgroup"):
+                            proc_cgroup="/proc/self/cgroup",
+                            mountinfo="/proc/self/mountinfo"):
     """CPUs implied by a cgroup CPU quota (a container's `--cpus=N` or a
     systemd `CPUQuota=`, neither of which an affinity mask sees).
 
-    Walks this process's own cgroup and every ancestor up to the mount root,
-    in both the v2 layout (`<root>/<path>/cpu.max`) and the v1 one
-    (`<root>/cpu/<path>/cpu.cfs_quota_us`), and returns the TIGHTEST limit
-    found, since an ancestor's cap binds its descendants. Absent, `max`,
-    unreadable or non-positive all mean "no evidence", never a count.
+    Walks this process's own cgroup and every ancestor up to the mount point,
+    in both the v2 layout (`cpu.max`) and the v1 one (`cpu.cfs_quota_us` /
+    `cpu.cfs_period_us`), and returns the TIGHTEST limit found, since an
+    ancestor's cap binds its descendants. Hierarchy paths are translated
+    through mountinfo where it is readable. Absent, `max`, unreadable or
+    non-positive all mean "no evidence", never a count.
     """
     v2_path, v1_path = _proc_cgroup_relpaths(proc_cgroup)
     counts = []
-    for d in _ancestor_dirs(cgroup_root, v2_path):
-        n = _read_quota_count(d, v2=True)
-        if n:
-            counts.append(n)
-    v1_root = os.path.join(cgroup_root, "cpu")
-    for d in _ancestor_dirs(v1_root, v1_path):
-        n = _read_quota_count(d, v2=False)
-        if n:
-            counts.append(n)
+    for path, v2, fallback_base in (
+            (v2_path, True, cgroup_root),
+            (v1_path, False, os.path.join(cgroup_root, "cpu"))):
+        mount = _cgroup_mount(cgroup_root, mountinfo, v2=v2)
+        if mount:
+            base, rel = mount[0], _mount_relative(path, mount[1])
+            if rel is None:
+                continue
+        else:
+            base, rel = fallback_base, path
+        for directory in _ancestor_dirs(base, rel):
+            n = _read_quota_count(directory, v2=v2)
+            if n:
+                counts.append(n)
     return min(counts) if counts else None
 
 
