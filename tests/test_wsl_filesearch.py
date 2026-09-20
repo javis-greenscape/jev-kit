@@ -126,15 +126,61 @@ class TestEvaluateSearchWsl(unittest.TestCase):
         self.assertTrue(verdict["would_deny"])
         self.assertEqual(verdict["suggestion"], policy.ES_WSL_MIXED_SUGGESTION)
 
-    def test_same_scenario_with_es_command_already_used_does_not_deny(self):
-        verdict = policy.evaluate_search(
+    def _mixed_verdict(self, command):
+        return policy.evaluate_search(
             scope="disk_wide",
             search_intent="filename_search",
             confidence=_ABOVE_BAR_CONFIDENCE,
-            command='es -path "/mnt/c/Users" -n 50 "*jev-kit*"',
+            command=command,
             root_has_graphify_graph=False,
             margin=_ABOVE_BAR_MARGIN,
             roots=["/home/alice", "/mnt/c/Users"],
+            wsl=True,
+        )
+
+    def test_es_alone_does_not_cover_a_mixed_search(self):
+        # Codex P2, PR #1: es indexes the Windows half only, so the crawl of
+        # the Linux half is still unanswered and the deny must stand.
+        verdict = self._mixed_verdict(
+            'find "$HOME" /mnt/c/Users -name x; es -path "C:\\Users" x')
+        self.assertTrue(verdict["would_deny"])
+
+    def test_plocate_alone_does_not_cover_a_mixed_search(self):
+        verdict = self._mixed_verdict(
+            'find "$HOME" /mnt/c/Users -name x; plocate -i x')
+        self.assertTrue(verdict["would_deny"])
+
+    def test_both_indexes_named_cover_a_mixed_search(self):
+        verdict = self._mixed_verdict(
+            'plocate -d ~/.cache/plocate/home.db -i x; es -path "C:\\Users" x')
+        self.assertFalse(verdict["would_deny"])
+
+    def test_windows_host_root_denies_even_below_disk_wide(self):
+        # Codex P1, PR #1: `find /mnt/c/Users -name x` scopes as single_dir,
+        # so the old disk_wide-only gate let a crawl of the Windows
+        # filesystem through untouched.
+        verdict = policy.evaluate_search(
+            scope="single_dir",
+            search_intent="filename_search",
+            confidence=_ABOVE_BAR_CONFIDENCE,
+            command="find /mnt/c/Users -name x",
+            root_has_graphify_graph=False,
+            margin=_ABOVE_BAR_MARGIN,
+            roots=["/mnt/c/Users"],
+            wsl=True,
+        )
+        self.assertTrue(verdict["would_deny"])
+        self.assertEqual(verdict["suggestion"], policy.ES_WSL_SUGGESTION)
+
+    def test_a_linux_side_single_dir_search_still_allows(self):
+        verdict = policy.evaluate_search(
+            scope="single_dir",
+            search_intent="filename_search",
+            confidence=_ABOVE_BAR_CONFIDENCE,
+            command="find /home/alice/notes -name x",
+            root_has_graphify_graph=False,
+            margin=_ABOVE_BAR_MARGIN,
+            roots=["/home/alice/notes"],
             wsl=True,
         )
         self.assertFalse(verdict["would_deny"])
@@ -191,13 +237,13 @@ class TestWslFsRootSpansBothIndexes(unittest.TestCase):
     def test_fs_root_alone_gets_mixed_suggestion(self):
         self.assertEqual(
             policy.filename_search_suggestion(wsl=True, roots=["/"]),
-            policy.ES_WSL_MIXED_SUGGESTION,
+            policy.ES_WSL_WHOLE_FS_SUGGESTION,
         )
 
     def test_fs_root_with_other_roots_still_gets_mixed_suggestion(self):
         self.assertEqual(
             policy.filename_search_suggestion(wsl=True, roots=["/", "/mnt/c/Users"]),
-            policy.ES_WSL_MIXED_SUGGESTION,
+            policy.ES_WSL_WHOLE_FS_SUGGESTION,
         )
 
     def test_fs_root_off_wsl_gets_plocate_alone(self):
@@ -226,7 +272,7 @@ class TestWslFsRootSpansBothIndexes(unittest.TestCase):
             wsl=True,
         )
         self.assertTrue(verdict["would_deny"])
-        self.assertEqual(verdict["suggestion"], policy.ES_WSL_MIXED_SUGGESTION)
+        self.assertEqual(verdict["suggestion"], policy.ES_WSL_WHOLE_FS_SUGGESTION)
 
 
 class TestEsOnlyInCommandPosition(unittest.TestCase):
@@ -255,6 +301,19 @@ class TestEsOnlyInCommandPosition(unittest.TestCase):
     def test_es_exe_still_recognised(self):
         self.assertTrue(policy.command_already_uses_indexed_search(
             'es.exe -n 5 "x"', windows=False, wsl=True))
+
+    def test_escaped_separator_is_not_a_command_boundary(self):
+        # Codex P2, PR #1: bash reads `foo\;es` as one filename pattern.
+        self.assertFalse(policy.command_already_uses_indexed_search(
+            r"find /mnt/c -name foo\;es", windows=False, wsl=True))
+
+    def test_escaped_separator_inside_double_quotes_is_not_a_boundary(self):
+        self.assertFalse(policy.command_already_uses_indexed_search(
+            r'find /mnt/c -name "foo\;es"', windows=False, wsl=True))
+
+    def test_whole_fs_suggestion_keeps_the_linux_ground_neither_index_holds(self):
+        for d in ("/etc", "/opt", "/usr"):
+            self.assertIn(d, policy.ES_WSL_WHOLE_FS_SUGGESTION)
 
     def test_es_inside_a_word_is_not_a_command(self):
         self.assertFalse(policy.command_already_uses_indexed_search(

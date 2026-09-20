@@ -443,6 +443,19 @@ ES_WSL_MIXED_SUGGESTION = (
     "     plocate never indexes /mnt/<drive>, and Everything never indexes the\n"
     "     Linux side. Run both and combine, or split the search by root)"
 )
+# A search rooted at "/" under WSL is wider still. Between them the two
+# indexes cover $HOME and the Windows drives, and nothing else: /etc, /opt,
+# /usr and the rest of the Linux side are in neither. Replacing the crawl
+# with that pair alone would report a file in /etc as absent, so the advice
+# keeps a bounded crawl for the ground neither index holds (Codex P1, PR #1).
+ES_WSL_WHOLE_FS_SUGGESTION = (
+    "plocate -d ~/.cache/plocate/home.db -i '<pattern>'    # $HOME, Linux side\n"
+    'es -path "<folder>" -n 50 "<pattern>"                 # the /mnt/<drive> roots\n'
+    "find /etc /opt /usr /var -xdev -name '<pattern>'      # Linux ground neither indexes\n"
+    "    (a search from / crosses both filesystems AND Linux directories\n"
+    "     outside $HOME. No index covers that last part, so name the\n"
+    "     directories you need rather than dropping them)"
+)
 GRAPHIFY_SUGGESTION = "graphify query"
 
 # A WSL mount point for a Windows drive: "/mnt/c", "/mnt/c/Users/...".
@@ -540,7 +553,7 @@ def filename_search_suggestion(windows=None, roots=None, wsl=None):
             wsl = False
     if wsl:
         if any_root_is_wsl_fs_root(roots):
-            return ES_WSL_MIXED_SUGGESTION
+            return ES_WSL_WHOLE_FS_SUGGESTION
         if any_root_is_windows_host(roots):
             if any_root_is_linux_side(roots):
                 return ES_WSL_MIXED_SUGGESTION
@@ -581,10 +594,25 @@ def _split_command_segments(command):
     while i < n:
         c = command[i]
         if quote:
+            # Inside double quotes a backslash still escapes the next
+            # character; inside single quotes it does not.
+            if c == "\\" and quote == '"' and i + 1 < n:
+                current.append(c)
+                current.append(command[i + 1])
+                i += 2
+                continue
             current.append(c)
             if c == quote:
                 quote = None
             i += 1
+            continue
+        if c == "\\" and i + 1 < n:
+            # `find /mnt/c -name foo\;es` is ONE filename argument to find:
+            # the escaped `;` starts no new command, so the trailing `es` is
+            # not an invocation of Everything (Codex P2, PR #1).
+            current.append(c)
+            current.append(command[i + 1])
+            i += 2
             continue
         if c in ("'", '"'):
             quote = c
@@ -657,6 +685,44 @@ def command_already_uses_indexed_search(command, windows=None, wsl=None):
     return False
 
 
+def _wsl_default(wsl):
+    """`wsl` as given, or detected. A detection failure is False, never
+    an exception."""
+    if wsl is not None:
+        return wsl
+    try:
+        from . import headless
+        return headless.is_wsl()
+    except Exception:
+        return False
+
+
+def command_covers_roots(command, roots=None, windows=None, wsl=None):
+    """Does the command already reach for an index that covers EVERY root it
+    searches?
+
+    `command_already_uses_indexed_search` answers "is an indexed tool in this
+    command at all", which is the wrong question for a mixed WSL search:
+    `find "$HOME" /mnt/c/Users -name x; es -path "C:\\Users" x` mentions `es`,
+    but Everything indexes only the Windows half, so the expensive crawl of
+    the Linux half is still unanswered (Codex P2, PR #1). With no roots to
+    go on this falls back to the plain "an index is present" answer.
+    """
+    command = command or ""
+    if is_windows(windows):
+        return command_already_uses_indexed_search(command, windows, wsl)
+    if not _wsl_default(wsl) or not roots:
+        return command_already_uses_indexed_search(command, windows, wsl)
+    both_sides = any_root_is_wsl_fs_root(roots)
+    needs_linux = both_sides or any_root_is_linux_side(roots)
+    needs_windows = both_sides or any_root_is_windows_host(roots)
+    if needs_linux and not _LOCATE_RE.search(command):
+        return False
+    if needs_windows and not _command_position_is_es(command):
+        return False
+    return True
+
+
 # --- scope x search_intent policy table -------------------------------------
 #
 # scope (disk_wide / single_repo / single_dir / stdin / unknown) is a fact
@@ -688,10 +754,20 @@ def evaluate_search(scope, search_intent, confidence, command, root_has_graphify
     suggestion = None
 
     if meets_deny_bar(confidence, margin):
+        # A root on the Windows host is deny-eligible whatever the scope
+        # says. `find /mnt/c/Users -name x` is a single directory by the
+        # scope table, but it is still a crawl of the Windows filesystem
+        # over the 9p bridge, and Everything answers it instantly
+        # (Codex P1, PR #1).
+        windows_host_root = (
+            not is_windows(windows)
+            and _wsl_default(wsl)
+            and any_root_is_windows_host(roots)
+        )
         if (
-            scope == "disk_wide"
+            (scope == "disk_wide" or windows_host_root)
             and search_intent == "filename_search"
-            and not command_already_uses_indexed_search(command, windows, wsl)
+            and not command_covers_roots(command, roots, windows, wsl)
         ):
             would_deny = True
             suggestion = filename_search_suggestion(windows, roots, wsl)
