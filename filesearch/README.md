@@ -42,6 +42,13 @@ sudo apt install plocate
 plocate -d ~/.cache/plocate/home.db -i '<pattern>'
 ```
 
+If this component is not installed, the guard falls back to plocate's own
+`/var/lib/plocate/plocate.db` and suggests `plocate -i '<pattern>'`, which
+indexes whatever `updatedb` was configured to index rather than `$HOME`
+alone. With no plocate database at all, and on WSL with no `es` on PATH,
+the guard suggests nothing and allows the crawl: a deny naming a tool the
+machine does not have takes away the only command that would have worked.
+
 Rebuild it on demand when a file made in the last hour is missing:
 
 ```bash

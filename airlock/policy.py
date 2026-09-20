@@ -459,6 +459,31 @@ ES_WSL_WHOLE_FS_SUGGESTION = (
 )
 GRAPHIFY_SUGGESTION = "graphify query"
 
+
+def _es_ok(windows=None, has_es=None):
+    return es_available(windows) if has_es is None else bool(has_es)
+
+
+_HOME_DB_LINE = "plocate -d ~/.cache/plocate/home.db -i '<pattern>'"
+
+
+def _with_plocate_line(template, plocate_line):
+    """`template` with the plocate invocation this machine can actually
+    run. The constant itself is returned untouched when the machine has
+    the home database the constants were written for, so a caller can
+    still compare against it by identity."""
+    if plocate_line == _HOME_DB_LINE:
+        return template
+    return template.replace(_HOME_DB_LINE, plocate_line, 1)
+
+
+def _mixed_suggestion(plocate_line):
+    return _with_plocate_line(ES_WSL_MIXED_SUGGESTION, plocate_line)
+
+
+def _whole_fs_suggestion(plocate_line):
+    return _with_plocate_line(ES_WSL_WHOLE_FS_SUGGESTION, plocate_line)
+
 # A WSL mount point for a Windows drive: "/mnt/c", "/mnt/c/Users/...".
 _WSL_MOUNT_RE = re.compile(r"^/mnt/([A-Za-z])(?=/|$)")
 
@@ -502,42 +527,156 @@ def any_root_is_linux_side(roots):
     return False
 
 
-def root_is_home_indexed(root, home=None):
-    """True when plocate's `~/.cache/plocate/home.db` actually covers `root`.
+# Which replacement commands this machine can actually run, and which
+# plocate database it has. Steering a session to a tool it does not have
+# is worse than the crawl: the deny blocks the only command that would
+# have worked. Both are cached -- the deny path is rare, but the answer
+# cannot change inside one hook call, and `shutil` is imported lazily so
+# this costs nothing on the calls that never reach a deny.
+_AVAILABILITY_CACHE = {}
 
-    That database indexes $HOME and nothing else, so a Linux-side root such
-    as /opt or /etc is NOT covered by it -- reading every non-Windows root
-    as "plocate's ground" made the mixed suggestion promise results it
-    cannot return (Codex P1, PR #1)."""
+#: plocate's own default database, indexing whatever updatedb was told to
+#: index (the whole filesystem, minus its prune list, on a stock install).
+SYSTEM_PLOCATE_DB = "/var/lib/plocate/plocate.db"
+#: The $HOME-only database this kit's own filesearch timer builds.
+HOME_PLOCATE_DB = "~/.cache/plocate/home.db"
+
+
+def _tool_on_path(name):
+    """shutil.which(name), cached, never raising."""
+    key = ("which", name)
+    if key not in _AVAILABILITY_CACHE:
+        try:
+            import shutil
+            _AVAILABILITY_CACHE[key] = bool(shutil.which(name))
+        except Exception:
+            _AVAILABILITY_CACHE[key] = False
+    return _AVAILABILITY_CACHE[key]
+
+
+def es_available(windows=None):
+    """Is Everything's client reachable? `es.exe` on native Windows, the
+    bare `es` under WSL (where Windows' own executable-search rules do not
+    apply)."""
+    if is_windows(windows):
+        return _tool_on_path("es.exe") or _tool_on_path("es")
+    return _tool_on_path("es")
+
+
+def plocate_db_kind():
+    """Which plocate database this machine has, and so what it covers:
+
+    - "home": this kit's `~/.cache/plocate/home.db`, which indexes $HOME
+      and nothing else, so /etc and /opt are NOT in it.
+    - "system": plocate's own /var/lib/plocate/plocate.db, which indexes
+      the whole Linux side.
+    - None: plocate is not installed, or has no database. There is then no
+      replacement to offer for a Linux-side root, and offering one anyway
+      produces a deny whose suggestion fails with "no such file".
+
+    The home database wins when both exist, because it is the one this kit
+    installs and keeps current.
+    """
+    try:
+        key = ("plocate_db", os.path.expanduser("~"))
+    except Exception:
+        key = ("plocate_db", "")
+    if key not in _AVAILABILITY_CACHE:
+        kind = None
+        try:
+            if _tool_on_path("plocate") or _tool_on_path("locate"):
+                if os.path.exists(os.path.expanduser(HOME_PLOCATE_DB)):
+                    kind = "home"
+                elif os.path.exists(SYSTEM_PLOCATE_DB):
+                    kind = "system"
+        except Exception:
+            kind = None
+        _AVAILABILITY_CACHE[key] = kind
+    return _AVAILABILITY_CACHE[key]
+
+
+def plocate_command(db_kind=None):
+    """The plocate invocation to suggest, matching the database present."""
+    kind = db_kind if db_kind is not None else plocate_db_kind()
+    if kind == "home":
+        return "plocate -d %s -i '<pattern>'" % HOME_PLOCATE_DB
+    return "plocate -i '<pattern>'"
+
+
+def resolve_root(root):
+    """`root` with symlinks resolved.
+
+    A Linux-side path can BE Windows-host ground: ~/notes/vault is a
+    symlink into /mnt/c on this machine, so a search there is a crawl over
+    the 9p bridge that plocate's index has never seen (updatedb does not
+    follow symlinks out of $HOME). Classifying the unresolved path sends
+    the session to the one index that cannot answer it -- the same failure
+    this branch exists to fix, one indirection along. Falls back to the
+    original string if the path cannot be resolved."""
+    if not root:
+        return root
+    try:
+        return os.path.realpath(os.path.expanduser(str(root)))
+    except Exception:
+        return root
+
+
+def resolve_roots(roots):
+    """resolve_root over a possibly-None list, order and length preserved."""
+    return [resolve_root(r) for r in roots or []]
+
+
+def root_is_plocate_covered(root, home=None, db_kind=None):
+    """True when the plocate database this machine has actually covers
+    `root`.
+
+    With the kit's own home.db that means $HOME and below, and a Linux
+    root such as /opt or /etc is NOT in it -- reading every non-Windows
+    root as "plocate's ground" made the mixed suggestion promise results
+    it cannot return (Codex P1, PR #1). With plocate's system database the
+    whole Linux side is indexed. With no database at all, nothing is."""
     if not root:
         return False
+    kind = db_kind if db_kind is not None else plocate_db_kind()
+    if kind is None:
+        return False
     try:
-        base = os.path.normpath(home or os.path.expanduser("~"))
         r = os.path.normpath(str(root))
     except Exception:
         return False
     if root_is_windows_host(r):
         return False
+    if root_is_wsl_fs_root(r):
+        # "/" also reaches every mounted Windows drive, which no plocate
+        # database holds.
+        return False
+    if kind == "system":
+        return True
+    try:
+        base = os.path.normpath(home or os.path.expanduser("~"))
+    except Exception:
+        return False
     return r == base or r.startswith(base.rstrip("/") + "/")
 
 
-def any_root_is_home_indexed(roots, home=None):
-    """root_is_home_indexed over a possibly-None/empty list of roots."""
+def any_root_is_plocate_covered(roots, home=None, db_kind=None):
+    """root_is_plocate_covered over a possibly-None/empty list of roots."""
     for root in roots or []:
-        if root_is_home_indexed(root, home):
+        if root_is_plocate_covered(root, home, db_kind):
             return True
     return False
 
 
-def any_root_is_uncovered_linux(roots, home=None):
-    """True when a root is Linux-side ground that NEITHER index holds: a
-    Linux path outside $HOME, or '/' itself (which also reaches every
-    /mnt/<drive>). These are the roots a replacement command must keep
-    crawling, or it reports files there as absent."""
+def any_root_is_uncovered_linux(roots, home=None, db_kind=None):
+    """True when a root is Linux-side ground NO index holds: a Linux path
+    the plocate database does not cover, or '/' itself (which also reaches
+    every /mnt/<drive>). These are the roots a replacement command must
+    keep crawling, or it reports files there as absent."""
     for root in roots or []:
         if root_is_wsl_fs_root(root):
             return True
-        if not root_is_windows_host(root) and not root_is_home_indexed(root, home):
+        if not root_is_windows_host(root) \
+                and not root_is_plocate_covered(root, home, db_kind):
             return True
     return False
 
@@ -567,7 +706,8 @@ def any_root_is_wsl_fs_root(roots):
 # The indexed tool this platform already has. One function so the rule text,
 # the deny reason and the doctor all say the same thing on each OS, and no
 # caller has to test sys.platform for itself.
-def filename_search_suggestion(windows=None, roots=None, wsl=None):
+def filename_search_suggestion(windows=None, roots=None, wsl=None,
+                               db_kind=None, has_es=None):
     """The command to run INSTEAD of a disk-wide filename crawl.
 
     Native Windows always gets ES_SUGGESTION. Otherwise, under WSL, a root
@@ -585,21 +725,32 @@ def filename_search_suggestion(windows=None, roots=None, wsl=None):
     windows=-only call sites keep working unchanged; a failure to detect WSL
     is treated as False, never raised."""
     if is_windows(windows):
-        return ES_SUGGESTION
-    if wsl is None:
-        try:
-            from . import headless
-            wsl = headless.is_wsl()
-        except Exception:
-            wsl = False
+        return ES_SUGGESTION if _es_ok(windows, has_es) else None
+    wsl = _wsl_default(wsl)
+    roots = resolve_roots(roots)
+    kind = db_kind if db_kind is not None else plocate_db_kind()
+    plocate_line = plocate_command(kind)
     if wsl:
-        if any_root_is_uncovered_linux(roots):
-            return ES_WSL_WHOLE_FS_SUGGESTION
-        if any_root_is_windows_host(roots):
-            if any_root_is_home_indexed(roots):
-                return ES_WSL_MIXED_SUGGESTION
+        has_es = _es_ok(windows, has_es)
+        needs_es = any_root_is_windows_host(roots) or any_root_is_wsl_fs_root(roots)
+        covered = any_root_is_plocate_covered(roots, db_kind=kind)
+        uncovered = any_root_is_uncovered_linux(roots, db_kind=kind)
+        if needs_es and not has_es:
+            # Everything is the only thing that can answer a Windows-host
+            # root. Without it there is no replacement to offer, and a deny
+            # would block the one command that does work.
+            return None
+        if uncovered:
+            return _whole_fs_suggestion(plocate_line) if has_es else None
+        if needs_es:
+            if covered:
+                return _mixed_suggestion(plocate_line)
             return ES_WSL_SUGGESTION
-    return PLOCATE_SUGGESTION
+    if kind is None:
+        return None
+    if plocate_line == _HOME_DB_LINE:
+        return PLOCATE_SUGGESTION
+    return plocate_line
 
 
 _LOCATE_RE = re.compile(r"(?<![A-Za-z0-9_])(plocate|locate)(?![A-Za-z0-9_])")
@@ -754,12 +905,13 @@ def command_covers_roots(command, roots=None, windows=None, wsl=None):
         return command_already_uses_indexed_search(command, windows, wsl)
     if not _wsl_default(wsl) or not roots:
         return command_already_uses_indexed_search(command, windows, wsl)
+    roots = resolve_roots(roots)
     if any_root_is_uncovered_linux(roots):
         # Ground no index holds: naming plocate and es cannot answer it, so
         # the crawl is not already covered however many indexes appear.
         return False
     needs_windows = any_root_is_windows_host(roots)
-    if any_root_is_home_indexed(roots) and not _LOCATE_RE.search(command):
+    if any_root_is_plocate_covered(roots) and not _LOCATE_RE.search(command):
         return False
     if needs_windows and not _command_position_is_es(command):
         return False
@@ -802,18 +954,22 @@ def evaluate_search(scope, search_intent, confidence, command, root_has_graphify
         # scope table, but it is still a crawl of the Windows filesystem
         # over the 9p bridge, and Everything answers it instantly
         # (Codex P1, PR #1).
+        resolved = resolve_roots(roots)
         windows_host_root = (
             not is_windows(windows)
             and _wsl_default(wsl)
-            and any_root_is_windows_host(roots)
+            and any_root_is_windows_host(resolved)
         )
         if (
             (scope == "disk_wide" or windows_host_root)
             and search_intent == "filename_search"
             and not command_covers_roots(command, roots, windows, wsl)
         ):
-            would_deny = True
             suggestion = filename_search_suggestion(windows, roots, wsl)
+            # No usable replacement on this machine means no deny. Blocking
+            # a crawl and naming a tool the box does not have takes away the
+            # only command that would have answered the question.
+            would_deny = suggestion is not None
         elif search_intent == "code_structure_search" and root_has_graphify_graph:
             would_deny = True
             suggestion = GRAPHIFY_SUGGESTION
@@ -854,17 +1010,27 @@ def deny_possible_bash(scope, program, root_has_graphify_graph,
     Everything else -- single_repo/single_dir/stdin/unknown scope with no
     graph, or an already-locate command -- can never deny regardless of what
     Jev answers, so it is safe to skip the call."""
-    if scope == "disk_wide" and program not in SKIP_LOCATE_FAMILY:
+    resolved = resolve_roots(roots)
+    on_wsl = not is_windows(windows) and _wsl_default(wsl)
+    # An indexed program in the command excuses the call only when that
+    # index covers every root searched: naming plocate while another stage
+    # crawls the Windows host leaves the crawl unanswered, and Everything
+    # covers nothing on the Linux side (Codex P2, PR #1).
+    indexed_program = program in SKIP_LOCATE_FAMILY
+    if indexed_program and on_wsl and resolved:
+        if program == "es":
+            indexed_program = all(root_is_windows_host(r) for r in resolved)
+        else:
+            indexed_program = not (any_root_is_windows_host(resolved)
+                                   or any_root_is_uncovered_linux(resolved))
+    if scope == "disk_wide" and not indexed_program:
         return True
     # A root on the Windows host is deny-eligible whatever the scope says,
     # matching evaluate_search's own branch: `find /mnt/c/Users -name x`
     # scopes as single_dir and is still a crawl of the Windows filesystem.
     # Without this the guard skipped the call as "no deny possible" and the
     # branch below could never run (Codex P1, PR #1).
-    if (program not in SKIP_LOCATE_FAMILY
-            and not is_windows(windows)
-            and _wsl_default(wsl)
-            and any_root_is_windows_host(roots)):
+    if not indexed_program and on_wsl and any_root_is_windows_host(resolved):
         return True
     if program in GREP_LIKE_PROGRAMS and root_has_graphify_graph:
         return True

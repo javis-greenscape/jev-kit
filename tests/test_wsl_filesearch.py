@@ -16,11 +16,21 @@ _ABOVE_BAR_MARGIN = 0.6
 _HOME = mock.patch.dict(os.environ, {"HOME": "/home/alice"})
 
 
+# The suggestion now depends on what the machine has: Everything's client
+# on PATH, and which plocate database exists. Pin both, so the file asserts
+# the policy rather than the box it runs on.
+_AVAIL = mock.patch.multiple(policy,
+                             es_available=lambda *a, **k: True,
+                             plocate_db_kind=lambda *a, **k: "home")
+
+
 def setUpModule():
     _HOME.start()
+    _AVAIL.start()
 
 
 def tearDownModule():
+    _AVAIL.stop()
     _HOME.stop()
 
 
@@ -320,9 +330,93 @@ class TestPrefilterLetsWindowsHostRootsThrough(unittest.TestCase):
         self.assertFalse(policy.deny_possible_bash(
             "single_dir", "find", False, roots=["/home/alice/notes"], wsl=True))
 
+    def test_a_plocate_command_that_still_crawls_the_host_is_judged(self):
+        # Codex P2, PR #1: the program is plocate, so the prefilter skipped
+        # the call, but another stage crawls /mnt/c/Users.
+        self.assertTrue(policy.deny_possible_bash(
+            "disk_wide", "plocate", False,
+            roots=["/home/alice", "/mnt/c/Users"], wsl=True))
+
     def test_an_es_command_is_still_skipped(self):
         self.assertFalse(policy.deny_possible_bash(
             "single_dir", "es", False, roots=["/mnt/c/Users"], wsl=True))
+
+
+class TestTheAdviceMatchesTheMachine(unittest.TestCase):
+    """Found by audit, not by review: every suggestion above names tools
+    and a database that this repository's author happens to have. On any
+    other machine the deny would block the crawl and hand back a command
+    that fails."""
+
+    def test_no_everything_client_means_no_deny_for_a_windows_root(self):
+        with mock.patch.object(policy, "es_available", lambda *a, **k: False):
+            self.assertIsNone(policy.filename_search_suggestion(
+                windows=False, roots=["/mnt/c/Users"], wsl=True))
+            verdict = policy.evaluate_search(
+                scope="disk_wide", search_intent="filename_search",
+                confidence=_ABOVE_BAR_CONFIDENCE, command="find /mnt/c -name x",
+                root_has_graphify_graph=False, margin=_ABOVE_BAR_MARGIN,
+                roots=["/mnt/c"], wsl=True)
+            self.assertFalse(verdict["would_deny"])
+            self.assertIsNone(verdict["suggestion"])
+
+    def test_no_plocate_database_means_no_deny_on_plain_linux(self):
+        with mock.patch.object(policy, "plocate_db_kind", lambda *a, **k: None):
+            self.assertIsNone(policy.filename_search_suggestion(
+                windows=False, roots=["/home/alice"], wsl=False))
+
+    def test_a_system_database_names_itself_and_covers_the_linux_side(self):
+        with mock.patch.object(policy, "plocate_db_kind", lambda *a, **k: "system"):
+            self.assertEqual(
+                policy.filename_search_suggestion(
+                    windows=False, roots=["/opt"], wsl=False),
+                "plocate -i '<pattern>'")
+            # /opt IS indexed by the system database, so a mixed search gets
+            # the two-index advice rather than the keep-crawling one.
+            s = policy.filename_search_suggestion(
+                windows=False, roots=["/opt", "/mnt/c"], wsl=True)
+            self.assertIn("plocate -i '<pattern>'", s)
+            self.assertIn("es -path", s)
+            self.assertNotIn("home.db", s)
+
+    def test_the_home_database_does_not_claim_ground_it_lacks(self):
+        with mock.patch.object(policy, "plocate_db_kind", lambda *a, **k: "home"):
+            self.assertIs(
+                policy.filename_search_suggestion(
+                    windows=False, roots=["/opt", "/mnt/c"], wsl=True),
+                policy.ES_WSL_WHOLE_FS_SUGGESTION)
+
+
+class TestASymlinkOutOfHomeIsWindowsGround(unittest.TestCase):
+    """Found by audit: ~/notes/vault on the author's machine is a symlink
+    into /mnt/c. Classifying the unresolved path calls it Linux-side and
+    steers to plocate, whose index never followed the symlink -- the same
+    "file reported absent" failure this branch was opened to fix."""
+
+    def setUp(self):
+        import tempfile
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.link = os.path.join(self.tmp.name, "vault")
+        self.target = os.path.join(self.tmp.name, "mnt_c_target")
+        os.makedirs(self.target)
+        os.symlink(self.target, self.link)
+
+    def test_resolve_root_follows_the_symlink(self):
+        self.assertEqual(policy.resolve_root(self.link), self.target)
+
+    def test_resolve_root_survives_a_broken_link(self):
+        broken = os.path.join(self.tmp.name, "gone")
+        os.symlink(os.path.join(self.tmp.name, "nothing-here"), broken)
+        self.assertTrue(policy.resolve_root(broken))
+
+    def test_a_home_path_resolving_onto_the_windows_host_gets_everything(self):
+        with mock.patch.object(policy, "resolve_root",
+                               lambda r: "/mnt/c/Users/x" if r == "~/notes/vault" else r):
+            self.assertIs(
+                policy.filename_search_suggestion(
+                    windows=False, roots=["~/notes/vault"], wsl=True),
+                policy.ES_WSL_SUGGESTION)
 
 
 class TestEsOnlyInCommandPosition(unittest.TestCase):

@@ -29,7 +29,7 @@ detail is [docs/components.md](docs/components.md), the rules table is
 
 **Working on the code?** Three checks have to pass.
 
-- `python3 -m unittest discover -s tests`. 1066 tests on Linux. The same suite
+- `python3 -m unittest discover -s tests`. 1104 tests on Linux. The same suite
   on native Windows Python skips the POSIX-only ones and passes the rest, and
   no test requires Windows to pass.
 - `python3 tools/check_docs.py`. It resolves every relative link in the README
