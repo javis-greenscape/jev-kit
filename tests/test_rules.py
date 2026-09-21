@@ -1099,6 +1099,14 @@ class TestR11BrowseViaJev(unittest.TestCase):
                             "import { test, chromium } from '@playwright/test';\n")
         for c in ("node %s" % spec, "npx tsx %s" % spec):
             self.assert_silent(self.ctx(c), c)
+        # A scraper does not become a test by moving house.
+        scraper = self._script(os.path.join("e2e", "scrape.spec.js"),
+                               "const { chromium } = require('playwright');\n"
+                               "chromium.connectOverCDP('http://127.0.0.1:9333');\n")
+        self.assert_asks(self.ctx("node %s" % scraper))
+        # An unreadable file keeps the path's answer: this rule never blocks
+        # test code on a guess.
+        self.assert_silent(self.ctx("node e2e/gone.spec.js"))
         self.assertTrue(rules._pw_is_test_path("e2e/login.spec.ts"))
         self.assertTrue(rules._pw_is_test_path("tests/browse.js"))
         self.assertFalse(rules._pw_is_test_path("scripts/verify.js"))
@@ -1115,6 +1123,22 @@ class TestR11BrowseViaJev(unittest.TestCase):
                      "import { chromium } from 'playwright-chromium';\n"):
             path = self._script("w%d.js" % len(body), body)
             self.assert_asks(self.ctx("node %s" % path), body)
+
+    def test_package_json_is_read_once_per_scan(self):
+        self._script("scrape.js", "const { chromium } = require('playwright');\n")
+        self._script("package.json", json.dumps({"scripts": {
+            "lint": "eslint .", "build": "tsc", "browse": "node scrape.js"}}))
+        real = open
+        reads = []
+
+        def counting_open(path, *a, **kw):
+            if str(path).endswith("package.json"):
+                reads.append(path)
+            return real(path, *a, **kw)
+
+        with mock.patch("builtins.open", counting_open):
+            self.assert_asks(self.ctx("npm run lint && npm run build && npm run browse"))
+        self.assertEqual(len(reads), 1, reads)
 
     def test_a_package_script_chain_is_followed(self):
         self._script("scrape.js", "const { chromium } = require('playwright');\n")
@@ -1179,11 +1203,10 @@ class TestR11BrowseViaJev(unittest.TestCase):
         self.assertIsNotNone(rules._pw_scan(rules.split_segments(abs_cd), "", 0))
 
     def test_a_missing_or_huge_script_is_read_safely(self):
-        self.assertEqual(rules._pw_script_source("/nonexistent/x.js", self.tmp), "")
-        self.assertEqual(rules._pw_script_source("--flag", self.tmp), "")
-        self.assertEqual(rules._pw_script_source("README", self.tmp), "")
+        for tok in ("/nonexistent/x.js", "--flag", "README"):
+            self.assertEqual(rules._pw_resolve_script(tok, self.tmp), ("", ""), tok)
         big = self._script("big.js", "x" * (rules._PW_MAX_SCRIPT_BYTES + 1))
-        self.assertEqual(rules._pw_script_source(big, self.tmp), "")
+        self.assertEqual(rules._pw_resolve_script(big, self.tmp), ("", ""))
 
     # --- config ---------------------------------------------------------------
 

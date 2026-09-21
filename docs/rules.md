@@ -187,7 +187,10 @@ segment that actually runs a file with a script extension.
 Three things never match at all. A test run is e2e code, not browsing:
 `playwright test`, `vitest`, `jest`, `pytest`, `npm test`, `pnpm run test:e2e`,
 and a spec file run straight through an interpreter (`node e2e/login.spec.js`),
-which is how somebody debugs one.
+which is how somebody debugs one. The path raises that question and the file
+answers it: a scraper moved under `e2e/` or renamed `.spec.js` is still a
+scraper, while a file that cannot be read keeps the path's answer, because
+test code must never be blocked.
 A script that does not import Playwright is nothing to do with this rule. And
 a command that is already running the Jev agent is the thing the rule asks
 for, so it is never the thing the rule catches: a script resolving inside the

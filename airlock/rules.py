@@ -4,8 +4,8 @@ This module has no network and no logging, and its only filesystem access is
 the cheap upward walk the legacy tool-choice rule already did, one stat of
 the key-file pointer for R1 (see `_pointer_secret_path_res`, which caches on
 that stat), and one bounded read of a script a command names for R11 (see
-`_pw_script_source`: one isfile, one size check, at most 256KB, and only when
-a segment actually runs a file with a script extension). It answers, in microseconds, one question for a PreToolUse payload:
+`_pw_resolve_script`: one isfile, one size check, at most 256KB, and only
+when a segment actually runs a file with a script extension). It answers, in microseconds, one question for a PreToolUse payload:
 
     could any rule possibly fire for this call?
 
@@ -217,10 +217,14 @@ def words(segment):
     return out
 
 
-def program_of(segment):
+def program_of(segment, toks=None):
     """First real command word of a segment, skipping leading VAR=val
-    assignments and wrappers like nice/time. Returns (program, args)."""
-    toks = words(segment)
+    assignments and wrappers like nice/time. Returns (program, args).
+
+    `toks` lets a caller that has already tokenised the segment hand the
+    tokens in rather than paying for the split twice; R11 scans every Bash
+    call, so that second split is not free."""
+    toks = words(segment) if toks is None else list(toks)
     while toks:
         if _ASSIGN_RE.match(toks[0]):
             toks = toks[1:]
@@ -1559,7 +1563,8 @@ def general_risk_suppression(answers):
 # it, so sessions kept hand-writing Playwright scripts at Sonnet prices. This
 # rule is that steer.
 #
-# It is the one rule that reads a file the command names: a script path handed
+# It is the one rule that reads a file the command names (_pw_resolve_script):
+# a script path handed
 # to node or python says nothing about Playwright from the command line alone.
 # The read is bounded (one isfile, one size check, at most 256KB) and happens
 # only when a segment actually runs a script with a script extension.
@@ -1672,13 +1677,13 @@ _PW_JEV_PATH_MARKERS = ("jev-ultrafast", "jev_ultrafast")
 _PW_CDP_VAR = "BU_CDP_URL="
 
 
-def _pw_sets_cdp(seg):
+def _pw_sets_cdp(seg, toks=None):
     """True only for a real assignment of BU_CDP_URL in this segment: a
     leading `VAR=val` prefix, or a word of an `export`. A regex over the raw
     text was too loose -- `echo "note: BU_CDP_URL=... was set"` matched it,
     and words() splits on whitespace, so the quoted text is tokens too. What
     makes it an assignment is its POSITION, not the string."""
-    toks = words(seg)
+    toks = words(seg) if toks is None else list(toks)
     # `env BU_CDP_URL=... node x.js` declares it exactly as a bare prefix
     # does, and R11 unwraps `env` everywhere else.
     if toks[:1] == ["env"]:
@@ -1825,11 +1830,6 @@ def _pw_resolve_script(tok, cwd):
         return "", ""
 
 
-def _pw_script_source(tok, cwd):
-    """Just the text. Kept for readability where the path is not wanted."""
-    return _pw_resolve_script(tok, cwd)[1]
-
-
 # A package script whose NAME says it runs tests. `npm run scrape` is not one
 # of these, and is followed into package.json instead.
 _PW_TEST_SCRIPT_RE = re.compile(r"(?:^|[:_-])(?:test|tests|e2e|spec|ct|vitest|jest|mocha)(?:$|[:_-])")
@@ -1852,6 +1852,14 @@ _PM_EXEC_VERBS = {"npm": ("exec", "x"), "pnpm": ("exec", "dlx"), "yarn": ("exec"
 def _pm_operands(prog, args):
     """What a package manager is being asked to run, with its own verb
     stripped: ("script"|"binary", [tokens]) or (None, []).
+
+    R3 (prefilter_wide_run) parses npm/pnpm/yarn inline and does NOT use
+    this, deliberately. R3 asks a different question -- did this run name a
+    path and cap its workers -- and answers it from the flags, never from
+    what binary ends up running, so sharing a parser would couple two rules
+    that agree on nothing but the program name. R3's behaviour is also
+    pinned by its own labelled eval cases, and this rule is not a reason to
+    move them.
 
     `npm run build` and `yarn build` are both a script; `npx playwright open`
     and `yarn playwright open` are both a binary. Yarn and pnpm let the verb
@@ -1890,6 +1898,31 @@ def _pw_is_test_path(path):
     return bool(_PW_TEST_PATH_RE.search(path.replace(os.sep, "/")))
 
 
+# What a file that really is a test contains. A path can be moved; a test
+# body cannot be faked into a scraper.
+_PW_TEST_BODY_RE = re.compile(
+    r"""['"]@playwright/test['"]"""
+    r"""|\bdescribe\s*\(|\bit\s*\(|\btest\s*\(|\btest\.(?:describe|beforeEach|step)\b"""
+    r"""|^\s*def\s+test_|\bpytest\b""",
+    re.M,
+)
+
+
+def _pw_looks_like_a_test(prog, args, cwd):
+    """True for a spec run straight through an interpreter. The PATH raises
+    the question and the FILE answers it: moving a scraper under `e2e/` or
+    renaming it `.spec.js` must not exempt it, but `node e2e/login.spec.js`
+    really is how somebody debugs a spec. An unreadable file keeps the path's
+    answer, because this rule must never block test code."""
+    operand = _pw_first_operand(args)
+    if not _pw_is_test_path(operand):
+        return False
+    src = _pw_resolve_script(operand, cwd)[1]
+    if not src:
+        return True
+    return bool(_PW_TEST_BODY_RE.search(src))
+
+
 def _pw_is_test_run(prog, args):
     """True for a run of e2e code: a test runner, or a package script whose
     name says it runs tests. These are always allowed -- writing and running
@@ -1914,7 +1947,7 @@ def _pw_is_test_run(prog, args):
     return False
 
 
-def _pw_package_script(prog, args, cwd):
+def _pw_package_script(prog, args, cwd, cache=None):
     """The command line behind `npm run <name>`, or "". `npm run scrape` says
     nothing about Playwright by itself; the script it names might. One
     bounded read of package.json in the working directory. Never raises."""
@@ -1929,10 +1962,19 @@ def _pw_package_script(prog, args, cwd):
         if not cwd:
             return ""
         path = os.path.join(cwd, "package.json")
-        if not os.path.isfile(path) or os.path.getsize(path) > _PW_MAX_SCRIPT_BYTES:
+        # One read per package.json per scan: `npm run lint && npm run build
+        # && npm run browse` is three segments against the same file.
+        if cache is not None and path in cache:
+            data = cache[path]
+        else:
+            data = None
+            if os.path.isfile(path) and os.path.getsize(path) <= _PW_MAX_SCRIPT_BYTES:
+                with open(path, "r", errors="replace") as f:
+                    data = json.load(f)
+            if cache is not None:
+                cache[path] = data
+        if data is None:
             return ""
-        with open(path, "r", errors="replace") as f:
-            data = json.load(f)
         script = ((data or {}).get("scripts") or {}).get(name)
         return script if isinstance(script, str) else ""
     except Exception:
@@ -1962,13 +2004,16 @@ def prefilter_browser_driving(ctx):
     return _pw_scan(ctx["segments"], ctx.get("cwd") or "", 0)
 
 
-def _pw_scan(segments, cwd, depth, cdp=False):
+def _pw_scan(segments, cwd, depth, cdp=False, cache=None):
     """Look for a browser-driving segment. `depth` bounds the one recursion:
     a package script named by `npm run <name>` is followed at most
     _PW_MAX_SCRIPT_HOPS deep, which is what stops a script calling itself."""
     cur_cwd = cwd
+    if cache is None:
+        cache = {}
     for seg in segments:
-        prog, args = program_of(seg)
+        toks = words(seg)
+        prog, args = program_of(seg, toks)
         if prog == "cd":
             # A `cd` carries into the segments after it, so a later `node
             # run_goal.js` inside the agent's checkout is still the agent.
@@ -1987,7 +2032,7 @@ def _pw_scan(segments, cwd, depth, cdp=False):
                     # Same reasoning as _pw_resolve_script's own guard.
                     cur_cwd = ""
             continue
-        if _pw_sets_cdp(seg):
+        if _pw_sets_cdp(seg, toks):
             # An assignment or export exempts the segments AFTER it, whatever
             # they run: handing a CDP port to a harness is a declaration that
             # the agent is driving, and the recipe's runner script lives
@@ -2023,16 +2068,16 @@ def _pw_scan(segments, cwd, depth, cdp=False):
         # unrelated variable set. None of them is the agent.
         if _pw_names_the_agent(prog) or _pw_names_the_agent(_pw_first_operand(args)):
             continue
-        if _pw_is_test_run(prog, args) or _pw_is_test_path(_pw_first_operand(args)):
+        if _pw_is_test_run(prog, args) or _pw_looks_like_a_test(prog, args, cur_cwd):
             continue
 
         if depth < _PW_MAX_SCRIPT_HOPS:
-            script = _pw_package_script(prog, args, cur_cwd)
+            script = _pw_package_script(prog, args, cur_cwd, cache)
             if script:
                 # `cdp` carries in: a script reached through `npm run` is
                 # no less CDP-attached than one named directly.
                 found = _pw_scan(split_segments(strip_heredocs(script)), cur_cwd,
-                                 depth + 1, cdp)
+                                 depth + 1, cdp, cache)
                 if found is not None:
                     return found
                 continue
@@ -2070,7 +2115,7 @@ def _pw_scan(segments, cwd, depth, cdp=False):
         # The package-manager and npx branches above may have replaced the
         # program with the interpreter they wrap, so the test checks run
         # again on what is really being run.
-        if _pw_is_test_run(prog, args) or _pw_is_test_path(_pw_first_operand(args)):
+        if _pw_is_test_run(prog, args) or _pw_looks_like_a_test(prog, args, cur_cwd):
             continue
         if any(a in _PW_INLINE_FLAGS for a in args):
             if _PW_IMPORT_INLINE_RE.search(seg):
