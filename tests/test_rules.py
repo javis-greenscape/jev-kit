@@ -874,3 +874,565 @@ class TestR1ProtectsTheKeyFilePointer(unittest.TestCase):
             self.assertEqual(rules.secret_path_res(), tuple(rules.SECRET_PATH_RES))
             self.assertTrue(fired(ctx_bash("cat ~/.config/airlock/env"),
                                   "R1-secret-exposure")[0]["fires"])
+
+
+class TestR11BrowseViaJev(unittest.TestCase):
+    """R11 steers a browse-and-report pass at the Jev-decided browser agent.
+    Detection is code; the browse-or-test half is Jev's; every failure of Jev
+    allows the call and prints the recipe instead."""
+
+    RID = "R11-browse-via-jev"
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(__import__("shutil").rmtree, self.tmp, True)
+
+    def _script(self, name, body):
+        path = os.path.join(self.tmp, name)
+        with open(path, "w") as f:
+            f.write(body)
+        return path
+
+    def ctx_mcp(self, tool_name, **ti):
+        return rules.build_ctx({"tool_name": tool_name, "tool_input": ti, "cwd": self.tmp},
+                               tool_name)
+
+    def ctx(self, command):
+        return rules.build_ctx({"tool_name": "Bash", "tool_input": {"command": command},
+                                "cwd": self.tmp}, "Bash")
+
+    def assert_asks(self, ctx, why=""):
+        rows = fired(ctx, self.RID)
+        self.assertTrue(rows, "R11 did not match: %s" % (why or ctx.get("command")))
+        self.assertIsNone(rows[0]["fires"], "R11 decided without Jev: %s" % why)
+
+    def assert_silent(self, ctx, why=""):
+        self.assertEqual(fired(ctx, self.RID), [], why or ctx.get("command"))
+
+    # --- detection: the positives --------------------------------------------
+
+    def test_a_node_script_importing_playwright_is_caught(self):
+        for name, body in (
+            ("verify.cjs", "const { chromium } = require('playwright');\n"),
+            ("verify.mjs", "import { chromium } from 'playwright-core';\n"),
+            ("verify.js", "const pw = await import('playwright/test');\n"),
+        ):
+            path = self._script(name, body)
+            self.assert_asks(self.ctx("node %s" % path), name)
+
+    def test_a_python_script_importing_playwright_is_caught(self):
+        path = self._script("verify.py", "from playwright.sync_api import sync_playwright\n")
+        self.assert_asks(self.ctx("python3 %s" % path))
+        self.assert_asks(self.ctx("uv run python3 %s" % path))
+
+    def test_an_inline_script_is_caught(self):
+        self.assert_asks(self.ctx("node -e \"const {chromium}=require('playwright')\""))
+        self.assert_asks(self.ctx("python3 -c 'from playwright.sync_api import sync_playwright'"))
+
+    def test_playwright_cli_other_than_the_tooling_verbs_is_caught(self):
+        for c in ("npx playwright open https://example.com",
+                  "npx playwright screenshot https://example.com out.png",
+                  "playwright codegen https://example.com"):
+            self.assert_asks(self.ctx(c), c)
+
+    def test_a_playwright_mcp_browsing_call_is_caught(self):
+        for tool in ("mcp__playwright__browser_navigate",
+                     "mcp__playwright__browser_click",
+                     "mcp__playwright__browser_take_screenshot",
+                     "mcp__plugin_playwright_playwright__browser_navigate",
+                     "mcp__plugin_playwright_playwright__browser_type"):
+            self.assert_asks(self.ctx_mcp(tool, url="https://example.com"), tool)
+
+    # --- detection: the negatives --------------------------------------------
+
+    def test_playwright_test_and_the_tooling_verbs_are_allowed(self):
+        for c in ("npx playwright test", "npx playwright test e2e/login.spec.ts",
+                  "npx playwright install chromium", "npx playwright install-deps",
+                  "npx playwright show-report", "playwright test --grep login"):
+            self.assert_silent(self.ctx(c), c)
+
+    def test_test_runners_are_allowed_even_with_a_playwright_script_named(self):
+        self._script("e2e.spec.ts", "import { test } from 'playwright/test';\n")
+        for c in ("vitest run e2e.spec.ts", "npm test", "pnpm run test:e2e",
+                  "pytest tests/test_browser.py", "python3 -m pytest tests/test_browser.py",
+                  "npx vitest run"):
+            self.assert_silent(self.ctx(c), c)
+
+    def test_a_script_that_does_not_touch_playwright_is_allowed(self):
+        path = self._script("build.js", "const fs = require('fs');\n")
+        self.assert_silent(self.ctx("node %s" % path))
+
+    def test_running_the_jev_browser_agent_is_never_caught(self):
+        path = self._script("run_goal.py", "from playwright.sync_api import sync_playwright\n")
+        # An export carries into the segments after it, whatever they run.
+        # That is a declared escape hatch, not a proof, and it is documented
+        # as one: see the note on the markers in airlock/rules.py and the R11
+        # section of docs/rules.md.
+        self.assert_silent(self.ctx("export BU_CDP_URL=http://127.0.0.1:9333 ; python3 %s" % path))
+        self.assert_silent(self.ctx("python3 ~/code/jev-ultrafast/run_goal.py"))
+        # An inline assignment does NOT bless the command it shares a segment
+        # with: that is still a hand-rolled script until its path says
+        # otherwise.
+        self.assert_asks(self.ctx("BU_CDP_URL=http://127.0.0.1:9333 python3 %s" % path))
+        self.assert_silent(self.ctx(
+            "BU_CDP_URL=http://127.0.0.1:9333 python3 ~/code/jev-ultrafast/run_goal.py"))
+
+    def test_a_cd_into_the_agent_carries_only_to_what_runs_inside_it(self):
+        """A `cd` sets the working directory for the segments after it. It
+        does not bless a script somewhere else on the same line."""
+        import shutil as _shutil
+        agent = os.path.join(self.tmp, "jev-ultrafast")
+        os.makedirs(agent, exist_ok=True)
+        self.addCleanup(_shutil.rmtree, agent, True)
+        with open(os.path.join(agent, "run_goal.py"), "w") as f:
+            f.write("from playwright.sync_api import sync_playwright\n")
+        outside = self._script("hand_written.js", "const { chromium } = require('playwright');\n")
+        self.assert_silent(self.ctx("cd %s && uv run python3 run_goal.py" % agent))
+        self.assert_asks(self.ctx("cd %s && node %s" % (agent, outside)),
+                         "a cd into the agent does not bless a script elsewhere")
+
+    def test_a_mention_of_the_agent_in_text_does_not_exempt_a_sibling(self):
+        path = self._script("verify.cjs", "const { chromium } = require('playwright');\n")
+        self.assert_asks(self.ctx("echo 'set BU_CDP_URL first' && node %s" % path))
+        self.assert_asks(self.ctx("echo jev-ultrafast is installed ; node %s" % path))
+
+    def test_a_mention_of_the_agent_elsewhere_does_not_exempt_the_line(self):
+        """The marker is read per segment. A segment that merely TALKS about
+        the agent must not exempt a sibling segment that drives a browser."""
+        path = self._script("verify.cjs", "const { chromium } = require('playwright');\n")
+        self.assert_asks(self.ctx("echo 'not using jev-ultrafast yet' && node %s" % path))
+        self.assert_asks(self.ctx("echo BU_CDP_URL is unset ; node %s" % path))
+
+    def test_uv_run_flag_values_are_not_mistaken_for_the_program(self):
+        """`uv run --with <pkg> python3 verify.py` runs python3. Dropping only
+        the tokens starting with a dash would make the program `<pkg>`."""
+        path = self._script("verify.py", "from playwright.sync_api import sync_playwright\n")
+        for c in ("uv run --with playwright-stealth python3 %s" % path,
+                  "uv run --python 3.12 python3 %s" % path,
+                  "uv run --env-file .env python3 %s" % path,
+                  "uv run --no-sync -- python3 %s" % path):
+            self.assert_asks(self.ctx(c), c)
+        self.assertEqual(rules._uv_run_program([]), (None, []))
+        self.assertEqual(rules._uv_run_program(["--with", "x"]), (None, []))
+        self.assertEqual(rules._uv_run_program(["--env-file=.env", "node", "a.js"]),
+                         ("node", ["a.js"]))
+
+    def test_a_package_script_that_drives_a_browser_is_followed(self):
+        """`npm run scrape` says nothing by itself. The script it names does."""
+        self._script("scrape.js", "const { chromium } = require('playwright');\n")
+        self._script("build.js", "const fs = require('fs');\n")
+        self._script("package.json", json.dumps({"scripts": {
+            "scrape": "node scrape.js",
+            "build": "node build.js",
+            "test:e2e": "node scrape.js",
+        }}))
+        for c in ("npm run scrape", "pnpm run scrape", "yarn run scrape"):
+            self.assert_asks(self.ctx(c), c)
+        self.assert_silent(self.ctx("npm run build"))
+        self.assert_silent(self.ctx("npm run nonexistent"))
+        # A script NAME is not evidence. `test:e2e` is followed like any
+        # other: what it RUNS decides.
+        self._script("package.json", json.dumps({"scripts": {
+            "scrape": "node scrape.js",
+            "build": "node build.js",
+            "test:e2e": "playwright test e2e/",
+            "test:scrape": "node scrape.js",
+        }}))
+        self.assert_silent(self.ctx("npm run test:e2e"))
+        self.assert_asks(self.ctx("npm run test:scrape"))
+
+    def test_a_later_script_argument_is_checked_too(self):
+        self._script("loader.mjs", "import './worker.mjs';\n")
+        self._script("worker.mjs", "import { chromium } from 'playwright';\n")
+        self.assert_asks(self.ctx("node %s/loader.mjs %s/worker.mjs" % (self.tmp, self.tmp)))
+
+    def test_uv_run_boolean_flags_are_not_given_a_value(self):
+        path = self._script("verify.py", "from playwright.sync_api import sync_playwright\n")
+        for c in ("uv run --no-project python3 %s" % path,
+                  "uv run --frozen python3 %s" % path):
+            self.assert_asks(self.ctx(c), c)
+
+    def test_env_wrapping_is_unwrapped(self):
+        path = self._script("verify.js", "const { chromium } = require('playwright');\n")
+        for c in ("env NODE_ENV=production node %s" % path,
+                  "env -u DISPLAY node %s" % path,
+                  "env node %s" % path):
+            self.assert_asks(self.ctx(c), c)
+        self.assertEqual(rules._env_program([]), (None, []))
+        self.assertEqual(rules._env_program(["A=1", "B=2"]), (None, []))
+        self.assertEqual(rules._env_program(["-u", "X", "node", "a.js"]), ("node", ["a.js"]))
+
+    def test_the_cdp_export_carries_into_a_package_script(self):
+        """The recipe's own shape: export the CDP url, then run it through a
+        package script. The inner scan must know the export happened."""
+        self._script("scrape.js", "const { chromium } = require('playwright');\n")
+        self._script("package.json", json.dumps({"scripts": {"scrape": "node scrape.js"}}))
+        self.assert_asks(self.ctx("npm run scrape"))
+        self.assert_silent(self.ctx(
+            "export BU_CDP_URL=http://127.0.0.1:9333 && npm run scrape"))
+
+    def test_more_mcp_browsing_verbs(self):
+        for action in ("browser_run_code_unsafe", "browser_find", "browser_drop",
+                       "browser_network_request", "browser_scroll"):
+            tool = "mcp__plugin_playwright_playwright__" + action
+            self.assert_asks(self.ctx_mcp(tool), tool)
+
+    def test_the_package_manager_shorthands(self):
+        """`yarn playwright open` runs the local binary exactly as `npx
+        playwright open` does, and `yarn scrape` is a package script."""
+        self._script("scrape.js", "const { chromium } = require('playwright');\n")
+        self._script("package.json", json.dumps({"scripts": {
+            "scrape": "node scrape.js", "test:e2e": "node scrape.js"}}))
+        for c in ("yarn playwright open https://x", "pnpm playwright codegen https://x",
+                  "pnpm exec playwright open https://x", "yarn dlx playwright open https://x",
+                  "npm exec playwright open https://x",
+                  "yarn scrape", "pnpm scrape"):
+            self.assert_asks(self.ctx(c), c)
+        # A script called after a test runner is still chased: `yarn vitest`
+        # may be a package script that runs something else entirely.
+        self._script("package.json", json.dumps({"scripts": {
+            "scrape": "node scrape.js", "build": "node build.js",
+            "test:e2e": "node scrape.js", "vitest": "node scrape.js"}}))
+        self.assert_asks(self.ctx("yarn vitest"))
+        self.assert_silent(self.ctx("pnpm exec vitest"))
+        self.assert_asks(self.ctx("yarn test:e2e"),
+                         "a test-named script running a scraper is still a scraper")
+        for c in ("yarn playwright test", "pnpm exec playwright install",
+                  "yarn install", "pnpm add playwright",
+                  "yarn why playwright", "npm nonsense"):
+            self.assert_silent(self.ctx(c), c)
+        self.assertEqual(rules._pm_operands("yarn", ["playwright", "open"]),
+                         ("shorthand", ["playwright", "open"]))
+        self.assertEqual(rules._pm_operands("npm", ["foo"]), (None, []))
+        self.assertEqual(rules._pm_operands("pnpm", ["run", "scrape"]), ("script", ["scrape"]))
+
+    def test_npx_wrapping_an_interpreter_is_unwrapped(self):
+        path = self._script("run_goal.ts", "import { chromium } from 'playwright';\n")
+        for c in ("npx tsx %s" % path, "npx ts-node %s" % path,
+                  "npx -y tsx %s" % path, "npx node %s" % path):
+            self.assert_asks(self.ctx(c), c)
+        self.assert_silent(self.ctx("npx tsx %s" % self._script("plain.ts", "export const x = 1;\n")))
+
+    def test_a_bare_cd_goes_home(self):
+        import shutil as _shutil
+        home = os.path.expanduser("~")
+        path = os.path.join(home, ".airlock-r11-test-run_goal.js")
+        with open(path, "w") as f:
+            f.write("const { chromium } = require('playwright');\n")
+        self.addCleanup(lambda: os.path.exists(path) and os.unlink(path))
+        self.assert_asks(self.ctx("cd && node .airlock-r11-test-run_goal.js"))
+
+    def test_the_playwright_test_package_counts_as_an_import(self):
+        for name, body in (
+            ("a.js", "const { chromium } = require('@playwright/test');\n"),
+            ("b.mjs", "import { chromium } from '@playwright/test';\n"),
+        ):
+            path = self._script(name, body)
+            self.assert_asks(self.ctx("node %s" % path), name)
+        self.assert_asks(self.ctx("node -e \"require('@playwright/test')\""))
+
+    def test_npx_flags_before_the_subcommand(self):
+        for c in ("npx -y playwright open https://x",
+                  "npx --yes playwright codegen https://x",
+                  "npx -p playwright playwright open https://x"):
+            self.assert_asks(self.ctx(c), c)
+        for c in ("npx -y playwright test", "npx -y playwright install",
+                  "npx -y vitest run"):
+            self.assert_silent(self.ctx(c), c)
+        self.assertEqual(rules._npx_arguments(["-y", "playwright", "open"]),
+                         ["playwright", "open"])
+        self.assertEqual(rules._npx_arguments(["-p", "x", "y"]), ["y"])
+        self.assertEqual(rules._npx_arguments(["-y"]), [])
+
+    def test_a_label_mentioning_the_agent_exempts_nothing(self):
+        path = self._script("hand_written.js", "const { chromium } = require('playwright');\n")
+        self.assert_asks(self.ctx("node %s --note jev-ultrafast-comparison" % path))
+        self.assert_asks(self.ctx("node %s --label jev_ultrafast" % path))
+        self.assert_asks(self.ctx("node %s --log ~/code/jev-ultrafast/run.log" % path))
+        # The exemption is read AFTER the wrappers come off, so an unrelated
+        # variable carrying that path is not the agent either.
+        self.assert_asks(self.ctx("env NOTE=/tmp/jev-ultrafast/decoy node %s" % path))
+        self.assert_asks(self.ctx("uv run --with /tmp/jev-ultrafast/x python3 %s"
+                                  % self._script("v.py", "import playwright\n")))
+        self.assertEqual(rules._pw_first_operand(["-p", "x.js"]), "x.js")
+        self.assertEqual(rules._pw_first_operand(["--", "x.js"]), "x.js")
+        self.assertEqual(rules._pw_first_operand(["--flag"]), "")
+        self.assertFalse(rules._pw_names_the_agent("jev-ultrafast-comparison"))
+        self.assertFalse(rules._pw_names_the_agent("--with=jev-ultrafast"))
+        self.assertTrue(rules._pw_names_the_agent("~/code/jev-ultrafast/run_goal.py"))
+        # A script NAMED after the agent is not the agent.
+        self.assertFalse(rules._pw_names_the_agent("jev-ultrafast-poc.js"))
+        self.assertFalse(rules._pw_names_the_agent("~/code/jev-ultrafast-poc/x.js"))
+        poc = self._script("jev-ultrafast-poc.js",
+                           "const { chromium } = require('playwright');\n")
+        self.assert_asks(self.ctx("node %s" % poc))
+
+    def test_a_runner_flag_value_is_not_the_script(self):
+        path = self._script("my_hand_rolled.js",
+                            "const { chromium } = require('playwright');\n")
+        self.assert_asks(self.ctx(
+            "node --require ~/code/jev-ultrafast/preload.js %s" % path))
+        self.assertEqual(rules._pw_first_operand(["-r", "pre.js", "mine.js"]), "mine.js")
+        self.assertEqual(rules._pw_first_operand(["--inspect", "mine.js"]), "mine.js")
+
+    def test_a_spec_file_run_directly_is_a_test_run(self):
+        os.makedirs(os.path.join(self.tmp, "e2e"), exist_ok=True)
+        spec = self._script(os.path.join("e2e", "login.spec.js"),
+                            "import { test, chromium } from '@playwright/test';\n")
+        for c in ("node %s" % spec, "npx tsx %s" % spec):
+            self.assert_silent(self.ctx(c), c)
+        # A scraper does not become a test by moving house.
+        scraper = self._script(os.path.join("e2e", "scrape.spec.js"),
+                               "const { chromium } = require('playwright');\n"
+                               "chromium.connectOverCDP('http://127.0.0.1:9333');\n")
+        self.assert_asks(self.ctx("node %s" % scraper))
+        # An unreadable file keeps the path's answer: this rule never blocks
+        # test code on a guess.
+        self.assert_silent(self.ctx("node e2e/gone.spec.js"))
+        self.assertTrue(rules._pw_is_test_path("e2e/login.spec.ts"))
+        self.assertTrue(rules._pw_is_test_path("tests/browse.js"))
+        self.assertFalse(rules._pw_is_test_path("scripts/verify.js"))
+        self.assertFalse(rules._pw_is_test_path(""))
+
+    def test_env_after_a_double_dash_is_still_an_assignment(self):
+        path = self._script("hand.js", "const { chromium } = require('playwright');\n")
+        self.assert_asks(self.ctx("env -- NOTE=1 node %s" % path))
+        self.assertEqual(rules._env_program(["--", "A=1", "node", "x.js"]),
+                         ("node", ["x.js"]))
+
+    def test_a_playwright_wrapper_package_counts(self):
+        for body in ("const { chromium } = require('playwright-extra');\n",
+                     "import { chromium } from 'playwright-chromium';\n"):
+            path = self._script("w%d.js" % len(body), body)
+            self.assert_asks(self.ctx("node %s" % path), body)
+
+    def test_package_json_is_read_once_per_scan(self):
+        self._script("scrape.js", "const { chromium } = require('playwright');\n")
+        self._script("package.json", json.dumps({"scripts": {
+            "lint": "eslint .", "build": "tsc", "browse": "node scrape.js"}}))
+        real = open
+        reads = []
+
+        def counting_open(path, *a, **kw):
+            if str(path).endswith("package.json"):
+                reads.append(path)
+            return real(path, *a, **kw)
+
+        with mock.patch("builtins.open", counting_open):
+            self.assert_asks(self.ctx("npm run lint && npm run build && npm run browse"))
+        self.assertEqual(len(reads), 1, reads)
+
+    def test_npm_start_is_followed(self):
+        """`npm start` is a package script under another name, and one of
+        the commonest ways to run anything."""
+        self._script("scrape.js", "const { chromium } = require('playwright');\n")
+        self._script("package.json", json.dumps({"scripts": {
+            "start": "node scrape.js", "stop": "node scrape.js"}}))
+        for c in ("npm start", "npm stop", "yarn start", "pnpm start"):
+            self.assert_asks(self.ctx(c), c)
+        self.assertEqual(rules._pm_operands("npm", ["start"]), ("shorthand", ["start"]))
+        self.assertEqual(rules._pm_operands("npm", ["foo"]), (None, []))
+
+    def test_a_cd_we_cannot_read_leaves_the_directory_unknown(self):
+        """Carrying the old directory forward would resolve a later script
+        against a directory the command is no longer in."""
+        self._script("verify.cjs", "const { chromium } = require('playwright');\n")
+        segs = rules.split_segments("cd - && node verify.cjs")
+        self.assertIsNone(rules._pw_scan(segs, self.tmp, 0))
+        self.assertIsNotNone(rules._pw_scan(
+            rules.split_segments("node verify.cjs"), self.tmp, 0))
+
+    def test_a_package_script_chain_is_followed(self):
+        self._script("scrape.js", "const { chromium } = require('playwright');\n")
+        self._script("package.json", json.dumps({"scripts": {
+            "start": "npm run browse", "browse": "node scrape.js"}}))
+        self.assert_asks(self.ctx("npm run start"))
+
+    def test_a_self_calling_package_script_terminates(self):
+        self._script("package.json", json.dumps({"scripts": {"loop": "npm run loop"}}))
+        self.assert_silent(self.ctx("npm run loop"))
+
+    def test_only_a_real_cdp_assignment_carries(self):
+        path = self._script("hand_rolled.js", "const { chromium } = require('playwright');\n")
+        for c in ('echo "note: BU_CDP_URL=http://127.0.0.1:9333 was set earlier" && node %s' % path,
+                  "echo BU_CDP_URL=x ; node %s" % path,
+                  "grep BU_CDP_URL=x notes.txt && node %s" % path):
+            self.assert_asks(self.ctx(c), c)
+        self.assertTrue(rules._pw_sets_cdp("BU_CDP_URL=http://127.0.0.1:9333 node x.js"))
+        self.assertTrue(rules._pw_sets_cdp("export BU_CDP_URL=http://127.0.0.1:9333"))
+        self.assertTrue(rules._pw_sets_cdp("export FOO=1 BU_CDP_URL=x"))
+        # `env VAR=val cmd` declares it exactly as a bare prefix does.
+        self.assertTrue(rules._pw_sets_cdp("env BU_CDP_URL=http://127.0.0.1:9333 node x.js"))
+        self.assertTrue(rules._pw_sets_cdp("env -u DISPLAY BU_CDP_URL=x node x.js"))
+        self.assertFalse(rules._pw_sets_cdp("env FOO=1 node x.js"))
+        self.assert_silent(self.ctx(
+            "env BU_CDP_URL=http://127.0.0.1:9333 true ; node %s" % path))
+        self.assertFalse(rules._pw_sets_cdp('echo "BU_CDP_URL=x"'))
+        self.assertFalse(rules._pw_sets_cdp("node x.js BU_CDP_URL=x"))
+
+    def test_non_browsing_mcp_and_other_servers_are_ignored(self):
+        self.assert_silent(self.ctx_mcp("mcp__playwright__browser_install"), "browser_install")
+        self.assert_silent(self.ctx_mcp("mcp__playwright__browser_close"), "browser_close")
+        self.assert_silent(self.ctx_mcp("mcp__github__create_pr", title="x"), "other server")
+
+    def test_an_ordinary_call_costs_nothing(self):
+        for c in ("ls -la", "git status", "node build.js"):
+            self.assert_silent(self.ctx(c), c)
+        c = rules.build_ctx({"tool_name": "Read", "tool_input": {"file_path": "/tmp/x.py"}}, "Read")
+        self.assert_silent(c, "Read")
+
+    def test_jsx_and_tsx_are_scripts_too(self):
+        for name in ("scrape.tsx", "scrape.jsx"):
+            path = self._script(name, "import { chromium } from 'playwright';\n")
+            self.assert_asks(self.ctx("node %s" % path), name)
+
+    def test_a_relative_path_with_no_cwd_is_not_guessed(self):
+        """With no cwd on the payload there is nothing to resolve against,
+        and the hook process's own directory is not the tool call's."""
+        self.assertEqual(rules._pw_resolve_script("verify.js", ""), ("", ""))
+        self.assertEqual(rules._pw_package_script("npm", ["run", "scrape"], ""), "")
+        for command in ("node verify.js", "cd myproj && node verify.js"):
+            c = rules.build_ctx({"tool_name": "Bash", "tool_input": {"command": command}},
+                                "Bash")
+            self.assert_silent(c, "no cwd: %s" % command)
+        # A relative cd with nothing to anchor it to leaves the directory
+        # unknown rather than relative to the hook process.
+        segs = rules.split_segments("cd myproj && node verify.js")
+        self.assertIsNone(rules._pw_scan(segs, "", 0))
+        # An absolute cd still anchors it.
+        abs_cd = "cd %s && node verify.cjs" % self.tmp
+        self._script("verify.cjs", "const { chromium } = require('playwright');\n")
+        self.assertIsNotNone(rules._pw_scan(rules.split_segments(abs_cd), "", 0))
+
+    def test_a_missing_or_huge_script_is_read_safely(self):
+        for tok in ("/nonexistent/x.js", "--flag", "README"):
+            self.assertEqual(rules._pw_resolve_script(tok, self.tmp), ("", ""), tok)
+        big = self._script("big.js", "x" * (rules._PW_MAX_SCRIPT_BYTES + 1))
+        self.assertEqual(rules._pw_resolve_script(big, self.tmp), ("", ""))
+
+    # --- config ---------------------------------------------------------------
+
+    def test_the_rule_is_on_by_default_on_every_platform(self):
+        rule = rules.RULES_BY_ID[self.RID]
+        for win in (False, True):
+            self.assertEqual(rules.default_action(rule, windows=win), "deny", win)
+            self.assertEqual(rules.effective_action(rule, overrides={}, windows=win), "deny", win)
+
+    def test_the_documented_off_switch_works(self):
+        path = self._script("rules.json", json.dumps({"R11-browse-via-jev": "off"}))
+        self.assertEqual(rules.load_action_overrides(path), {"R11-browse-via-jev": "off"})
+        ctx = self.ctx("npx playwright open https://x")
+        self.assert_asks(ctx, "sanity: it matches by default")
+        self.assertEqual(rules.prefilter_matches(ctx, {"R11-browse-via-jev": "off"}), [])
+
+    # --- the message ----------------------------------------------------------
+
+    def test_the_message_carries_the_recipe(self):
+        text = rules.R11_SUGGESTION
+        for fragment in ("jev-ultrafast", "BU_CDP_URL", "--remote-debugging-port",
+                         "DOM extraction", "INSIDE the process", "browser/README.md",
+                         "under 3", "no Claude decision calls",
+                         '{"R11-browse-via-jev": "off"}'):
+            self.assertIn(fragment, text, fragment)
+
+
+class TestR11JevPaths(unittest.TestCase):
+    """The Jev half, end to end through the enforce path. Every Jev call is
+    mocked; nothing here reaches the network."""
+
+    def setUp(self):
+        self.logged = []
+        p = mock.patch("airlock.log.append", side_effect=self.logged.append)
+        p.start()
+        self.addCleanup(p.stop)
+        ov = mock.patch("airlock.rules.load_action_overrides", return_value={})
+        ov.start()
+        self.addCleanup(ov.stop)
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(__import__("shutil").rmtree, self.tmp, True)
+        self.script = os.path.join(self.tmp, "verify.cjs")
+        with open(self.script, "w") as f:
+            f.write("const { chromium } = require('playwright');\n")
+
+    def _payload(self):
+        return {"session_id": "sess-r11", "cwd": self.tmp, "tool_name": "Bash",
+                "tool_input": {"command": "node %s" % self.script}}
+
+    @staticmethod
+    def _answers(choice, confidence=0.95):
+        other = (1.0 - confidence) / 2.0
+        probs = {"browse_and_report": other, "test_or_tooling_code": other, "unclear": other}
+        probs[choice] = confidence
+        return {"purpose": {"choice": choice, "confidence": confidence, "probabilities": probs}}
+
+    def _run(self, ask):
+        with mock.patch("airlock.client.ask", side_effect=ask), \
+             mock.patch("airlock.state.was_recently_denied", return_value=False), \
+             mock.patch("airlock.state.record_denial"), \
+             mock.patch.object(enforce, "emit_deny") as deny, \
+             mock.patch.object(enforce, "emit_warn") as warn:
+            denied = enforce.handle(self._payload(), "Bash")
+        return denied, deny, warn
+
+    def test_yes_denies_and_names_the_recipe(self):
+        denied, deny, _ = self._run(lambda p, timeout_s=None: ({"answers": self._answers("browse_and_report")}, 20))
+        self.assertTrue(denied)
+        reason = deny.call_args[0][0]
+        self.assertIn("R11-browse-via-jev", reason)
+        self.assertIn("jev-ultrafast", reason)
+        self.assertIn("BU_CDP_URL", reason)
+
+    def test_no_allows_silently(self):
+        denied, deny, warn = self._run(
+            lambda p, timeout_s=None: ({"answers": self._answers("test_or_tooling_code")}, 20))
+        self.assertFalse(denied)
+        deny.assert_not_called()
+        warn.assert_not_called()
+        self.assertFalse(self.logged[-1]["fires"])
+
+    def test_low_confidence_never_denies(self):
+        denied, deny, _ = self._run(
+            lambda p, timeout_s=None: ({"answers": self._answers("browse_and_report", 0.55)}, 20))
+        self.assertFalse(denied)
+        deny.assert_not_called()
+        self.assertEqual(self.logged[-1].get("gated"), "below_deny_bar")
+
+    def test_jev_unavailable_allows_and_still_prints_the_recipe(self):
+        for exc in (RuntimeError("no key"), RuntimeError("out of tokens"),
+                    OSError("timed out")):
+            self.logged[:] = []
+            denied, deny, warn = self._run(mock.Mock(side_effect=exc))
+            self.assertFalse(denied, exc)
+            deny.assert_not_called()
+            warn.assert_called_once()
+            self.assertIn("jev-ultrafast", warn.call_args[0][0][0])
+            # The session can tell advice-without-a-judgement apart from a
+            # real warn.
+            self.assertIn(enforce.ADVISE_ON_ERROR_NOTE, warn.call_args[0][0][0])
+            self.assertTrue(self.logged[-1]["advised_on_error"])
+            self.assertIn("error", self.logged[-1])
+
+    def test_an_exhausted_budget_allows_and_still_prints_the_recipe(self):
+        def slow(payload, timeout_s=None):
+            import time as _t
+            _t.sleep(0.05)
+            return {"answers": self._answers("browse_and_report")}, 50
+
+        with mock.patch.dict(os.environ, {"AIRLOCK_BUDGET_MS": "1"}):
+            denied, deny, warn = self._run(slow)
+        self.assertFalse(denied)
+        deny.assert_not_called()
+        warn.assert_called_once()
+        text = warn.call_args[0][0][0]
+        self.assertIn("jev-ultrafast", text)
+        # An answer that arrived late is not the same event as no answer,
+        # and the note must not claim Jev was never reached.
+        self.assertIn(enforce.ADVISE_LATE_ANSWER_NOTE, text)
+        self.assertNotIn(enforce.ADVISE_ON_ERROR_NOTE, text)
+
+    def test_no_other_rule_advises_on_an_error(self):
+        """`advise_on_error` is opt-in: every other rule stays silent when the
+        judgement cannot be reached, which is the established behaviour."""
+        for rule in rules.RULES:
+            if rule.id != "R11-browse-via-jev":
+                self.assertFalse(rule.advise_on_error, rule.id)

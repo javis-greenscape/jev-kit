@@ -146,6 +146,13 @@ headless Chromium, 2026-09-19. Spend is goal 1, read from the CLI's own
 `total_cost_usd`. At n=3 a cell is directional, not significant. Full tables:
 **[docs/measurements.md](docs/measurements.md#the-browser-component)**.
 
+The guard now points at it. `R11-browse-via-jev` spots a session about to
+drive Playwright itself, asks Jev whether the task is browsing or test code,
+and on browsing blocks the call with the recipe for running the goal through
+the agent instead. Test runs are never touched, and an unreachable Jev prints
+the recipe rather than blocking anything. See
+[docs/rules.md](docs/rules.md#r11-browse-via-jev-browsing-goes-through-the-browser-agent).
+
 ## What is in the kit
 
 Airlock is the tool-call guard. It is one component of the kit, not the kit.

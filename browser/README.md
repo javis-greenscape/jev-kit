@@ -15,6 +15,14 @@ every future merge conflict here. A pin plus patches makes "move to a newer
 upstream" an explicit act: change `UPSTREAM_COMMIT` in `install.sh`, re-apply,
 regenerate the patches. The alternative is a drift nobody notices.
 
+The guard routes browsing here. Airlock's `R11-browse-via-jev` rule spots a
+session about to drive Playwright itself, asks Jev whether the task is
+browsing or test code, and on browsing blocks it with the recipe for running
+the goal through this agent instead. It is on by default, it never blocks when
+Jev cannot answer, and
+[docs/rules.md](../docs/rules.md#r11-browse-via-jev-browsing-goes-through-the-browser-agent)
+has the detail and the off switch.
+
 ## Install
 
 ```bash

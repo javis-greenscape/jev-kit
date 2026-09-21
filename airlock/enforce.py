@@ -388,6 +388,40 @@ def _handle(data, tool_name, mode="enforce"):
     return False
 
 
+# What the session sees when the advice arrived WITHOUT a judgement. Without
+# it the text is identical to a real warn, and nobody can tell the two apart.
+# Deliberately neutral about the cause. This branch catches a missing or
+# revoked key, an HTTP error, a malformed reply and a timeout alike, and
+# naming only the last of those sent somebody looking for a network blip
+# when the key was the problem. The log row carries the real exception.
+ADVISE_ON_ERROR_NOTE = (
+    "(Nothing was judged and nothing was blocked: Jev returned no usable "
+    "answer. The reason is on the airlock log row for this call. This is "
+    "advice only.)"
+)
+# The budget case is not the same event, and saying it was would be untrue:
+# Jev answered, the answer simply arrived after the window that decides
+# whether a judgement may act. The call runs either way.
+ADVISE_LATE_ANSWER_NOTE = (
+    "(Nothing was blocked: Jev's answer arrived after the time budget, so it "
+    "was not acted on. This is advice only.)"
+)
+
+
+def _advise_on_error(rule, eff, entry, match, advice, note=None):
+    """Fail open, as everywhere, and for a rule that set `advise_on_error`
+    also print its suggestion. The advice stands on its own and needed no
+    judgement, so an unreachable or too-slow Jev should not mean the session
+    hears nothing at all. Nothing is ever blocked from here. The two callers
+    are the two ways the judgement can fail to arrive: an exception, and an
+    exhausted budget."""
+    if not getattr(rule, "advise_on_error", False) or eff not in ("deny", "ask", "warn"):
+        return
+    entry["advised_on_error"] = True
+    advice.append(_rule_warn_text(rule.id, match.detail, match.suggestion)
+                  + "\n" + (note or ADVISE_ON_ERROR_NOTE))
+
+
 def _run_rule(ctx, rule, match, eff, base, override_reason, b_ms, session_id, mode, advice, data=None):
     """Evaluate one non-legacy rule. Returns True if it emitted a deny."""
     entry = dict(base)
@@ -419,6 +453,7 @@ def _run_rule(ctx, rule, match, eff, base, override_reason, b_ms, session_id, mo
             entry["elapsed_ms"] = int((time.monotonic() - start) * 1000)
             entry["fires"] = False
             entry["enforced"] = False
+            _advise_on_error(rule, eff, entry, match, advice)
             log.append(entry)
             return False
         elapsed_ms = int((time.monotonic() - start) * 1000)
@@ -441,6 +476,7 @@ def _run_rule(ctx, rule, match, eff, base, override_reason, b_ms, session_id, mo
         if elapsed_ms > b_ms:
             fires = False
             entry.setdefault("error", "budget exceeded (%dms > %dms)" % (elapsed_ms, b_ms))
+            _advise_on_error(rule, eff, entry, match, advice, ADVISE_LATE_ANSWER_NOTE)
         if not fires:
             # A rule that can explain its own silence says so on the row. R10
             # withholding an earned warn because the human already asked for

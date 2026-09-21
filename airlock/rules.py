@@ -1,14 +1,19 @@
 """The rules table: one entry per kind of genuinely-wrong tool use.
 
 This module has no network and no logging, and its only filesystem access is
-the cheap upward walk the legacy tool-choice rule already did plus one stat of
+the cheap upward walk the legacy tool-choice rule already did, one stat of
 the key-file pointer for R1 (see `_pointer_secret_path_res`, which caches on
-that stat). It answers, in microseconds, one question for a PreToolUse payload:
+that stat), and one bounded read of a script a command names for R11 (see
+`_pw_resolve_script`: one isfile, one size check, at most 256KB, and only
+when a segment actually runs a file with a script extension). It answers, in microseconds, one question for a PreToolUse payload:
 
     could any rule possibly fire for this call?
 
 A call that matches no rule costs a `shlex`-free string scan and nothing else:
-no Jev request, no log row, no subprocess. Only when a code pre-filter matches
+no Jev request, no log row, no subprocess. The one exception is R11, which
+reads a script a command names -- bounded, cached per scan, and only for a
+segment that runs a file with a script extension -- so a call that runs a
+script pays one stat and one read rather than nothing. Only when a code pre-filter matches
 does airlock/enforce.py (or the shadow worker) go on to ask Jev the single
 fuzzy question that rule needs -- and only for rules whose pre-filter says the
 fuzzy part is actually in doubt.
@@ -88,10 +93,11 @@ class Match(object):
 
 class Rule(object):
     __slots__ = ("id", "tools", "action", "windows_action", "prefilter", "questions",
-                 "deny_when", "legacy", "fallback", "why")
+                 "deny_when", "legacy", "fallback", "why", "advise_on_error")
 
     def __init__(self, id, tools, action, prefilter=None, questions=None, deny_when=None,
-                 legacy=None, fallback=False, why="", windows_action=None):
+                 legacy=None, fallback=False, why="", windows_action=None,
+                 advise_on_error=False):
         self.id = id
         self.tools = tuple(tools)
         self.action = action
@@ -111,6 +117,13 @@ class Rule(object):
         # the catch-all tier, and running it alongside a specific rule would
         # mean paying twice to say the same thing.
         self.fallback = fallback
+        # When the Jev half cannot be reached -- no key, no tokens, a timeout,
+        # any error -- the call is allowed either way (the guard fails open
+        # everywhere). This flag says the rule's suggestion is still worth
+        # printing as advice on that path, because the advice is useful on its
+        # own and does not depend on the judgement. Off for every other rule,
+        # whose silence on an error is the established behaviour.
+        self.advise_on_error = advise_on_error
         self.why = why
 
     def applies_to(self, tool_name):
@@ -208,10 +221,14 @@ def words(segment):
     return out
 
 
-def program_of(segment):
+def program_of(segment, toks=None):
     """First real command word of a segment, skipping leading VAR=val
-    assignments and wrappers like nice/time. Returns (program, args)."""
-    toks = words(segment)
+    assignments and wrappers like nice/time. Returns (program, args).
+
+    `toks` lets a caller that has already tokenised the segment hand the
+    tokens in rather than paying for the split twice; R11 scans every Bash
+    call, so that second split is not free."""
+    toks = words(segment) if toks is None else list(toks)
     while toks:
         if _ASSIGN_RE.match(toks[0]):
             toks = toks[1:]
@@ -1576,6 +1593,707 @@ def general_risk_suppression(answers):
     return None
 
 
+# --- R11: browsing goes through the Jev-decided browser agent ----------------
+
+# The kit already ships the browser agent (browser/ installs jev-ultrafast at a
+# pin), and the measured gap is large: same goals, same browser, only the
+# decision-maker changes, and the Claude spend per run falls from 0.1868 USD to
+# 0.0008 USD (README, "Jev as the decision-maker"). Nothing steered an agent to
+# it, so sessions kept hand-writing Playwright scripts at Sonnet prices. This
+# rule is that steer.
+#
+# It is the one rule that reads a file the command names (_pw_resolve_script):
+# a script path handed
+# to node or python says nothing about Playwright from the command line alone.
+# The read is bounded (one isfile, one size check, at most 256KB) and happens
+# only when a segment actually runs a script with a script extension.
+
+R11_SUGGESTION = (
+    "Browsing goes through the Jev-decided browser agent (browser/install.sh "
+    "puts it in ~/code/jev-ultrafast), not a hand-written Playwright script. "
+    "Jev decides each click, so the Claude bill for the decision loop is close "
+    "to zero.\n"
+    "  1. Log in with a small script that reads the credential INSIDE the "
+    "process, never as an argument, and leave headless Chromium up on a CDP "
+    "port (--remote-debugging-port=9333). Do not call browser.close().\n"
+    "  2. export BU_CDP_URL=http://127.0.0.1:9333 and run each goal through "
+    "jev-ultrafast, which attaches to that already-authenticated browser.\n"
+    "  3. Read the result with a small DOM extraction over the same CDP "
+    "session: Jev decides operations, it does not narrate a page.\n"
+    "Measured 2026-09-20: three LinkOne goals, each finished in under 3 "
+    "seconds, with no Claude decision calls at all. See browser/README.md.\n"
+    "Writing or running e2e test code is not browsing and is never blocked. "
+    "Override with [airlock-ok: <reason>], or turn the rule off with "
+    '{"R11-browse-via-jev": "off"} in ~/.config/airlock/rules.json.'
+)
+
+# Playwright's MCP server, under both names this box has seen it registered
+# with. The hook is wired with matcher "*", so an MCP tool call reaches the
+# rules table exactly like a Bash one; only the tool NAME and tool_input come
+# with it, which is all this rule needs.
+_PW_MCP_PREFIXES = ("mcp__plugin_playwright_playwright__", "mcp__playwright__")
+
+# The navigate / click / type / snapshot family: driving a page. Names that
+# are not browsing (browser_install, browser_close) are deliberately absent.
+_PW_MCP_BROWSING = {
+    "browser_navigate", "browser_navigate_back", "browser_navigate_forward",
+    "browser_click", "browser_type", "browser_fill_form", "browser_press_key",
+    "browser_hover", "browser_select_option", "browser_drag",
+    "browser_snapshot", "browser_take_screenshot", "browser_evaluate",
+    "browser_wait_for", "browser_file_upload", "browser_handle_dialog",
+    "browser_console_messages", "browser_network_requests", "browser_pdf_save",
+    "browser_network_request", "browser_run_code", "browser_run_code_unsafe",
+    "browser_find", "browser_drop", "browser_scroll", "browser_extract",
+    "browser_tabs",
+    # the shorter names older builds of the server used
+    "navigate", "navigate_back", "click", "type", "hover", "select_option",
+    "press_key", "snapshot", "screenshot", "evaluate", "wait_for", "drag",
+}
+
+_PW_IMPORT_RE = re.compile(
+    r"""require\(\s*['"](?:@playwright/[\w.-]+|playwright[\w.-]*(?:/[\w.-]+)?)['"]"""
+    r"""|from\s+['"](?:@playwright/[\w.-]+|playwright[\w.-]*(?:/[\w.-]+)?)['"]"""
+    r"""|import\s*\(\s*['"](?:@playwright/[\w.-]+|playwright[\w.-]*(?:/[\w.-]+)?)['"]"""
+    r"""|^\s*import\s+playwright\b"""
+    r"""|^\s*from\s+playwright(?:\.[\w.]+)?\s+import\b""",
+    re.M,
+)
+
+# The same shapes without the line anchors, for a one-liner passed as `-e` or
+# `-c`: there the import is mid-line, inside a quoted argument, not at the
+# start of a line of its own.
+_PW_IMPORT_INLINE_RE = re.compile(
+    r"""require\(\s*['"](?:@playwright/[\w.-]+|playwright[\w.-]*(?:/[\w.-]+)?)['"]"""
+    r"""|from\s+['"](?:@playwright/[\w.-]+|playwright[\w.-]*(?:/[\w.-]+)?)['"]"""
+    r"""|import\s*\(\s*['"](?:@playwright/[\w.-]+|playwright[\w.-]*(?:/[\w.-]+)?)['"]"""
+    r"""|\bimport\s+playwright\b"""
+    r"""|\bfrom\s+playwright(?:\.[\w.]+)?\s+import\b""",
+)
+
+# npx flags that take a separate value.
+_NPX_VALUE_FLAGS = {"-p", "--package", "-c", "--call", "--userconfig", "--shell",
+                    "--cache", "--registry", "--node-arg", "--scripts-prepend-node-path"}
+
+# env's own flags that take a separate value.
+_ENV_VALUE_FLAGS = {"-u", "--unset", "-C", "--chdir", "-S", "--split-string"}
+
+_PW_SCRIPT_EXTS = (".js", ".cjs", ".mjs", ".jsx", ".ts", ".mts", ".cts", ".tsx", ".py")
+_PW_MAX_SCRIPT_BYTES = 256 * 1024
+# How many package scripts deep to follow. `start` calling `npm run browse`
+# calling `node scrape.js` is two hops, and real package.json files chain
+# that far. The bound is what stops a script that calls itself.
+_PW_MAX_SCRIPT_HOPS = 3
+_PW_SCRIPT_RUNNERS = {"node", "bun", "deno", "tsx", "ts-node", "python", "python3"}
+_PW_INLINE_FLAGS = {"-e", "--eval", "-c", "--command", "-p", "--print"}
+# `playwright <sub>` that is e2e tooling rather than a browsing session.
+_PW_CLI_ALLOWED = {"test", "install", "install-deps", "uninstall", "show-report", "--version"}
+# Running the Jev browser agent itself is the thing this rule asks for, so it
+# is never the thing this rule catches. Two ways a segment says so, and both
+# are deliberately narrow: a bare mention of the agent in an echo, a comment
+# or a heredoc must not exempt a sibling segment that really does drive a
+# browser.
+#
+#  - the agent's own directory, either in a token of the segment or in the
+#    working directory a previous `cd` in the same command line set;
+#  - an actual assignment or export of BU_CDP_URL, which only the harness
+#    reads. A substring match anywhere in the segment was too loose: the
+#    string appears in the rule's own advice text.
+#
+# The BU_CDP_URL one is deliberately a DECLARATION, not a proof. Setting it
+# exempts the rest of the command line, whatever those segments then run,
+# because the recipe's own runner is an ad-hoc script that lives wherever the
+# person put it, not inside the agent's checkout: requiring the checkout path
+# there would flag the exact workflow this rule recommends. So it is an
+# escape hatch somebody can type on purpose, and it is meant to be: it sits
+# beside `[airlock-ok: <reason>]` and the rules.json off switch rather than
+# pretending to be a lock.
+#
+# Neither is a security boundary, and this rule does not pretend to be one.
+# It is a cost steer that fails open, and somebody determined to write their
+# own Playwright script can name a directory and get past it. The guard's
+# safety model says the same thing about every rule here.
+_PW_JEV_PATH_MARKERS = ("jev-ultrafast", "jev_ultrafast")
+_PW_CDP_VAR = "BU_CDP_URL="
+
+
+def _pw_sets_cdp(seg, toks=None):
+    """True only for a real assignment of BU_CDP_URL in this segment: a
+    leading `VAR=val` prefix, or a word of an `export`. A regex over the raw
+    text was too loose -- `echo "note: BU_CDP_URL=... was set"` matched it,
+    and words() splits on whitespace, so the quoted text is tokens too. What
+    makes it an assignment is its POSITION, not the string."""
+    toks = words(seg) if toks is None else list(toks)
+    # `env BU_CDP_URL=... node x.js` declares it exactly as a bare prefix
+    # does, and R11 unwraps `env` everywhere else.
+    if toks[:1] == ["env"]:
+        toks = toks[1:]
+        while toks and toks[0].startswith("-"):
+            if toks[0] in _ENV_VALUE_FLAGS and "=" not in toks[0]:
+                toks = toks[2:]
+            else:
+                toks = toks[1:]
+    i = 0
+    while i < len(toks) and _ASSIGN_RE.match(toks[i]):
+        if toks[i].startswith(_PW_CDP_VAR):
+            return True
+        i += 1
+    if i < len(toks) and toks[i] == "export":
+        for tok in toks[i + 1:]:
+            if not _ASSIGN_RE.match(tok):
+                break
+            if tok.startswith(_PW_CDP_VAR):
+                return True
+    return False
+
+# uv flags that take a separate value. `uv run --with playwright-stealth
+# python3 verify.py` runs python3, not playwright-stealth, and dropping only
+# the tokens that start with "-" would get that wrong.
+_UV_RUN_VALUE_FLAGS = {
+    "--with", "--with-editable", "--with-requirements", "--python", "-p",
+    "--project", "--directory", "--index", "--extra-index-url", "--extra",
+    "--group", "--package", "--env-file", "--index-url", "--find-links",
+    "--constraint", "--override", "--refresh-package",
+}
+
+
+# Interpreter flags that take a separate value, so the token after them is
+# NOT the script. `node --require ~/code/jev-ultrafast/preload.js mine.js`
+# runs mine.js.
+_PW_RUNNER_VALUE_FLAGS = {
+    "-r", "--require", "--import", "--loader", "--experimental-loader",
+    "--conditions", "-C", "--env-file", "--inspect-brk", "--max-old-space-size",
+    "--tsconfig", "--tsconfig-path", "-m", "--module", "-X", "--check-hash-based-pycs",
+}
+
+
+# Shells that take a command as a string argument.
+_PW_SHELLS = {"bash", "sh", "zsh", "dash", "ksh", "busybox"}
+
+
+def _pw_shell_command(args):
+    """The command string a shell was handed with -c, or "". Never raises."""
+    for i, a in enumerate(args):
+        if a in ("-c", "--command") and i + 1 < len(args):
+            return args[i + 1]
+        if a.startswith("-c") and len(a) > 2 and not a.startswith("--"):
+            return a[2:]
+    return ""
+
+
+def _pw_first_operand(args):
+    """The first bare argument: the script a runner runs. Flags, and the
+    values of the flags that take one, are not it."""
+    i = 0
+    while i < len(args):
+        a = args[i]
+        if a == "--":
+            return args[i + 1] if i + 1 < len(args) else ""
+        if a.startswith("-"):
+            i += 2 if ("=" not in a and a in _PW_RUNNER_VALUE_FLAGS) else 1
+            continue
+        return a
+    return ""
+
+
+def _pw_names_the_agent(tok):
+    """True when a token is a PATH whose own directory is the agent's
+    checkout. A word that merely contains the name is not: neither a label
+    (`jev-ultrafast-comparison`) nor a script called after it
+    (`jev-ultrafast-poc.js`), only a real component of a real path."""
+    if not tok or tok.startswith("-"):
+        return False
+    if not any(m in tok for m in _PW_JEV_PATH_MARKERS):
+        return False
+    parts = tok.replace(os.sep, "/").split("/")
+    return len(parts) > 1 and any(p in _PW_JEV_PATH_MARKERS for p in parts)
+
+
+def _unwrap_args(args, value_flags, skip_assignments=False):
+    """Walk a wrapper's arguments, step over its own flags (and the values of
+    the flags that take one), and return the arguments from the first bare
+    token on. `skip_assignments` also steps over `VAR=val`, which is `env`.
+    Returns [] when the wrapper runs nothing.
+
+    The three wrappers R11 unwraps -- npx, env and uv run -- differ only in
+    their flag set and that one switch, so they share this loop rather than
+    keeping three copies of it in step with each other."""
+    i = 0
+    while i < len(args):
+        a = args[i]
+        if a == "--":
+            # Everything after `--` is the command, but `env -- VAR=val prog`
+            # is still an assignment in front of the program.
+            rest = args[i + 1:]
+            if skip_assignments:
+                while rest and "=" in rest[0] and not rest[0].startswith("-"):
+                    rest = rest[1:]
+            return rest
+        if a.startswith("-"):
+            if "=" not in a and a in value_flags:
+                i += 2
+            else:
+                i += 1
+            continue
+        if skip_assignments and "=" in a:
+            i += 1
+            continue
+        return args[i:]
+    return []
+
+
+def _npx_arguments(args):
+    """npx's arguments with npx's own flags stripped, so the first element is
+    the package or binary it runs."""
+    return _unwrap_args(args, _NPX_VALUE_FLAGS)
+
+
+def _env_program(args):
+    """(prog, args) for what `env ...` actually runs, or (None, [])."""
+    rest = _unwrap_args(args, _ENV_VALUE_FLAGS, skip_assignments=True)
+    return (rest[0], rest[1:]) if rest else (None, [])
+
+
+def _uv_run_program(args):
+    """(prog, args) for the command `uv run ...` actually runs, or (None, [])."""
+    rest = _unwrap_args(args, _UV_RUN_VALUE_FLAGS)
+    return (rest[0], rest[1:]) if rest else (None, [])
+
+
+def _pw_resolve_script(tok, cwd):
+    """(resolved path, text) for a script the command names, or ("", "").
+    One isfile, one size check, one bounded read. Never raises."""
+    try:
+        if not tok or tok.startswith("-") or not tok.endswith(_PW_SCRIPT_EXTS):
+            return "", ""
+        path = _expand(tok)
+        if not os.path.isabs(path):
+            # No cwd on the payload means there is nothing to resolve a
+            # relative path against. The hook process's own directory is not
+            # the tool call's, so guessing with it would read the wrong file.
+            if not cwd:
+                return "", ""
+            path = os.path.join(cwd, path)
+        if not os.path.isfile(path):
+            return "", ""
+        if os.path.getsize(path) > _PW_MAX_SCRIPT_BYTES:
+            return "", ""
+        with open(path, "r", errors="replace") as f:
+            return path, f.read(_PW_MAX_SCRIPT_BYTES)
+    except Exception:
+        return "", ""
+
+
+# A package script whose NAME says it runs tests. `npm run scrape` is not one
+# of these, and is followed into package.json instead.
+_PW_TEST_SCRIPT_RE = re.compile(r"(?:^|[:_-])(?:test|tests|e2e|spec|ct|vitest|jest|mocha)(?:$|[:_-])")
+
+
+# Subcommands of npm/pnpm/yarn that are the tool's own, never a script name
+# and never a binary it runs. `yarn <name>` with anything else is yarn's
+# run-less shorthand for a package script or a node_modules/.bin binary.
+_PM_BUILTINS = {
+    "install", "i", "ci", "add", "remove", "rm", "up", "upgrade", "update",
+    "why", "init", "pack", "publish", "link", "unlink", "workspace",
+    "workspaces", "config", "cache", "licenses", "audit", "outdated", "list",
+    "ls", "info", "login", "logout", "version", "set", "get", "store",
+    "prune", "dedupe", "import", "patch", "rebuild", "env", "help", "node",
+}
+# npm's built-in aliases for a package script of the same name. `test` is
+# handled before this, as a test run.
+_NPM_SCRIPT_ALIASES = {"start", "stop", "restart"}
+
+# How each package manager spells "run this binary".
+_PM_EXEC_VERBS = {"npm": ("exec", "x"), "pnpm": ("exec", "dlx"), "yarn": ("exec", "dlx")}
+
+
+def _pm_operands(prog, args):
+    """What a package manager is being asked to run, with its own verb
+    stripped: ("script"|"binary", [tokens]) or (None, []).
+
+    R3 (prefilter_wide_run) parses npm/pnpm/yarn inline and does NOT use
+    this, deliberately. R3 asks a different question -- did this run name a
+    path and cap its workers -- and answers it from the flags, never from
+    what binary ends up running, so sharing a parser would couple two rules
+    that agree on nothing but the program name. R3's behaviour is also
+    pinned by its own labelled eval cases, and this rule is not a reason to
+    move them.
+
+    `npm run build` and `yarn build` are both a script; `npx playwright open`
+    and `yarn playwright open` are both a binary. Yarn and pnpm let the verb
+    be left out, which is how `yarn playwright open` slipped past a check
+    that only knew the spelled-out forms."""
+    if prog not in ("npm", "pnpm", "yarn") or not args:
+        return None, []
+    head, rest = args[0], args[1:]
+    if head == "run":
+        return ("script", rest) if rest else (None, [])
+    if head in _PM_EXEC_VERBS.get(prog, ()):
+        return ("binary", rest) if rest else (None, [])
+    if head.startswith("-") or head in _PM_BUILTINS:
+        return None, []
+    if prog == "npm":
+        # npm has no general run-less shorthand -- `npm foo` is an error --
+        # but it does have these four aliases for a package script, and
+        # `npm start` is one of the commonest ways to run anything at all.
+        if head in _NPM_SCRIPT_ALIASES:
+            return "shorthand", args
+        return None, []
+    # yarn/pnpm shorthand: a script if package.json has one, else a binary.
+    return "shorthand", args
+
+
+# A file that is itself a test: `e2e/login.spec.ts`, `tests/browse.test.js`,
+# anything under an e2e or __tests__ directory. Running one directly with a
+# bare interpreter is debugging a spec, which this rule never treats as
+# browsing -- the docs promise as much.
+_PW_TEST_PATH_RE = re.compile(
+    r"(?:^|/)(?:tests?|e2e|__tests__|spec|specs|integration)/"
+    r"|\.(?:spec|test|e2e)\.[\w]+$"
+    r"|(?:^|/)conftest\.py$",
+)
+
+
+def _pw_is_test_path(path):
+    if not path:
+        return False
+    return bool(_PW_TEST_PATH_RE.search(path.replace(os.sep, "/")))
+
+
+# What a file that really is a test contains. A path can be moved; a test
+# body cannot be faked into a scraper.
+_PW_TEST_BODY_RE = re.compile(
+    r"""['"]@playwright/test['"]"""
+    r"""|\bdescribe\s*\(|\bit\s*\(|\btest\s*\(|\btest\.(?:describe|beforeEach|step)\b"""
+    r"""|^\s*def\s+test_|\bpytest\b""",
+    re.M,
+)
+
+
+def _pw_looks_like_a_test(prog, args, cwd):
+    """True for a spec run straight through an interpreter. The PATH raises
+    the question and the FILE answers it: moving a scraper under `e2e/` or
+    renaming it `.spec.js` must not exempt it, but `node e2e/login.spec.js`
+    really is how somebody debugs a spec. An unreadable file keeps the path's
+    answer, because this rule must never block test code."""
+    operand = _pw_first_operand(args)
+    if not _pw_is_test_path(operand):
+        return False
+    src = _pw_resolve_script(operand, cwd)[1]
+    if not src:
+        return True
+    return bool(_PW_TEST_BODY_RE.search(src))
+
+
+def _pw_is_test_run(prog, args):
+    """True for a run of e2e code: a test runner, or a package script whose
+    name says it runs tests. These are always allowed -- writing and running
+    tests is not browsing."""
+    if prog == "pytest" or prog in _JS_RUNNERS:
+        return True
+    if prog in ("python", "python3") and args[:2] == ["-m", "pytest"]:
+        return True
+    if prog in ("npm", "pnpm", "yarn"):
+        if args[:1] == ["test"]:
+            return True
+        kind, rest = _pm_operands(prog, args)
+        name = (rest[0] if rest else (args[0] if kind == "shorthand" and args else ""))
+        # A script NAME is not evidence: `npm run test:scrape` can run
+        # anything. The script is followed into package.json instead, and
+        # what it really runs answers the question. Only `npm test` itself,
+        # handled above, is taken on its name.
+        # Only an EXPLICIT binary run (`pnpm exec vitest`) is taken on the
+        # name. `yarn vitest` may be a package script called vitest that
+        # runs something else entirely, so it is chased into package.json
+        # like any other shorthand, and what it runs decides.
+        if name and kind == "binary" and name in _JS_RUNNERS:
+            return True
+    if prog == "npx":
+        rest = _npx_arguments(args)
+        if rest[:1] and rest[0] in _JS_RUNNERS:
+            return True
+    return False
+
+
+def _pw_package_script(prog, args, cwd, cache=None):
+    """The command line behind `npm run <name>`, or "". `npm run scrape` says
+    nothing about Playwright by itself; the script it names might. One
+    bounded read of package.json in the working directory. Never raises."""
+    try:
+        kind, rest = _pm_operands(prog, args)
+        if kind == "script" and rest:
+            name = rest[0]
+        elif kind == "shorthand" and args:
+            name = args[0]
+        else:
+            return ""
+        if not cwd:
+            return ""
+        path = os.path.join(cwd, "package.json")
+        # One read per package.json per scan: `npm run lint && npm run build
+        # && npm run browse` is three segments against the same file.
+        if cache is not None and path in cache:
+            data = cache[path]
+        else:
+            data = None
+            if os.path.isfile(path) and os.path.getsize(path) <= _PW_MAX_SCRIPT_BYTES:
+                with open(path, "r", errors="replace") as f:
+                    data = json.load(f)
+            if cache is not None:
+                cache[path] = data
+        if data is None:
+            return ""
+        script = ((data or {}).get("scripts") or {}).get(name)
+        return script if isinstance(script, str) else ""
+    except Exception:
+        return ""
+
+
+def prefilter_browser_driving(ctx):
+    tool_name = ctx["tool_name"] or ""
+
+    if tool_name not in SHELL_TOOLS:
+        for prefix in _PW_MCP_PREFIXES:
+            if tool_name.startswith(prefix):
+                action = tool_name[len(prefix):]
+                if action in _PW_MCP_BROWSING:
+                    return Match(
+                        "Playwright MCP `%s`: driving a browser directly" % action,
+                        R11_SUGGESTION, ask=True,
+                        extra={"how": "playwright mcp tool %s" % action},
+                    )
+                return None
+        return None
+
+    command = ctx["command"]
+    if not command:
+        return None
+
+    return _pw_scan(ctx["segments"], ctx.get("cwd") or "", 0)
+
+
+def _pw_scan(segments, cwd, depth, cdp=False, cache=None):
+    """Look for a browser-driving segment. `depth` bounds the one recursion:
+    a package script named by `npm run <name>` is followed at most
+    _PW_MAX_SCRIPT_HOPS deep, which is what stops a script calling itself."""
+    cur_cwd = cwd
+    if cache is None:
+        cache = {}
+    for seg in segments:
+        toks = words(seg)
+        prog, args = program_of(seg, toks)
+        if prog == "cd":
+            # A `cd` carries into the segments after it, so a later `node
+            # run_goal.js` inside the agent's checkout is still the agent.
+            # It changes nothing about the `cd` segment itself.
+            # A bare `cd` goes home, as it does in a real shell. A `cd`
+            # whose target we cannot read (a flag, `cd -`, `cd -P dir`)
+            # leaves the directory UNKNOWN rather than stale: carrying the
+            # old one forward would resolve later scripts against a
+            # directory the command is no longer in.
+            target = _pw_first_operand(args) if args else "~"
+            if target == "-" or (args and not target):
+                cur_cwd = ""
+                continue
+            if target:
+                target = _expand(target)
+                if os.path.isabs(target):
+                    cur_cwd = target
+                elif cur_cwd:
+                    cur_cwd = os.path.join(cur_cwd, target)
+                else:
+                    # A relative `cd` with nothing to anchor it to leaves the
+                    # directory unknown, not "relative to the hook process".
+                    # Same reasoning as _pw_resolve_script's own guard.
+                    cur_cwd = ""
+            continue
+        if _pw_sets_cdp(seg, toks):
+            # An assignment or export exempts the segments AFTER it, whatever
+            # they run: handing a CDP port to a harness is a declaration that
+            # the agent is driving, and the recipe's runner script lives
+            # wherever the person put it. See the note on the markers above:
+            # this is a typed escape hatch, not a proof, and it is one on
+            # purpose.
+            #
+            # It does NOT bless the command sharing its own segment.
+            # `BU_CDP_URL=... node hand-rolled.js` is still a hand-rolled
+            # script unless its path is inside the agent's checkout, so the
+            # shortest form of the bypass does not work by accident.
+            cdp = True
+        elif cdp:
+            continue
+        if prog is None:
+            continue
+        if prog in _PW_SHELLS:
+            # `bash -c "node scrape.js"` carries a whole command line in a
+            # string. It is scanned as one, under the same hop bound that
+            # stops a package script calling itself.
+            inner = _pw_shell_command(args)
+            if inner and depth < _PW_MAX_SCRIPT_HOPS:
+                found = _pw_scan(split_segments(strip_heredocs(inner)), cur_cwd,
+                                 depth + 1, cdp, cache)
+                if found is not None:
+                    return found
+            continue
+        if prog == "env":
+            # `env VAR=val node x.js` runs node. program_of's _SKIP_PREFIX
+            # does not cover env, because env also takes flags of its own.
+            prog, args = _env_program(args)
+            if prog is None:
+                continue
+        if prog == "uv" and args[:1] == ["run"]:
+            prog, args = _uv_run_program(args[1:])
+            if prog is None:
+                continue
+        # Only the thing being RUN earns the exemption, and only once the
+        # wrappers are off: the program, or the first bare argument, which is
+        # the script. `node x.js --note jev-ultrafast-comparison` is a
+        # hand-rolled script with a label on it, `node x.js --log
+        # ~/code/jev-ultrafast/run.log` is one writing its log there, and
+        # `env NOTE=/tmp/jev-ultrafast/decoy node x.js` is one with an
+        # unrelated variable set. None of them is the agent.
+        if _pw_names_the_agent(prog) or _pw_names_the_agent(_pw_first_operand(args)):
+            continue
+        if _pw_is_test_run(prog, args) or _pw_looks_like_a_test(prog, args, cur_cwd):
+            continue
+        unwrapped = (prog, args)
+
+        if depth < _PW_MAX_SCRIPT_HOPS:
+            script = _pw_package_script(prog, args, cur_cwd, cache)
+            if script:
+                # `cdp` carries in: a script reached through `npm run` is
+                # no less CDP-attached than one named directly.
+                found = _pw_scan(split_segments(strip_heredocs(script)), cur_cwd,
+                                 depth + 1, cdp, cache)
+                if found is not None:
+                    return found
+                continue
+
+        # `npx -y playwright open ...` runs playwright just as `npx
+        # playwright open ...` does; npx's own flags come first.
+        pw_args = None
+        if prog == "playwright":
+            pw_args = args
+        elif prog == "npx" or prog in ("npm", "pnpm", "yarn"):
+            if prog == "npx":
+                rest = _npx_arguments(args)
+            else:
+                # `yarn playwright open` and `pnpm exec playwright open` run
+                # the local binary exactly as `npx playwright open` does.
+                kind, operands = _pm_operands(prog, args)
+                rest = operands if kind == "binary" else (args if kind == "shorthand" else [])
+            if rest[:1] == ["playwright"]:
+                pw_args = rest[1:]
+            elif rest[:1] and rest[0] in _PW_SCRIPT_RUNNERS:
+                # `npx tsx run_goal.ts` runs tsx, and tsx runs the script.
+                # Same unwrap as `uv run` and `env`.
+                prog, args = rest[0], rest[1:]
+        if pw_args is not None:
+            sub = pw_args[0] if pw_args else ""
+            if sub in _PW_CLI_ALLOWED or not sub:
+                continue
+            return Match(
+                "`playwright %s` drives a browser from the command line" % sub,
+                R11_SUGGESTION, ask=True, extra={"how": "playwright %s" % sub},
+            )
+
+        if prog not in _PW_SCRIPT_RUNNERS:
+            continue
+        # The package-manager and npx branches above may have replaced the
+        # program with the interpreter they wrap. Only then is the test
+        # check worth running a second time, and running it twice on an
+        # unchanged command would re-read the same file for nothing.
+        if (prog, args) != unwrapped and (
+                _pw_is_test_run(prog, args) or _pw_looks_like_a_test(prog, args, cur_cwd)):
+            continue
+        if any(a in _PW_INLINE_FLAGS for a in args):
+            if _PW_IMPORT_INLINE_RE.search(seg):
+                return Match(
+                    "an inline `%s` script drives Playwright itself" % prog,
+                    R11_SUGGESTION, ask=True, extra={"how": "inline %s script" % prog},
+                )
+            continue
+        # Every script-extension argument is checked, not just the first that
+        # happens to be readable: `node loader.mjs worker.mjs` can carry the
+        # Playwright import in either of them.
+        for a in args:
+            spath, src = _pw_resolve_script(a, cur_cwd)
+            # A script that lives inside the agent's own checkout is the
+            # agent. A script somewhere else is not, whatever directory the
+            # command line happened to `cd` into first.
+            if _pw_names_the_agent(spath):
+                continue
+            if src and _PW_IMPORT_RE.search(src):
+                return Match(
+                    "`%s %s` runs a script that imports Playwright and drives a browser"
+                    % (prog, a),
+                    R11_SUGGESTION, ask=True, extra={"how": "%s %s" % (prog, a)},
+                )
+    return None
+
+
+def questions_browser_driving(ctx, match):
+    state = {
+        "how": match.extra.get("how", ""),
+        "command": (ctx.get("command") or "")[:2000],
+        "tool": ctx.get("tool_name") or "",
+        "description": (ctx.get("description") or "")[:500],
+    }
+    qs = {
+        "purpose": {
+            "type": "choice",
+            "instructions": {
+                "question": (
+                    "A session is about to drive a browser with Playwright. Is it "
+                    "browsing a site to find out what is there, or is it building "
+                    "or running test code?"
+                ),
+                "focus": (
+                    "A browse-and-report pass should go through the Jev-decided "
+                    "browser agent instead. Writing or running e2e tests should not."
+                ),
+            },
+            "criteria": {
+                "browse_and_report": {
+                    "what": (
+                        "Opening pages, clicking through a live site, reading what "
+                        "is on them, checking a deploy, taking a screenshot to look at."
+                    ),
+                    "not_for": "Anything whose output is test code or a test result.",
+                    "examples": [
+                        "open the staging site and tell me whether the table renders",
+                        "log in and screenshot the dashboard",
+                        "click through to Projects and report the row count",
+                    ],
+                },
+                "test_or_tooling_code": {
+                    "what": (
+                        "Writing, editing, debugging or running an automated test "
+                        "suite, a fixture, a scraper that is part of the product, or "
+                        "browser tooling itself."
+                    ),
+                    "not_for": "A one-off look at a live page.",
+                    "examples": [
+                        "run the e2e suite against localhost",
+                        "debug why this spec times out",
+                        "add a Playwright test for the login form",
+                    ],
+                },
+                "unclear": {
+                    "what": "Not enough information to tell.",
+                    "not_for": "Use only when truly stuck.",
+                    "examples": [],
+                },
+            },
+        }
+    }
+    return state, qs
+
+
+def deny_browser_driving(answers):
+    a = (answers or {}).get("purpose") or {}
+    return (a.get("choice") or "") == "browse_and_report"
+
+
 # Rules that can explain their own silence. Keyed by rule id so the hot path
 # pays nothing for the rules that cannot.
 SUPPRESSION_BY_RULE = {"R10-general-risk": general_risk_suppression}
@@ -1693,6 +2411,22 @@ RULES = [
             "(docs/CREDITS.md), narrowed to calls no other rule covers "
             "and that a code pre-filter marks as reaching outside the working tree. "
             "Warn only, never deny.",
+    ),
+    Rule(
+        id="R11-browse-via-jev",
+        # Every tool: Playwright's MCP server is not a shell tool, and its tool
+        # names are not known ahead of time. The pre-filter returns on its
+        # first line for anything that is neither a shell call nor an `mcp__`
+        # one, so the cost of the wide `tools` is a string compare.
+        tools=("*",),
+        action="deny",
+        prefilter=prefilter_browser_driving,
+        questions=questions_browser_driving,
+        deny_when=deny_browser_driving,
+        advise_on_error=True,
+        why="The kit ships a Jev-decided browser agent that reaches the same goals "
+            "for roughly 1/233rd of the Claude spend (README, browser/). Browsing "
+            "should go through it; writing and running e2e tests should not.",
     ),
 ]
 
