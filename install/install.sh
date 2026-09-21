@@ -56,6 +56,8 @@ Components (default: --guard --session-check --daemon --monitoring
   --monitoring   the five-minute health check timer
   --filesearch   the per-user plocate index and its hourly timer
   --browser      clone browser-use/jev-ultrafast at a pin and patch it
+  --browse-mcp   check the 'browse' MCP server over that clone and print
+                 (never apply) the mcpServers block for ~/.claude.json
   --review       clone devagrawal09/jev-review at a pin (needs Node 24)
   --shim         the OpenAI-shaped shim over the claude CLI
   --claude-update  the idle-only Claude Code auto-updater and its timer
@@ -89,6 +91,7 @@ EOF
 WANT_GUARD=0; WANT_DAEMON=0; WANT_TUNING=0; WANT_MONITORING=0
 WANT_FILESEARCH=0; WANT_BROWSER=0; WANT_REVIEW=0; WANT_SHIM=0
 WANT_CLAUDE_UPDATE=0; WANT_BELAY=0; WANT_COMPACTION=0
+WANT_BROWSE_MCP=0
 # The session check rides with the guard: it is part of the DEFAULT set on
 # every platform and is not one of the flags that makes the default set go
 # away, because a guard installed without it is a guard whose death is silent.
@@ -113,6 +116,7 @@ while [ "$#" -gt 0 ]; do
     --monitoring) WANT_MONITORING=1; ANY_COMPONENT=1; shift ;;
     --filesearch) WANT_FILESEARCH=1; FILESEARCH_EXPLICIT=1; ANY_COMPONENT=1; shift ;;
     --browser) WANT_BROWSER=1; ANY_COMPONENT=1; shift ;;
+    --browse-mcp) WANT_BROWSE_MCP=1; ANY_COMPONENT=1; shift ;;
     --review) WANT_REVIEW=1; ANY_COMPONENT=1; shift ;;
     --shim) WANT_SHIM=1; ANY_COMPONENT=1; shift ;;
     --claude-update) WANT_CLAUDE_UPDATE=1; ANY_COMPONENT=1; shift ;;
@@ -124,6 +128,7 @@ while [ "$#" -gt 0 ]; do
       WANT_GUARD=1; WANT_DAEMON=1; WANT_TUNING=1; WANT_MONITORING=1
       WANT_FILESEARCH=1; WANT_BROWSER=1; WANT_REVIEW=1; WANT_SHIM=1
       WANT_CLAUDE_UPDATE=1; WANT_BELAY=1; WANT_COMPACTION=1
+      WANT_BROWSE_MCP=1
       FILESEARCH_EXPLICIT=1; ANY_COMPONENT=1; shift ;;
     --headless) HEADLESS_CHOICE=yes; shift ;;
     --no-headless) HEADLESS_CHOICE=no; shift ;;
@@ -308,6 +313,7 @@ plan "$WANT_TUNING" "tuning"
 plan "$WANT_MONITORING" "monitoring"
 plan "$WANT_FILESEARCH" "filesearch"
 plan "$WANT_BROWSER" "browser"
+plan "$WANT_BROWSE_MCP" "browse-mcp (prints the mcpServers block, applies nothing)"
 plan "$WANT_REVIEW" "review"
 plan "$WANT_SHIM" "shim"
 plan "$WANT_CLAUDE_UPDATE" "claude-update"
@@ -445,12 +451,12 @@ if [ "$WANT_GUARD" = "1" ]; then
       fi ;;
   esac
 
-  # --- R11: browsing goes through the Jev browser agent --------------------
+  # --- R11: a Playwright MCP call is pointed at the browse tool -------------
   # On by default, on every platform, and it needs no entry in rules.json to
-  # be on. The line is printed because a rule that can block a Playwright
-  # script should not be a surprise, and because the off switch should be on
+  # be on. The line is printed because a rule that blocks a Playwright MCP
+  # call should not be a surprise, and because the off switch should be on
   # screen next to it.
-  ok "R11 (browse via the Jev browser agent): ON by default -- a browse-and-report pass driving Playwright is denied with the recipe; test runs are never touched"
+  ok "R11 (browse via Jev): ON by default -- a Playwright MCP browsing call is denied and pointed at the 'browse' tool (--browse-mcp); shell commands are never touched"
   printf '         turn it off with:  {"R11-browse-via-jev": "off"} in %s\n' "$CONFIG_DIR/rules.json"
 
   if [ ! -f "$CONFIG_DIR/mode" ]; then
@@ -687,6 +693,12 @@ fi
 if [ "$WANT_BROWSER" = "1" ]; then
   step "Browser"
   "$REPO_ROOT/browser/install.sh" || warn "browser/install.sh reported a problem"
+fi
+
+# After --browser on purpose: the server drives the clone that step makes.
+if [ "$WANT_BROWSE_MCP" = "1" ]; then
+  step "Browse MCP server"
+  "$REPO_ROOT/browse/install.sh" || warn "browse/install.sh reported a problem"
 fi
 
 if [ "$WANT_REVIEW" = "1" ]; then
