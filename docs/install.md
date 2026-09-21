@@ -41,7 +41,8 @@ install/install.sh --guard --wire ~/.claude/settings.json
 Every file it edits is backed up, timestamped, in place first.
 
 Components are flags: `--guard --daemon --tuning --monitoring --filesearch
---browser --review --shim --claude-update --belay --compaction`, or `--all`.
+--browser --browse-mcp --review --shim --claude-update --belay --compaction`,
+or `--all`.
 `--check-only` prints the plan and installs nothing.
 
 The **session check** rides with the guard and is on by default on every
