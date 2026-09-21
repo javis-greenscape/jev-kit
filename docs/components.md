@@ -36,6 +36,7 @@ load-bearing on it yet.
 | Component | What it does | Default | Exercised | What leaves the machine |
 |---|---|---|---|---|
 | **Browser agent** (`browser/`) | Clones and patches a Jev-decided browser agent at a pin. | no (`--browser`) | own numbers, see `browser/README.md` | Page state and goals to the decision model you configure. |
+| **Browse MCP tool** (`browse/`) | A stdio MCP server with one tool, `browse`, that runs a goal through the browser agent and owns the headless Chromium. `R11` points Playwright MCP calls at it. The installer prints the `mcpServers` block and applies nothing. | no (`--browse-mcp`) | one real run, see `browse/README.md` | The same as the browser agent: page state and the goal, to TypeSafe. |
 | **Review** (`review/`) | Clones a Jev code reviewer at a pin, with a fail-open wrapper. | no (`--review`) | no numbers here | Diffs, to whatever review gate you configure. |
 | **Document classifier** (`docclass/`) | Two-stage document classifier with an escape hatch and a confidence gate. | no | **experimental** | Page text, to TypeSafe, when you call it. |
 | **Log triage** (`logtriage/`) | Redact-first, local-rules-first log triage on stdin. | no | **experimental** | Nothing until local rules are exhausted; redacted lines after that. |

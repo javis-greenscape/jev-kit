@@ -10,7 +10,7 @@
 
 <p>
   <a href="LICENSE"><img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-blue"></a>
-  <img alt="tests" src="https://img.shields.io/badge/tests-1160%20passing-brightgreen">
+  <img alt="tests" src="https://img.shields.io/badge/tests-1255%20passing-brightgreen">
   <img alt="Python 3.10+" src="https://img.shields.io/badge/python-3.10%2B-blue">
   <img alt="Platforms" src="https://img.shields.io/badge/platforms-Linux%20%7C%20WSL2%20%7C%20Windows-lightgrey">
   <img alt="Claude Code" src="https://img.shields.io/badge/Claude%20Code-PreToolUse%20hook-8A3FFC">
@@ -146,12 +146,16 @@ headless Chromium, 2026-09-19. Spend is goal 1, read from the CLI's own
 `total_cost_usd`. At n=3 a cell is directional, not significant. Full tables:
 **[docs/measurements.md](docs/measurements.md#the-browser-component)**.
 
-The guard now points at it. `R11-browse-via-jev` spots a session about to
-drive Playwright itself, asks Jev whether the task is browsing or test code,
-and on browsing blocks the call with the recipe for running the goal through
-the agent instead. Test runs are never touched, and an unreachable Jev prints
-the recipe rather than blocking anything. See
-[docs/rules.md](docs/rules.md#r11-browse-via-jev-browsing-goes-through-the-browser-agent).
+A session reaches it through one MCP tool, `browse`, which
+[browse/](browse/README.md) serves over stdio. Give it a goal and it returns
+the final URL, the page text and whatever a CSS selector picked out.
+
+The guard points at that tool. `R11-browse-via-jev` matches a Playwright MCP
+browsing call by its tool name and denies it with the one-line usage of
+`browse`. The match is code only: Jev is never asked and nothing is scored.
+Shell commands and Playwright scripts are never looked at, and the Playwright
+servers stay registered. See
+[docs/rules.md](docs/rules.md#r11-browse-via-jev-a-playwright-mcp-call-is-pointed-at-browse).
 
 ## What is in the kit
 

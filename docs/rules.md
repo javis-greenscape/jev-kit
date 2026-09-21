@@ -19,7 +19,7 @@ request, no log row, no subprocess.
 | `R8-tool-choice-guard` | Bash | deny | Jev | a disk-wide filename crawl, or a raw grep where a code graph exists |
 | `R9-commit-secret` | Bash | deny | code + a local credential belt | staging or committing a secret |
 | `R10-general-risk` | Bash | **warn only, never deny** | code pre-filter, then a Jev Score + `user_requested` | the catch-all: a call no other rule covers that plainly reaches outside the working tree |
-| `R11-browse-via-jev` | every tool (Bash and the Playwright MCP server) | deny | code pre-filter, then Jev on browse-or-test | a browse-and-report pass hand-driving Playwright, when the kit already ships a Jev-decided browser agent |
+| `R11-browse-via-jev` | every tool (only `mcp__` names can match) | deny | code only | a Playwright MCP browsing call, when the kit ships a Jev-decided `browse` tool |
 
 `R8-tool-choice-guard`'s graphify-suggestion branch only exists when the search
 root carries a graph (`graphify-out/graph.json`). With no graph the branch is
@@ -152,88 +152,54 @@ config can never make the guard misjudge a rung. Malformed means any of these:
 not a list of non-empty lists of strings, fewer than two rungs, or one name in
 two rungs.
 
-## `R11-browse-via-jev`: browsing goes through the browser agent
+## `R11-browse-via-jev`: a Playwright MCP call is pointed at `browse`
 
-The kit ships a Jev-decided browser agent (`browser/`, which clones
-jev-ultrafast at a pin). On the same nine goals it reaches everything Sonnet
-reaches for roughly 1/233rd of the Claude spend per run. Nothing steered
-anybody to it, so sessions kept writing their own Playwright scripts at Sonnet
-prices. This rule is that steer, and it is on by default.
+The kit ships a Jev-decided `browse` MCP tool ([browse/](../browse/README.md)),
+which drives the jev-ultrafast clone that `browser/` pins. On the same nine
+goals the Jev-decided agent reaches everything Sonnet reaches for roughly
+1/233rd of the Claude spend per run. This rule tells an agent that reaches for
+Playwright MCP to use `browse` instead. It is on by default.
 
-The code pre-filter recognises three ways of driving a browser:
+The whole rule is a tool-name match. The hook is wired with matcher `*`, so an
+MCP call reaches the table with its name, and the name is all this needs.
 
-- a Playwright MCP tool call, under either name the server is registered with
-  (`mcp__playwright__*`, `mcp__plugin_playwright_playwright__*`), and only for
-  the navigate / click / type / snapshot family. `browser_install` and
-  `browser_close` are not browsing and never match. The hook is wired with
-  matcher `*`, so a non-Bash tool call reaches the table with its name and its
-  `tool_input`, which is all this needs;
-- `playwright <verb>` or `npx playwright <verb>` for any verb other than
-  `test`, `install`, `install-deps`, `uninstall` and `show-report`;
-- a command wrapped in a shell (`bash -c "node scrape.js"`), whose string is
-  scanned as the command line it is;
-- a shell command running a script that imports `playwright` or
-  `playwright-core`, whether the script is a file (`node verify.cjs`,
-  `python3 verify.py`, `uv run python3 verify.py`) or inline (`node -e`,
-  `python3 -c`). `npm run <name>` is followed into `package.json`, up to
-  three hops, because the script name alone says nothing: `test:scrape` can
-  run anything, so what it runs decides. Yarn and pnpm let the verb be left
-  out, so `yarn scrape` is followed the same way and `yarn playwright open`
-  is read as the binary it runs; `npm start`, `stop` and `restart` are
-  followed too.
+- **The server** is any MCP server whose name contains `playwright`. That
+  covers `mcp__playwright__`, `mcp__plugin_playwright_playwright__`,
+  `mcp__playwright-ads__` and `mcp__playwright-jono__`.
+- **The tool** is one of fifteen that drive or read a page:
+  `browser_navigate`, `browser_navigate_back`, `browser_click`,
+  `browser_type`, `browser_fill_form`, `browser_press_key`, `browser_hover`,
+  `browser_drag`, `browser_select_option`, `browser_snapshot`,
+  `browser_take_screenshot`, `browser_evaluate`, `browser_run_code_unsafe`,
+  `browser_wait_for` and `browser_find`.
+- **Housekeeping never matches**: `browser_close`, `browser_install`,
+  `browser_resize`, `browser_tabs`, `browser_console_messages` and
+  `browser_network_requests`.
 
-This is the one rule that reads a file the command names, because `node
-verify.cjs` says nothing about Playwright from the command line alone. The
-read is bounded: one `isfile`, one size check, at most 256KB, and only for a
-segment that actually runs a file with a script extension.
+Matched means deny. Jev is not asked anything, so there is no confidence bar
+and no key is needed. The `user_requested` question that can soften other
+denies is skipped here too. An MCP browser call made from a Claude session is
+browsing by definition, which leaves nothing to judge.
 
-Three things never match at all. A test run is e2e code, not browsing:
-`playwright test`, `vitest`, `jest`, `pytest`, `npm test`,
-and a spec file run straight through an interpreter (`node e2e/login.spec.js`),
-which is how somebody debugs one. The path raises that question and the file
-answers it: a scraper moved under `e2e/` or renamed `.spec.js` is still a
-scraper, while a file that cannot be read keeps the path's answer, because
-test code must never be blocked.
-A script that does not import Playwright is nothing to do with this rule. And
-a command that is already running the Jev agent is the thing the rule asks
-for, so it is never the thing the rule catches: a script resolving inside the
-agent's own checkout, or a segment that assigns or exports `BU_CDP_URL`, which
-only the harness reads.
+Shell commands are never looked at. A Playwright script is fixed code with no
+model choosing its steps, so Jev has nothing to decide in one. `node
+scrape.js`, `npx playwright open` and `playwright test` all pass untouched.
 
-Those two exemptions are not the same strength, and the difference is
-deliberate. A path into the checkout is evidence. `BU_CDP_URL` is a
-declaration: setting it exempts the segments after it whatever they then run,
-because the recipe's own runner script lives wherever the person put it rather
-than inside the checkout, and requiring the checkout path there would flag the
-very workflow this rule recommends. So it is an escape hatch somebody can type
-on purpose, sitting beside the `[airlock-ok: <reason>]` stamp and the off
-switch. This rule is a cost steer that fails open, not a lock, and the safety
-model says the same of every rule here.
+The deny names the tool and gives its usage in one line:
 
-Both an assignment and a `cd` carry into the segments after them. Neither
-blesses the command sharing its own segment, so `BU_CDP_URL=... node
-hand-rolled.js` is still a hand-rolled script unless its path says otherwise,
-and a bare mention of the agent or the variable in an `echo` or a heredoc
-exempts nothing at all.
+```text
+browse(goal="open https://example.com and report the main heading", extract="h1")
+```
 
-When the pre-filter fires, Jev is asked one question: is this a
-browse-and-report pass, or is it writing or running test code? Only
-`browse_and_report` denies, and only at the usual bar of confidence 0.8 and
-margin 0.4. The deny prints the recipe measured on 2026-09-20: log in with a
-small script that reads the credential inside the process, leave headless
-Chromium on a CDP port, run each goal through jev-ultrafast with `BU_CDP_URL`,
-and read the result with a small DOM extraction, because Jev decides
-operations and does not narrate a page. Three LinkOne goals that way each
-finished in under three seconds with no Claude decision calls at all.
+There are three ways past it. An `[airlock-ok: <reason>]` stamp gets one call
+through. An MCP call has no `description` field, so for an `mcp__` tool the
+stamp is read from any top-level text field, such as `element` on a click.
+Loop protection works as it does for every rule: the identical call repeated
+within ten minutes is allowed. And `{"R11-browse-via-jev": "off"}` in
+`~/.config/airlock/rules.json` turns the rule off.
 
-**It never blocks when Jev cannot answer.** No key, no tokens, a timeout, an
-error of any kind: the call is allowed, and the recipe is printed as advice
-instead. The note on that advice says which happened, because an answer that
-arrived after the time budget is not the same event as Jev never being
-reached. That is the one place this rule differs from the others, which stay
-silent on an error. Turn the whole thing off with
-`{"R11-browse-via-jev": "off"}` in `~/.config/airlock/rules.json`, or get past
-one call with an `[airlock-ok: <reason>]` stamp.
+This is a cost steer, not a security control. It removes nothing: the
+Playwright MCP servers stay registered.
 
 ## `R10-general-risk`: the fallback
 

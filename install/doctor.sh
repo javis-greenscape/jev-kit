@@ -515,6 +515,29 @@ do
     skip "$name: not installed"
   fi
 done
+# browse: run the server through a real MCP handshake over stdio. It needs the
+# browser clone, so without one it is a skip and not a failure. No call is
+# made, so no Chromium starts and no key is read.
+BROWSE_SERVER="$LIVE/browse/server.py"
+BROWSE_CLONE="${JEV_ULTRAFAST_DIR:-${AIRLOCK_BROWSER_DIR:-$HOME/code/jev-ultrafast}}"
+if [ ! -f "$BROWSE_SERVER" ]; then
+  skip "browse: not present in the live copy"
+elif [ ! -f "$BROWSE_CLONE/jev_ultrafast/agent.py" ]; then
+  skip "browse: no jev-ultrafast clone at $BROWSE_CLONE (install/install.sh --browser --browse-mcp)"
+else
+  BROWSE_OUT="$(printf '%s\n' \
+    '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"doctor","version":"0"}}}' \
+    '{"jsonrpc":"2.0","method":"notifications/initialized"}' \
+    '{"jsonrpc":"2.0","id":2,"method":"tools/list"}' \
+    | timeout 30 "$PY" "$BROWSE_SERVER" 2>/dev/null)"
+  if printf '%s' "$BROWSE_OUT" | grep -q '"serverInfo"' \
+     && printf '%s' "$BROWSE_OUT" | grep -q '"name": "browse"'; then
+    pass "browse: server answered initialize and tools/list over stdio (tool: browse)"
+  else
+    fail "browse: $BROWSE_SERVER did not answer the MCP handshake"
+  fi
+fi
+
 if [ -f "$LIVE/shim/shim.py" ]; then
   if "$PY" -c "import ast,sys; ast.parse(open('$LIVE/shim/shim.py').read())" 2>/dev/null; then
     pass "shim: shim.py parses (stdlib-only; nothing to install)"
