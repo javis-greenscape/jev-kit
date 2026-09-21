@@ -1675,6 +1675,15 @@ def _pw_sets_cdp(seg):
     and words() splits on whitespace, so the quoted text is tokens too. What
     makes it an assignment is its POSITION, not the string."""
     toks = words(seg)
+    # `env BU_CDP_URL=... node x.js` declares it exactly as a bare prefix
+    # does, and R11 unwraps `env` everywhere else.
+    if toks[:1] == ["env"]:
+        toks = toks[1:]
+        while toks and toks[0].startswith("-"):
+            if toks[0] in _ENV_VALUE_FLAGS and "=" not in toks[0]:
+                toks = toks[2:]
+            else:
+                toks = toks[1:]
     i = 0
     while i < len(toks) and _ASSIGN_RE.match(toks[i]):
         if toks[i].startswith(_PW_CDP_VAR):
@@ -1697,6 +1706,17 @@ _UV_RUN_VALUE_FLAGS = {
     "--group", "--package", "--env-file", "--index-url", "--find-links",
     "--constraint", "--override", "--refresh-package",
 }
+
+
+def _pw_first_operand(args):
+    """The first bare argument: the script a runner runs. Flags, and the
+    values of the flags that take one, are not it."""
+    for i, a in enumerate(args):
+        if a == "--":
+            return args[i + 1] if i + 1 < len(args) else ""
+        if not a.startswith("-"):
+            return a
+    return ""
 
 
 def _pw_names_the_agent(tok):
@@ -1877,14 +1897,16 @@ def _pw_scan(segments, cwd, depth, cdp=False):
             cdp = True
         elif cdp:
             continue
-        # Only a PATH-shaped token earns the exemption. `node x.js --note
+        # Only the thing being RUN earns the exemption: the program, or the
+        # first bare argument, which is the script. `node x.js --note
         # jev-ultrafast-comparison` is a hand-rolled script with a label on
-        # it, not the agent.
-        if any(_pw_names_the_agent(a) for a in args):
+        # it, and `node x.js --log ~/code/jev-ultrafast/run.log` is one
+        # writing its log there. Neither is the agent.
+        if _pw_names_the_agent(_pw_first_operand(args)):
             continue
         if prog is None:
             continue
-        if any(m in prog for m in _PW_JEV_PATH_MARKERS):
+        if _pw_names_the_agent(prog):
             continue
         if prog == "env":
             # `env VAR=val node x.js` runs node. program_of's _SKIP_PREFIX

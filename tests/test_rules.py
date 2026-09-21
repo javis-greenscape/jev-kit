@@ -1046,6 +1046,10 @@ class TestR11BrowseViaJev(unittest.TestCase):
         path = self._script("hand_written.js", "const { chromium } = require('playwright');\n")
         self.assert_asks(self.ctx("node %s --note jev-ultrafast-comparison" % path))
         self.assert_asks(self.ctx("node %s --label jev_ultrafast" % path))
+        self.assert_asks(self.ctx("node %s --log ~/code/jev-ultrafast/run.log" % path))
+        self.assertEqual(rules._pw_first_operand(["-p", "x.js"]), "x.js")
+        self.assertEqual(rules._pw_first_operand(["--", "x.js"]), "x.js")
+        self.assertEqual(rules._pw_first_operand(["--flag"]), "")
         self.assertFalse(rules._pw_names_the_agent("jev-ultrafast-comparison"))
         self.assertFalse(rules._pw_names_the_agent("--with=jev-ultrafast"))
         self.assertTrue(rules._pw_names_the_agent("~/code/jev-ultrafast/run_goal.py"))
@@ -1059,6 +1063,12 @@ class TestR11BrowseViaJev(unittest.TestCase):
         self.assertTrue(rules._pw_sets_cdp("BU_CDP_URL=http://127.0.0.1:9333 node x.js"))
         self.assertTrue(rules._pw_sets_cdp("export BU_CDP_URL=http://127.0.0.1:9333"))
         self.assertTrue(rules._pw_sets_cdp("export FOO=1 BU_CDP_URL=x"))
+        # `env VAR=val cmd` declares it exactly as a bare prefix does.
+        self.assertTrue(rules._pw_sets_cdp("env BU_CDP_URL=http://127.0.0.1:9333 node x.js"))
+        self.assertTrue(rules._pw_sets_cdp("env -u DISPLAY BU_CDP_URL=x node x.js"))
+        self.assertFalse(rules._pw_sets_cdp("env FOO=1 node x.js"))
+        self.assert_silent(self.ctx(
+            "env BU_CDP_URL=http://127.0.0.1:9333 true ; node %s" % path))
         self.assertFalse(rules._pw_sets_cdp('echo "BU_CDP_URL=x"'))
         self.assertFalse(rules._pw_sets_cdp("node x.js BU_CDP_URL=x"))
 
