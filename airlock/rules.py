@@ -1965,7 +1965,11 @@ def _pw_is_test_run(prog, args):
         # anything. The script is followed into package.json instead, and
         # what it really runs answers the question. Only `npm test` itself,
         # handled above, is taken on its name.
-        if name and kind in ("binary", "shorthand") and name in _JS_RUNNERS:
+        # Only an EXPLICIT binary run (`pnpm exec vitest`) is taken on the
+        # name. `yarn vitest` may be a package script called vitest that
+        # runs something else entirely, so it is chased into package.json
+        # like any other shorthand, and what it runs decides.
+        if name and kind == "binary" and name in _JS_RUNNERS:
             return True
     if prog == "npx":
         rest = _npx_arguments(args)

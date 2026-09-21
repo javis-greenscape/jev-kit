@@ -1023,10 +1023,17 @@ class TestR11BrowseViaJev(unittest.TestCase):
                   "npm exec playwright open https://x",
                   "yarn scrape", "pnpm scrape"):
             self.assert_asks(self.ctx(c), c)
+        # A script called after a test runner is still chased: `yarn vitest`
+        # may be a package script that runs something else entirely.
+        self._script("package.json", json.dumps({"scripts": {
+            "scrape": "node scrape.js", "build": "node build.js",
+            "test:e2e": "node scrape.js", "vitest": "node scrape.js"}}))
+        self.assert_asks(self.ctx("yarn vitest"))
+        self.assert_silent(self.ctx("pnpm exec vitest"))
         self.assert_asks(self.ctx("yarn test:e2e"),
                          "a test-named script running a scraper is still a scraper")
         for c in ("yarn playwright test", "pnpm exec playwright install",
-                  "yarn vitest", "yarn install", "pnpm add playwright",
+                  "yarn install", "pnpm add playwright",
                   "yarn why playwright", "npm nonsense"):
             self.assert_silent(self.ctx(c), c)
         self.assertEqual(rules._pm_operands("yarn", ["playwright", "open"]),

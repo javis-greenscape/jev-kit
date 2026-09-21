@@ -390,9 +390,14 @@ def _handle(data, tool_name, mode="enforce"):
 
 # What the session sees when the advice arrived WITHOUT a judgement. Without
 # it the text is identical to a real warn, and nobody can tell the two apart.
+# Deliberately neutral about the cause. This branch catches a missing or
+# revoked key, an HTTP error, a malformed reply and a timeout alike, and
+# naming only the last of those sent somebody looking for a network blip
+# when the key was the problem. The log row carries the real exception.
 ADVISE_ON_ERROR_NOTE = (
-    "(Nothing was judged and nothing was blocked: Jev could not be reached in "
-    "time. This is advice only.)"
+    "(Nothing was judged and nothing was blocked: Jev returned no usable "
+    "answer. The reason is on the airlock log row for this call. This is "
+    "advice only.)"
 )
 # The budget case is not the same event, and saying it was would be untrue:
 # Jev answered, the answer simply arrived after the window that decides
