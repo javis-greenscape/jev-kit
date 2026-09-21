@@ -173,11 +173,12 @@ The code pre-filter recognises three ways of driving a browser:
 - a shell command running a script that imports `playwright` or
   `playwright-core`, whether the script is a file (`node verify.cjs`,
   `python3 verify.py`, `uv run python3 verify.py`) or inline (`node -e`,
-  `python3 -c`). `npm run <name>` is followed one step into `package.json`,
-  because the script name alone says nothing, unless the name itself says
-  tests (`test`, `test:e2e`, `e2e`, `spec`). Yarn and pnpm let the verb be
-  left out, so `yarn scrape` is followed the same way and `yarn playwright
-  open` is read as the binary it runs.
+  `python3 -c`). `npm run <name>` is followed into `package.json`, up to
+  three hops, because the script name alone says nothing: `test:scrape` can
+  run anything, so what it runs decides. Yarn and pnpm let the verb be left
+  out, so `yarn scrape` is followed the same way and `yarn playwright open`
+  is read as the binary it runs; `npm start`, `stop` and `restart` are
+  followed too.
 
 This is the one rule that reads a file the command names, because `node
 verify.cjs` says nothing about Playwright from the command line alone. The
@@ -185,7 +186,7 @@ read is bounded: one `isfile`, one size check, at most 256KB, and only for a
 segment that actually runs a file with a script extension.
 
 Three things never match at all. A test run is e2e code, not browsing:
-`playwright test`, `vitest`, `jest`, `pytest`, `npm test`, `pnpm run test:e2e`,
+`playwright test`, `vitest`, `jest`, `pytest`, `npm test`,
 and a spec file run straight through an interpreter (`node e2e/login.spec.js`),
 which is how somebody debugs one. The path raises that question and the file
 answers it: a scraper moved under `e2e/` or renamed `.spec.js` is still a

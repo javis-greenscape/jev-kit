@@ -10,7 +10,10 @@ when a segment actually runs a file with a script extension). It answers, in mic
     could any rule possibly fire for this call?
 
 A call that matches no rule costs a `shlex`-free string scan and nothing else:
-no Jev request, no log row, no subprocess. Only when a code pre-filter matches
+no Jev request, no log row, no subprocess. The one exception is R11, which
+reads a script a command names -- bounded, cached per scan, and only for a
+segment that runs a file with a script extension -- so a call that runs a
+script pays one stat and one read rather than nothing. Only when a code pre-filter matches
 does airlock/enforce.py (or the shadow worker) go on to ask Jev the single
 fuzzy question that rule needs -- and only for rules whose pre-filter says the
 fuzzy part is actually in doubt.
@@ -1944,8 +1947,10 @@ def _pw_is_test_run(prog, args):
             return True
         kind, rest = _pm_operands(prog, args)
         name = (rest[0] if rest else (args[0] if kind == "shorthand" and args else ""))
-        if name and kind in ("script", "shorthand") and _PW_TEST_SCRIPT_RE.search(name):
-            return True
+        # A script NAME is not evidence: `npm run test:scrape` can run
+        # anything. The script is followed into package.json instead, and
+        # what it really runs answers the question. Only `npm test` itself,
+        # handled above, is taken on its name.
         if name and kind in ("binary", "shorthand") and name in _JS_RUNNERS:
             return True
     if prog == "npx":
@@ -2026,9 +2031,16 @@ def _pw_scan(segments, cwd, depth, cdp=False, cache=None):
             # A `cd` carries into the segments after it, so a later `node
             # run_goal.js` inside the agent's checkout is still the agent.
             # It changes nothing about the `cd` segment itself.
-            # A bare `cd` goes home, as it does in a real shell.
-            target = args[0] if args else "~"
-            if target and not target.startswith("-"):
+            # A bare `cd` goes home, as it does in a real shell. A `cd`
+            # whose target we cannot read (a flag, `cd -`, `cd -P dir`)
+            # leaves the directory UNKNOWN rather than stale: carrying the
+            # old one forward would resolve later scripts against a
+            # directory the command is no longer in.
+            target = _pw_first_operand(args) if args else "~"
+            if target == "-" or (args and not target):
+                cur_cwd = ""
+                continue
+            if target:
                 target = _expand(target)
                 if os.path.isabs(target):
                     cur_cwd = target
@@ -2078,6 +2090,7 @@ def _pw_scan(segments, cwd, depth, cdp=False, cache=None):
             continue
         if _pw_is_test_run(prog, args) or _pw_looks_like_a_test(prog, args, cur_cwd):
             continue
+        unwrapped = (prog, args)
 
         if depth < _PW_MAX_SCRIPT_HOPS:
             script = _pw_package_script(prog, args, cur_cwd, cache)
@@ -2121,9 +2134,11 @@ def _pw_scan(segments, cwd, depth, cdp=False, cache=None):
         if prog not in _PW_SCRIPT_RUNNERS:
             continue
         # The package-manager and npx branches above may have replaced the
-        # program with the interpreter they wrap, so the test checks run
-        # again on what is really being run.
-        if _pw_is_test_run(prog, args) or _pw_looks_like_a_test(prog, args, cur_cwd):
+        # program with the interpreter they wrap. Only then is the test
+        # check worth running a second time, and running it twice on an
+        # unchanged command would re-read the same file for nothing.
+        if (prog, args) != unwrapped and (
+                _pw_is_test_run(prog, args) or _pw_looks_like_a_test(prog, args, cur_cwd)):
             continue
         if any(a in _PW_INLINE_FLAGS for a in args):
             if _PW_IMPORT_INLINE_RE.search(seg):

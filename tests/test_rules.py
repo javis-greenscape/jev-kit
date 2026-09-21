@@ -964,9 +964,17 @@ class TestR11BrowseViaJev(unittest.TestCase):
         for c in ("npm run scrape", "pnpm run scrape", "yarn run scrape"):
             self.assert_asks(self.ctx(c), c)
         self.assert_silent(self.ctx("npm run build"))
-        # A script whose NAME says tests is still a test run, unfollowed.
-        self.assert_silent(self.ctx("npm run test:e2e"))
         self.assert_silent(self.ctx("npm run nonexistent"))
+        # A script NAME is not evidence. `test:e2e` is followed like any
+        # other: what it RUNS decides.
+        self._script("package.json", json.dumps({"scripts": {
+            "scrape": "node scrape.js",
+            "build": "node build.js",
+            "test:e2e": "playwright test e2e/",
+            "test:scrape": "node scrape.js",
+        }}))
+        self.assert_silent(self.ctx("npm run test:e2e"))
+        self.assert_asks(self.ctx("npm run test:scrape"))
 
     def test_a_later_script_argument_is_checked_too(self):
         self._script("loader.mjs", "import './worker.mjs';\n")
@@ -1015,8 +1023,10 @@ class TestR11BrowseViaJev(unittest.TestCase):
                   "npm exec playwright open https://x",
                   "yarn scrape", "pnpm scrape"):
             self.assert_asks(self.ctx(c), c)
+        self.assert_asks(self.ctx("yarn test:e2e"),
+                         "a test-named script running a scraper is still a scraper")
         for c in ("yarn playwright test", "pnpm exec playwright install",
-                  "yarn test:e2e", "yarn vitest", "yarn install", "pnpm add playwright",
+                  "yarn vitest", "yarn install", "pnpm add playwright",
                   "yarn why playwright", "npm nonsense"):
             self.assert_silent(self.ctx(c), c)
         self.assertEqual(rules._pm_operands("yarn", ["playwright", "open"]),
@@ -1150,6 +1160,15 @@ class TestR11BrowseViaJev(unittest.TestCase):
             self.assert_asks(self.ctx(c), c)
         self.assertEqual(rules._pm_operands("npm", ["start"]), ("shorthand", ["start"]))
         self.assertEqual(rules._pm_operands("npm", ["foo"]), (None, []))
+
+    def test_a_cd_we_cannot_read_leaves_the_directory_unknown(self):
+        """Carrying the old directory forward would resolve a later script
+        against a directory the command is no longer in."""
+        self._script("verify.cjs", "const { chromium } = require('playwright');\n")
+        segs = rules.split_segments("cd - && node verify.cjs")
+        self.assertIsNone(rules._pw_scan(segs, self.tmp, 0))
+        self.assertIsNotNone(rules._pw_scan(
+            rules.split_segments("node verify.cjs"), self.tmp, 0))
 
     def test_a_package_script_chain_is_followed(self):
         self._script("scrape.js", "const { chromium } = require('playwright');\n")
