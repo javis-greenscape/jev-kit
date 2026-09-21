@@ -1067,6 +1067,11 @@ class TestR11BrowseViaJev(unittest.TestCase):
         self.assert_asks(self.ctx("node %s --note jev-ultrafast-comparison" % path))
         self.assert_asks(self.ctx("node %s --label jev_ultrafast" % path))
         self.assert_asks(self.ctx("node %s --log ~/code/jev-ultrafast/run.log" % path))
+        # The exemption is read AFTER the wrappers come off, so an unrelated
+        # variable carrying that path is not the agent either.
+        self.assert_asks(self.ctx("env NOTE=/tmp/jev-ultrafast/decoy node %s" % path))
+        self.assert_asks(self.ctx("uv run --with /tmp/jev-ultrafast/x python3 %s"
+                                  % self._script("v.py", "import playwright\n")))
         self.assertEqual(rules._pw_first_operand(["-p", "x.js"]), "x.js")
         self.assertEqual(rules._pw_first_operand(["--", "x.js"]), "x.js")
         self.assertEqual(rules._pw_first_operand(["--flag"]), "")

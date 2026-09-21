@@ -1943,16 +1943,7 @@ def _pw_scan(segments, cwd, depth, cdp=False):
             cdp = True
         elif cdp:
             continue
-        # Only the thing being RUN earns the exemption: the program, or the
-        # first bare argument, which is the script. `node x.js --note
-        # jev-ultrafast-comparison` is a hand-rolled script with a label on
-        # it, and `node x.js --log ~/code/jev-ultrafast/run.log` is one
-        # writing its log there. Neither is the agent.
-        if _pw_names_the_agent(_pw_first_operand(args)):
-            continue
         if prog is None:
-            continue
-        if _pw_names_the_agent(prog):
             continue
         if prog == "env":
             # `env VAR=val node x.js` runs node. program_of's _SKIP_PREFIX
@@ -1964,6 +1955,15 @@ def _pw_scan(segments, cwd, depth, cdp=False):
             prog, args = _uv_run_program(args[1:])
             if prog is None:
                 continue
+        # Only the thing being RUN earns the exemption, and only once the
+        # wrappers are off: the program, or the first bare argument, which is
+        # the script. `node x.js --note jev-ultrafast-comparison` is a
+        # hand-rolled script with a label on it, `node x.js --log
+        # ~/code/jev-ultrafast/run.log` is one writing its log there, and
+        # `env NOTE=/tmp/jev-ultrafast/decoy node x.js` is one with an
+        # unrelated variable set. None of them is the agent.
+        if _pw_names_the_agent(prog) or _pw_names_the_agent(_pw_first_operand(args)):
+            continue
         if _pw_is_test_run(prog, args):
             continue
 
