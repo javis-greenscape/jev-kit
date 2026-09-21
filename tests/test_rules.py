@@ -1108,6 +1108,20 @@ class TestR11BrowseViaJev(unittest.TestCase):
         c = rules.build_ctx({"tool_name": "Read", "tool_input": {"file_path": "/tmp/x.py"}}, "Read")
         self.assert_silent(c, "Read")
 
+    def test_jsx_and_tsx_are_scripts_too(self):
+        for name in ("scrape.tsx", "scrape.jsx"):
+            path = self._script(name, "import { chromium } from 'playwright';\n")
+            self.assert_asks(self.ctx("node %s" % path), name)
+
+    def test_a_relative_path_with_no_cwd_is_not_guessed(self):
+        """With no cwd on the payload there is nothing to resolve against,
+        and the hook process's own directory is not the tool call's."""
+        self.assertEqual(rules._pw_resolve_script("verify.js", ""), ("", ""))
+        self.assertEqual(rules._pw_package_script("npm", ["run", "scrape"], ""), "")
+        c = rules.build_ctx({"tool_name": "Bash", "tool_input": {"command": "node verify.js"}},
+                            "Bash")
+        self.assert_silent(c, "no cwd")
+
     def test_a_missing_or_huge_script_is_read_safely(self):
         self.assertEqual(rules._pw_script_source("/nonexistent/x.js", self.tmp), "")
         self.assertEqual(rules._pw_script_source("--flag", self.tmp), "")

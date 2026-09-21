@@ -1633,7 +1633,7 @@ _NPX_VALUE_FLAGS = {"-p", "--package", "-c", "--call", "--userconfig", "--shell"
 # env's own flags that take a separate value.
 _ENV_VALUE_FLAGS = {"-u", "--unset", "-C", "--chdir", "-S", "--split-string"}
 
-_PW_SCRIPT_EXTS = (".js", ".cjs", ".mjs", ".ts", ".mts", ".cts", ".py")
+_PW_SCRIPT_EXTS = (".js", ".cjs", ".mjs", ".jsx", ".ts", ".mts", ".cts", ".tsx", ".py")
 _PW_MAX_SCRIPT_BYTES = 256 * 1024
 _PW_SCRIPT_RUNNERS = {"node", "bun", "deno", "tsx", "ts-node", "python", "python3"}
 _PW_INLINE_FLAGS = {"-e", "--eval", "-c", "--command", "-p", "--print"}
@@ -1781,7 +1781,12 @@ def _pw_resolve_script(tok, cwd):
         if not tok or tok.startswith("-") or not tok.endswith(_PW_SCRIPT_EXTS):
             return "", ""
         path = _expand(tok)
-        if not os.path.isabs(path) and cwd:
+        if not os.path.isabs(path):
+            # No cwd on the payload means there is nothing to resolve a
+            # relative path against. The hook process's own directory is not
+            # the tool call's, so guessing with it would read the wrong file.
+            if not cwd:
+                return "", ""
             path = os.path.join(cwd, path)
         if not os.path.isfile(path):
             return "", ""
@@ -1877,7 +1882,9 @@ def _pw_package_script(prog, args, cwd):
             name = args[0]
         else:
             return ""
-        path = os.path.join(cwd or "", "package.json")
+        if not cwd:
+            return ""
+        path = os.path.join(cwd, "package.json")
         if not os.path.isfile(path) or os.path.getsize(path) > _PW_MAX_SCRIPT_BYTES:
             return ""
         with open(path, "r", errors="replace") as f:
