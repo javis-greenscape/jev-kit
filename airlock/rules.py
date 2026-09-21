@@ -1712,14 +1712,28 @@ _UV_RUN_VALUE_FLAGS = {
 }
 
 
+# Interpreter flags that take a separate value, so the token after them is
+# NOT the script. `node --require ~/code/jev-ultrafast/preload.js mine.js`
+# runs mine.js.
+_PW_RUNNER_VALUE_FLAGS = {
+    "-r", "--require", "--import", "--loader", "--experimental-loader",
+    "--conditions", "-C", "--env-file", "--inspect-brk", "--max-old-space-size",
+    "--tsconfig", "--tsconfig-path", "-m", "--module", "-X", "--check-hash-based-pycs",
+}
+
+
 def _pw_first_operand(args):
     """The first bare argument: the script a runner runs. Flags, and the
     values of the flags that take one, are not it."""
-    for i, a in enumerate(args):
+    i = 0
+    while i < len(args):
+        a = args[i]
         if a == "--":
             return args[i + 1] if i + 1 < len(args) else ""
-        if not a.startswith("-"):
-            return a
+        if a.startswith("-"):
+            i += 2 if ("=" not in a and a in _PW_RUNNER_VALUE_FLAGS) else 1
+            continue
+        return a
     return ""
 
 
@@ -1859,6 +1873,23 @@ def _pm_operands(prog, args):
     return "shorthand", args
 
 
+# A file that is itself a test: `e2e/login.spec.ts`, `tests/browse.test.js`,
+# anything under an e2e or __tests__ directory. Running one directly with a
+# bare interpreter is debugging a spec, which this rule never treats as
+# browsing -- the docs promise as much.
+_PW_TEST_PATH_RE = re.compile(
+    r"(?:^|/)(?:tests?|e2e|__tests__|spec|specs|integration)/"
+    r"|\.(?:spec|test|e2e)\.[\w]+$"
+    r"|(?:^|/)conftest\.py$",
+)
+
+
+def _pw_is_test_path(path):
+    if not path:
+        return False
+    return bool(_PW_TEST_PATH_RE.search(path.replace(os.sep, "/")))
+
+
 def _pw_is_test_run(prog, args):
     """True for a run of e2e code: a test runner, or a package script whose
     name says it runs tests. These are always allowed -- writing and running
@@ -1992,7 +2023,7 @@ def _pw_scan(segments, cwd, depth, cdp=False):
         # unrelated variable set. None of them is the agent.
         if _pw_names_the_agent(prog) or _pw_names_the_agent(_pw_first_operand(args)):
             continue
-        if _pw_is_test_run(prog, args):
+        if _pw_is_test_run(prog, args) or _pw_is_test_path(_pw_first_operand(args)):
             continue
 
         if depth < _PW_MAX_SCRIPT_HOPS:
@@ -2035,6 +2066,11 @@ def _pw_scan(segments, cwd, depth, cdp=False):
             )
 
         if prog not in _PW_SCRIPT_RUNNERS:
+            continue
+        # The package-manager and npx branches above may have replaced the
+        # program with the interpreter they wrap, so the test checks run
+        # again on what is really being run.
+        if _pw_is_test_run(prog, args) or _pw_is_test_path(_pw_first_operand(args)):
             continue
         if any(a in _PW_INLINE_FLAGS for a in args):
             if _PW_IMPORT_INLINE_RE.search(seg):

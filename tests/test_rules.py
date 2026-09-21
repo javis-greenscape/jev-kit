@@ -1085,6 +1085,25 @@ class TestR11BrowseViaJev(unittest.TestCase):
                            "const { chromium } = require('playwright');\n")
         self.assert_asks(self.ctx("node %s" % poc))
 
+    def test_a_runner_flag_value_is_not_the_script(self):
+        path = self._script("my_hand_rolled.js",
+                            "const { chromium } = require('playwright');\n")
+        self.assert_asks(self.ctx(
+            "node --require ~/code/jev-ultrafast/preload.js %s" % path))
+        self.assertEqual(rules._pw_first_operand(["-r", "pre.js", "mine.js"]), "mine.js")
+        self.assertEqual(rules._pw_first_operand(["--inspect", "mine.js"]), "mine.js")
+
+    def test_a_spec_file_run_directly_is_a_test_run(self):
+        os.makedirs(os.path.join(self.tmp, "e2e"), exist_ok=True)
+        spec = self._script(os.path.join("e2e", "login.spec.js"),
+                            "import { test, chromium } from '@playwright/test';\n")
+        for c in ("node %s" % spec, "npx tsx %s" % spec):
+            self.assert_silent(self.ctx(c), c)
+        self.assertTrue(rules._pw_is_test_path("e2e/login.spec.ts"))
+        self.assertTrue(rules._pw_is_test_path("tests/browse.js"))
+        self.assertFalse(rules._pw_is_test_path("scripts/verify.js"))
+        self.assertFalse(rules._pw_is_test_path(""))
+
     def test_env_after_a_double_dash_is_still_an_assignment(self):
         path = self._script("hand.js", "const { chromium } = require('playwright');\n")
         self.assert_asks(self.ctx("env -- NOTE=1 node %s" % path))

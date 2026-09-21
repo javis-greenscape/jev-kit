@@ -184,8 +184,10 @@ verify.cjs` says nothing about Playwright from the command line alone. The
 read is bounded: one `isfile`, one size check, at most 256KB, and only for a
 segment that actually runs a file with a script extension.
 
-Three things never match at all. A test run (`playwright test`, `vitest`,
-`jest`, `pytest`, `npm test`, `pnpm run test:e2e`) is e2e code, not browsing.
+Three things never match at all. A test run is e2e code, not browsing:
+`playwright test`, `vitest`, `jest`, `pytest`, `npm test`, `pnpm run test:e2e`,
+and a spec file run straight through an interpreter (`node e2e/login.spec.js`),
+which is how somebody debugs one.
 A script that does not import Playwright is nothing to do with this rule. And
 a command that is already running the Jev agent is the thing the rule asks
 for, so it is never the thing the rule catches: a script resolving inside the
