@@ -1845,6 +1845,10 @@ _PM_BUILTINS = {
     "ls", "info", "login", "logout", "version", "set", "get", "store",
     "prune", "dedupe", "import", "patch", "rebuild", "env", "help", "node",
 }
+# npm's built-in aliases for a package script of the same name. `test` is
+# handled before this, as a test run.
+_NPM_SCRIPT_ALIASES = {"start", "stop", "restart"}
+
 # How each package manager spells "run this binary".
 _PM_EXEC_VERBS = {"npm": ("exec", "x"), "pnpm": ("exec", "dlx"), "yarn": ("exec", "dlx")}
 
@@ -1875,7 +1879,11 @@ def _pm_operands(prog, args):
     if head.startswith("-") or head in _PM_BUILTINS:
         return None, []
     if prog == "npm":
-        # npm has no run-less shorthand: `npm foo` is an error, not a script.
+        # npm has no general run-less shorthand -- `npm foo` is an error --
+        # but it does have these four aliases for a package script, and
+        # `npm start` is one of the commonest ways to run anything at all.
+        if head in _NPM_SCRIPT_ALIASES:
+            return "shorthand", args
         return None, []
     # yarn/pnpm shorthand: a script if package.json has one, else a binary.
     return "shorthand", args

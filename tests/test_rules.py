@@ -1140,6 +1140,17 @@ class TestR11BrowseViaJev(unittest.TestCase):
             self.assert_asks(self.ctx("npm run lint && npm run build && npm run browse"))
         self.assertEqual(len(reads), 1, reads)
 
+    def test_npm_start_is_followed(self):
+        """`npm start` is a package script under another name, and one of
+        the commonest ways to run anything."""
+        self._script("scrape.js", "const { chromium } = require('playwright');\n")
+        self._script("package.json", json.dumps({"scripts": {
+            "start": "node scrape.js", "stop": "node scrape.js"}}))
+        for c in ("npm start", "npm stop", "yarn start", "pnpm start"):
+            self.assert_asks(self.ctx(c), c)
+        self.assertEqual(rules._pm_operands("npm", ["start"]), ("shorthand", ["start"]))
+        self.assertEqual(rules._pm_operands("npm", ["foo"]), (None, []))
+
     def test_a_package_script_chain_is_followed(self):
         self._script("scrape.js", "const { chromium } = require('playwright');\n")
         self._script("package.json", json.dumps({"scripts": {
