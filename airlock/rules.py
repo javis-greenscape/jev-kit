@@ -1607,9 +1607,9 @@ _PW_MCP_BROWSING = {
 }
 
 _PW_IMPORT_RE = re.compile(
-    r"""require\(\s*['"](?:@playwright/[\w.-]+|playwright(?:-core)?(?:/[\w.-]+)?)['"]"""
-    r"""|from\s+['"](?:@playwright/[\w.-]+|playwright(?:-core)?(?:/[\w.-]+)?)['"]"""
-    r"""|import\s*\(\s*['"](?:@playwright/[\w.-]+|playwright(?:-core)?(?:/[\w.-]+)?)['"]"""
+    r"""require\(\s*['"](?:@playwright/[\w.-]+|playwright[\w.-]*(?:/[\w.-]+)?)['"]"""
+    r"""|from\s+['"](?:@playwright/[\w.-]+|playwright[\w.-]*(?:/[\w.-]+)?)['"]"""
+    r"""|import\s*\(\s*['"](?:@playwright/[\w.-]+|playwright[\w.-]*(?:/[\w.-]+)?)['"]"""
     r"""|^\s*import\s+playwright\b"""
     r"""|^\s*from\s+playwright(?:\.[\w.]+)?\s+import\b""",
     re.M,
@@ -1619,9 +1619,9 @@ _PW_IMPORT_RE = re.compile(
 # `-c`: there the import is mid-line, inside a quoted argument, not at the
 # start of a line of its own.
 _PW_IMPORT_INLINE_RE = re.compile(
-    r"""require\(\s*['"](?:@playwright/[\w.-]+|playwright(?:-core)?(?:/[\w.-]+)?)['"]"""
-    r"""|from\s+['"](?:@playwright/[\w.-]+|playwright(?:-core)?(?:/[\w.-]+)?)['"]"""
-    r"""|import\s*\(\s*['"](?:@playwright/[\w.-]+|playwright(?:-core)?(?:/[\w.-]+)?)['"]"""
+    r"""require\(\s*['"](?:@playwright/[\w.-]+|playwright[\w.-]*(?:/[\w.-]+)?)['"]"""
+    r"""|from\s+['"](?:@playwright/[\w.-]+|playwright[\w.-]*(?:/[\w.-]+)?)['"]"""
+    r"""|import\s*\(\s*['"](?:@playwright/[\w.-]+|playwright[\w.-]*(?:/[\w.-]+)?)['"]"""
     r"""|\bimport\s+playwright\b"""
     r"""|\bfrom\s+playwright(?:\.[\w.]+)?\s+import\b""",
 )
@@ -1635,6 +1635,10 @@ _ENV_VALUE_FLAGS = {"-u", "--unset", "-C", "--chdir", "-S", "--split-string"}
 
 _PW_SCRIPT_EXTS = (".js", ".cjs", ".mjs", ".jsx", ".ts", ".mts", ".cts", ".tsx", ".py")
 _PW_MAX_SCRIPT_BYTES = 256 * 1024
+# How many package scripts deep to follow. `start` calling `npm run browse`
+# calling `node scrape.js` is two hops, and real package.json files chain
+# that far. The bound is what stops a script that calls itself.
+_PW_MAX_SCRIPT_HOPS = 3
 _PW_SCRIPT_RUNNERS = {"node", "bun", "deno", "tsx", "ts-node", "python", "python3"}
 _PW_INLINE_FLAGS = {"-e", "--eval", "-c", "--command", "-p", "--print"}
 # `playwright <sub>` that is e2e tooling rather than a browsing session.
@@ -1720,13 +1724,16 @@ def _pw_first_operand(args):
 
 
 def _pw_names_the_agent(tok):
-    """True when a token is a PATH into the agent's own checkout. A bare word
-    that merely contains the name (an argument, a label, a branch) is not."""
+    """True when a token is a PATH whose own directory is the agent's
+    checkout. A word that merely contains the name is not: neither a label
+    (`jev-ultrafast-comparison`) nor a script called after it
+    (`jev-ultrafast-poc.js`), only a real component of a real path."""
     if not tok or tok.startswith("-"):
         return False
     if not any(m in tok for m in _PW_JEV_PATH_MARKERS):
         return False
-    return "/" in tok or os.sep in tok or tok.endswith(_PW_SCRIPT_EXTS)
+    parts = tok.replace(os.sep, "/").split("/")
+    return len(parts) > 1 and any(p in _PW_JEV_PATH_MARKERS for p in parts)
 
 
 def _unwrap_args(args, value_flags, skip_assignments=False):
@@ -1742,7 +1749,13 @@ def _unwrap_args(args, value_flags, skip_assignments=False):
     while i < len(args):
         a = args[i]
         if a == "--":
-            return args[i + 1:]
+            # Everything after `--` is the command, but `env -- VAR=val prog`
+            # is still an assignment in front of the program.
+            rest = args[i + 1:]
+            if skip_assignments:
+                while rest and "=" in rest[0] and not rest[0].startswith("-"):
+                    rest = rest[1:]
+            return rest
         if a.startswith("-"):
             if "=" not in a and a in value_flags:
                 i += 2
@@ -1920,8 +1933,8 @@ def prefilter_browser_driving(ctx):
 
 def _pw_scan(segments, cwd, depth, cdp=False):
     """Look for a browser-driving segment. `depth` bounds the one recursion:
-    a package script named by `npm run <name>` is scanned once, and what that
-    script itself names is not followed further."""
+    a package script named by `npm run <name>` is followed at most
+    _PW_MAX_SCRIPT_HOPS deep, which is what stops a script calling itself."""
     cur_cwd = cwd
     for seg in segments:
         prog, args = program_of(seg)
@@ -1982,7 +1995,7 @@ def _pw_scan(segments, cwd, depth, cdp=False):
         if _pw_is_test_run(prog, args):
             continue
 
-        if depth == 0:
+        if depth < _PW_MAX_SCRIPT_HOPS:
             script = _pw_package_script(prog, args, cur_cwd)
             if script:
                 # `cdp` carries in: a script reached through `npm run` is
@@ -2038,7 +2051,7 @@ def _pw_scan(segments, cwd, depth, cdp=False):
             # A script that lives inside the agent's own checkout is the
             # agent. A script somewhere else is not, whatever directory the
             # command line happened to `cd` into first.
-            if spath and any(m in spath for m in _PW_JEV_PATH_MARKERS):
+            if _pw_names_the_agent(spath):
                 continue
             if src and _PW_IMPORT_RE.search(src):
                 return Match(

@@ -1078,6 +1078,34 @@ class TestR11BrowseViaJev(unittest.TestCase):
         self.assertFalse(rules._pw_names_the_agent("jev-ultrafast-comparison"))
         self.assertFalse(rules._pw_names_the_agent("--with=jev-ultrafast"))
         self.assertTrue(rules._pw_names_the_agent("~/code/jev-ultrafast/run_goal.py"))
+        # A script NAMED after the agent is not the agent.
+        self.assertFalse(rules._pw_names_the_agent("jev-ultrafast-poc.js"))
+        self.assertFalse(rules._pw_names_the_agent("~/code/jev-ultrafast-poc/x.js"))
+        poc = self._script("jev-ultrafast-poc.js",
+                           "const { chromium } = require('playwright');\n")
+        self.assert_asks(self.ctx("node %s" % poc))
+
+    def test_env_after_a_double_dash_is_still_an_assignment(self):
+        path = self._script("hand.js", "const { chromium } = require('playwright');\n")
+        self.assert_asks(self.ctx("env -- NOTE=1 node %s" % path))
+        self.assertEqual(rules._env_program(["--", "A=1", "node", "x.js"]),
+                         ("node", ["x.js"]))
+
+    def test_a_playwright_wrapper_package_counts(self):
+        for body in ("const { chromium } = require('playwright-extra');\n",
+                     "import { chromium } from 'playwright-chromium';\n"):
+            path = self._script("w%d.js" % len(body), body)
+            self.assert_asks(self.ctx("node %s" % path), body)
+
+    def test_a_package_script_chain_is_followed(self):
+        self._script("scrape.js", "const { chromium } = require('playwright');\n")
+        self._script("package.json", json.dumps({"scripts": {
+            "start": "npm run browse", "browse": "node scrape.js"}}))
+        self.assert_asks(self.ctx("npm run start"))
+
+    def test_a_self_calling_package_script_terminates(self):
+        self._script("package.json", json.dumps({"scripts": {"loop": "npm run loop"}}))
+        self.assert_silent(self.ctx("npm run loop"))
 
     def test_only_a_real_cdp_assignment_carries(self):
         path = self._script("hand_rolled.js", "const { chromium } = require('playwright');\n")
@@ -1234,6 +1262,9 @@ class TestR11JevPaths(unittest.TestCase):
             deny.assert_not_called()
             warn.assert_called_once()
             self.assertIn("jev-ultrafast", warn.call_args[0][0][0])
+            # The session can tell advice-without-a-judgement apart from a
+            # real warn.
+            self.assertIn(enforce.ADVISE_ON_ERROR_NOTE, warn.call_args[0][0][0])
             self.assertTrue(self.logged[-1]["advised_on_error"])
             self.assertIn("error", self.logged[-1])
 

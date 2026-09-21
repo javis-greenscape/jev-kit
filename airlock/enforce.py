@@ -388,6 +388,14 @@ def _handle(data, tool_name, mode="enforce"):
     return False
 
 
+# What the session sees when the advice arrived WITHOUT a judgement. Without
+# it the text is identical to a real warn, and nobody can tell the two apart.
+ADVISE_ON_ERROR_NOTE = (
+    "(Nothing was judged and nothing was blocked: Jev could not be reached in "
+    "time. This is advice only.)"
+)
+
+
 def _advise_on_error(rule, eff, entry, match, advice):
     """Fail open, as everywhere, and for a rule that set `advise_on_error`
     also print its suggestion. The advice stands on its own and needed no
@@ -398,7 +406,8 @@ def _advise_on_error(rule, eff, entry, match, advice):
     if not getattr(rule, "advise_on_error", False) or eff not in ("deny", "ask", "warn"):
         return
     entry["advised_on_error"] = True
-    advice.append(_rule_warn_text(rule.id, match.detail, match.suggestion))
+    advice.append(_rule_warn_text(rule.id, match.detail, match.suggestion)
+                  + "\n" + ADVISE_ON_ERROR_NOTE)
 
 
 def _run_rule(ctx, rule, match, eff, base, override_reason, b_ms, session_id, mode, advice, data=None):
