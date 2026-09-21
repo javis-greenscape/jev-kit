@@ -1351,7 +1351,12 @@ class TestR11JevPaths(unittest.TestCase):
         self.assertFalse(denied)
         deny.assert_not_called()
         warn.assert_called_once()
-        self.assertIn("jev-ultrafast", warn.call_args[0][0][0])
+        text = warn.call_args[0][0][0]
+        self.assertIn("jev-ultrafast", text)
+        # An answer that arrived late is not the same event as no answer,
+        # and the note must not claim Jev was never reached.
+        self.assertIn(enforce.ADVISE_LATE_ANSWER_NOTE, text)
+        self.assertNotIn(enforce.ADVISE_ON_ERROR_NOTE, text)
 
     def test_no_other_rule_advises_on_an_error(self):
         """`advise_on_error` is opt-in: every other rule stays silent when the

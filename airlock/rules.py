@@ -1730,6 +1730,20 @@ _PW_RUNNER_VALUE_FLAGS = {
 }
 
 
+# Shells that take a command as a string argument.
+_PW_SHELLS = {"bash", "sh", "zsh", "dash", "ksh", "busybox"}
+
+
+def _pw_shell_command(args):
+    """The command string a shell was handed with -c, or "". Never raises."""
+    for i, a in enumerate(args):
+        if a in ("-c", "--command") and i + 1 < len(args):
+            return args[i + 1]
+        if a.startswith("-c") and len(a) > 2 and not a.startswith("--"):
+            return a[2:]
+    return ""
+
+
 def _pw_first_operand(args):
     """The first bare argument: the script a runner runs. Flags, and the
     values of the flags that take one, are not it."""
@@ -2068,6 +2082,17 @@ def _pw_scan(segments, cwd, depth, cdp=False, cache=None):
         elif cdp:
             continue
         if prog is None:
+            continue
+        if prog in _PW_SHELLS:
+            # `bash -c "node scrape.js"` carries a whole command line in a
+            # string. It is scanned as one, under the same hop bound that
+            # stops a package script calling itself.
+            inner = _pw_shell_command(args)
+            if inner and depth < _PW_MAX_SCRIPT_HOPS:
+                found = _pw_scan(split_segments(strip_heredocs(inner)), cur_cwd,
+                                 depth + 1, cdp, cache)
+                if found is not None:
+                    return found
             continue
         if prog == "env":
             # `env VAR=val node x.js` runs node. program_of's _SKIP_PREFIX

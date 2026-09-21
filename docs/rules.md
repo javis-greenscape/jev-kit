@@ -170,6 +170,8 @@ The code pre-filter recognises three ways of driving a browser:
   `tool_input`, which is all this needs;
 - `playwright <verb>` or `npx playwright <verb>` for any verb other than
   `test`, `install`, `install-deps`, `uninstall` and `show-report`;
+- a command wrapped in a shell (`bash -c "node scrape.js"`), whose string is
+  scanned as the command line it is;
 - a shell command running a script that imports `playwright` or
   `playwright-core`, whether the script is a file (`node verify.cjs`,
   `python3 verify.py`, `uv run python3 verify.py`) or inline (`node -e`,
@@ -226,7 +228,9 @@ finished in under three seconds with no Claude decision calls at all.
 
 **It never blocks when Jev cannot answer.** No key, no tokens, a timeout, an
 error of any kind: the call is allowed, and the recipe is printed as advice
-instead. That is the one place this rule differs from the others, which stay
+instead. The note on that advice says which happened, because an answer that
+arrived after the time budget is not the same event as Jev never being
+reached. That is the one place this rule differs from the others, which stay
 silent on an error. Turn the whole thing off with
 `{"R11-browse-via-jev": "off"}` in `~/.config/airlock/rules.json`, or get past
 one call with an `[airlock-ok: <reason>]` stamp.

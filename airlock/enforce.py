@@ -394,9 +394,16 @@ ADVISE_ON_ERROR_NOTE = (
     "(Nothing was judged and nothing was blocked: Jev could not be reached in "
     "time. This is advice only.)"
 )
+# The budget case is not the same event, and saying it was would be untrue:
+# Jev answered, the answer simply arrived after the window that decides
+# whether a judgement may act. The call runs either way.
+ADVISE_LATE_ANSWER_NOTE = (
+    "(Nothing was blocked: Jev's answer arrived after the time budget, so it "
+    "was not acted on. This is advice only.)"
+)
 
 
-def _advise_on_error(rule, eff, entry, match, advice):
+def _advise_on_error(rule, eff, entry, match, advice, note=None):
     """Fail open, as everywhere, and for a rule that set `advise_on_error`
     also print its suggestion. The advice stands on its own and needed no
     judgement, so an unreachable or too-slow Jev should not mean the session
@@ -407,7 +414,7 @@ def _advise_on_error(rule, eff, entry, match, advice):
         return
     entry["advised_on_error"] = True
     advice.append(_rule_warn_text(rule.id, match.detail, match.suggestion)
-                  + "\n" + ADVISE_ON_ERROR_NOTE)
+                  + "\n" + (note or ADVISE_ON_ERROR_NOTE))
 
 
 def _run_rule(ctx, rule, match, eff, base, override_reason, b_ms, session_id, mode, advice, data=None):
@@ -464,7 +471,7 @@ def _run_rule(ctx, rule, match, eff, base, override_reason, b_ms, session_id, mo
         if elapsed_ms > b_ms:
             fires = False
             entry.setdefault("error", "budget exceeded (%dms > %dms)" % (elapsed_ms, b_ms))
-            _advise_on_error(rule, eff, entry, match, advice)
+            _advise_on_error(rule, eff, entry, match, advice, ADVISE_LATE_ANSWER_NOTE)
         if not fires:
             # A rule that can explain its own silence says so on the row. R10
             # withholding an earned warn because the human already asked for
