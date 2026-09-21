@@ -1803,6 +1803,44 @@ def _pw_script_source(tok, cwd):
 _PW_TEST_SCRIPT_RE = re.compile(r"(?:^|[:_-])(?:test|tests|e2e|spec|ct|vitest|jest|mocha)(?:$|[:_-])")
 
 
+# Subcommands of npm/pnpm/yarn that are the tool's own, never a script name
+# and never a binary it runs. `yarn <name>` with anything else is yarn's
+# run-less shorthand for a package script or a node_modules/.bin binary.
+_PM_BUILTINS = {
+    "install", "i", "ci", "add", "remove", "rm", "up", "upgrade", "update",
+    "why", "init", "pack", "publish", "link", "unlink", "workspace",
+    "workspaces", "config", "cache", "licenses", "audit", "outdated", "list",
+    "ls", "info", "login", "logout", "version", "set", "get", "store",
+    "prune", "dedupe", "import", "patch", "rebuild", "env", "help", "node",
+}
+# How each package manager spells "run this binary".
+_PM_EXEC_VERBS = {"npm": ("exec", "x"), "pnpm": ("exec", "dlx"), "yarn": ("exec", "dlx")}
+
+
+def _pm_operands(prog, args):
+    """What a package manager is being asked to run, with its own verb
+    stripped: ("script"|"binary", [tokens]) or (None, []).
+
+    `npm run build` and `yarn build` are both a script; `npx playwright open`
+    and `yarn playwright open` are both a binary. Yarn and pnpm let the verb
+    be left out, which is how `yarn playwright open` slipped past a check
+    that only knew the spelled-out forms."""
+    if prog not in ("npm", "pnpm", "yarn") or not args:
+        return None, []
+    head, rest = args[0], args[1:]
+    if head == "run":
+        return ("script", rest) if rest else (None, [])
+    if head in _PM_EXEC_VERBS.get(prog, ()):
+        return ("binary", rest) if rest else (None, [])
+    if head.startswith("-") or head in _PM_BUILTINS:
+        return None, []
+    if prog == "npm":
+        # npm has no run-less shorthand: `npm foo` is an error, not a script.
+        return None, []
+    # yarn/pnpm shorthand: a script if package.json has one, else a binary.
+    return "shorthand", args
+
+
 def _pw_is_test_run(prog, args):
     """True for a run of e2e code: a test runner, or a package script whose
     name says it runs tests. These are always allowed -- writing and running
@@ -1814,7 +1852,11 @@ def _pw_is_test_run(prog, args):
     if prog in ("npm", "pnpm", "yarn"):
         if args[:1] == ["test"]:
             return True
-        if args[:1] == ["run"] and len(args) > 1 and _PW_TEST_SCRIPT_RE.search(args[1]):
+        kind, rest = _pm_operands(prog, args)
+        name = (rest[0] if rest else (args[0] if kind == "shorthand" and args else ""))
+        if name and kind in ("script", "shorthand") and _PW_TEST_SCRIPT_RE.search(name):
+            return True
+        if name and kind in ("binary", "shorthand") and name in _JS_RUNNERS:
             return True
     if prog == "npx":
         rest = _npx_arguments(args)
@@ -1828,9 +1870,13 @@ def _pw_package_script(prog, args, cwd):
     nothing about Playwright by itself; the script it names might. One
     bounded read of package.json in the working directory. Never raises."""
     try:
-        if prog not in ("npm", "pnpm", "yarn") or args[:1] != ["run"] or len(args) < 2:
+        kind, rest = _pm_operands(prog, args)
+        if kind == "script" and rest:
+            name = rest[0]
+        elif kind == "shorthand" and args:
+            name = args[0]
+        else:
             return ""
-        name = args[1]
         path = os.path.join(cwd or "", "package.json")
         if not os.path.isfile(path) or os.path.getsize(path) > _PW_MAX_SCRIPT_BYTES:
             return ""
@@ -1937,8 +1983,14 @@ def _pw_scan(segments, cwd, depth, cdp=False):
         pw_args = None
         if prog == "playwright":
             pw_args = args
-        elif prog == "npx":
-            rest = _npx_arguments(args)
+        elif prog == "npx" or prog in ("npm", "pnpm", "yarn"):
+            if prog == "npx":
+                rest = _npx_arguments(args)
+            else:
+                # `yarn playwright open` and `pnpm exec playwright open` run
+                # the local binary exactly as `npx playwright open` does.
+                kind, operands = _pm_operands(prog, args)
+                rest = operands if kind == "binary" else (args if kind == "shorthand" else [])
             if rest[:1] == ["playwright"]:
                 pw_args = rest[1:]
             elif rest[:1] and rest[0] in _PW_SCRIPT_RUNNERS:

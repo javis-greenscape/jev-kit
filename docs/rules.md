@@ -175,7 +175,9 @@ The code pre-filter recognises three ways of driving a browser:
   `python3 verify.py`, `uv run python3 verify.py`) or inline (`node -e`,
   `python3 -c`). `npm run <name>` is followed one step into `package.json`,
   because the script name alone says nothing, unless the name itself says
-  tests (`test`, `test:e2e`, `e2e`, `spec`).
+  tests (`test`, `test:e2e`, `e2e`, `spec`). Yarn and pnpm let the verb be
+  left out, so `yarn scrape` is followed the same way and `yarn playwright
+  open` is read as the binary it runs.
 
 This is the one rule that reads a file the command names, because `node
 verify.cjs` says nothing about Playwright from the command line alone. The

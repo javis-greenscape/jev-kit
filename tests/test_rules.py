@@ -1004,6 +1004,26 @@ class TestR11BrowseViaJev(unittest.TestCase):
             tool = "mcp__plugin_playwright_playwright__" + action
             self.assert_asks(self.ctx_mcp(tool), tool)
 
+    def test_the_package_manager_shorthands(self):
+        """`yarn playwright open` runs the local binary exactly as `npx
+        playwright open` does, and `yarn scrape` is a package script."""
+        self._script("scrape.js", "const { chromium } = require('playwright');\n")
+        self._script("package.json", json.dumps({"scripts": {
+            "scrape": "node scrape.js", "test:e2e": "node scrape.js"}}))
+        for c in ("yarn playwright open https://x", "pnpm playwright codegen https://x",
+                  "pnpm exec playwright open https://x", "yarn dlx playwright open https://x",
+                  "npm exec playwright open https://x",
+                  "yarn scrape", "pnpm scrape"):
+            self.assert_asks(self.ctx(c), c)
+        for c in ("yarn playwright test", "pnpm exec playwright install",
+                  "yarn test:e2e", "yarn vitest", "yarn install", "pnpm add playwright",
+                  "yarn why playwright", "npm nonsense"):
+            self.assert_silent(self.ctx(c), c)
+        self.assertEqual(rules._pm_operands("yarn", ["playwright", "open"]),
+                         ("shorthand", ["playwright", "open"]))
+        self.assertEqual(rules._pm_operands("npm", ["foo"]), (None, []))
+        self.assertEqual(rules._pm_operands("pnpm", ["run", "scrape"]), ("script", ["scrape"]))
+
     def test_npx_wrapping_an_interpreter_is_unwrapped(self):
         path = self._script("run_goal.ts", "import { chromium } from 'playwright';\n")
         for c in ("npx tsx %s" % path, "npx ts-node %s" % path,
