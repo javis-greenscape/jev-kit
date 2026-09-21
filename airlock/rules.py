@@ -1933,7 +1933,15 @@ def _pw_scan(segments, cwd, depth, cdp=False):
             target = args[0] if args else "~"
             if target and not target.startswith("-"):
                 target = _expand(target)
-                cur_cwd = target if os.path.isabs(target) else os.path.join(cur_cwd or "", target)
+                if os.path.isabs(target):
+                    cur_cwd = target
+                elif cur_cwd:
+                    cur_cwd = os.path.join(cur_cwd, target)
+                else:
+                    # A relative `cd` with nothing to anchor it to leaves the
+                    # directory unknown, not "relative to the hook process".
+                    # Same reasoning as _pw_resolve_script's own guard.
+                    cur_cwd = ""
             continue
         if _pw_sets_cdp(seg):
             # An assignment or export exempts the segments AFTER it, whatever

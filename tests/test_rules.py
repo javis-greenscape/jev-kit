@@ -1118,9 +1118,18 @@ class TestR11BrowseViaJev(unittest.TestCase):
         and the hook process's own directory is not the tool call's."""
         self.assertEqual(rules._pw_resolve_script("verify.js", ""), ("", ""))
         self.assertEqual(rules._pw_package_script("npm", ["run", "scrape"], ""), "")
-        c = rules.build_ctx({"tool_name": "Bash", "tool_input": {"command": "node verify.js"}},
-                            "Bash")
-        self.assert_silent(c, "no cwd")
+        for command in ("node verify.js", "cd myproj && node verify.js"):
+            c = rules.build_ctx({"tool_name": "Bash", "tool_input": {"command": command}},
+                                "Bash")
+            self.assert_silent(c, "no cwd: %s" % command)
+        # A relative cd with nothing to anchor it to leaves the directory
+        # unknown rather than relative to the hook process.
+        segs = rules.split_segments("cd myproj && node verify.js")
+        self.assertIsNone(rules._pw_scan(segs, "", 0))
+        # An absolute cd still anchors it.
+        abs_cd = "cd %s && node verify.cjs" % self.tmp
+        self._script("verify.cjs", "const { chromium } = require('playwright');\n")
+        self.assertIsNotNone(rules._pw_scan(rules.split_segments(abs_cd), "", 0))
 
     def test_a_missing_or_huge_script_is_read_safely(self):
         self.assertEqual(rules._pw_script_source("/nonexistent/x.js", self.tmp), "")
