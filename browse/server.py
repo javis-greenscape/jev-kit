@@ -459,6 +459,7 @@ class Browse(object):
     def __init__(self):
         self.chromium = Chromium()
         self.calls = 0
+        self.daemon_used = False
 
     def daemon_name(self):
         # browser_harness keeps one daemon per BU_NAME. A name of our own
@@ -494,6 +495,9 @@ class Browse(object):
             if remaining <= 0:
                 raise BrowseTimeout("timed out after %.0f s (JEV_BROWSE_TIMEOUT) before "
                                     "the agent could start." % call_timeout_s())
+            # The daemon starts on the runner's first use, so a call that
+            # raises from here on still leaves one to stop.
+            self.daemon_used = True
             result = run_runner(request, self.child_env(key, cdp_url), clone, remaining)
         except BrowseTimeout:
             # The killed agent leaves its tab behind. A browser we own is
@@ -520,9 +524,10 @@ class Browse(object):
         return json.loads(json.dumps(out).replace(key, "[REDACTED]"))
 
     def shutdown(self):
-        if self.chromium.owned():
-            # Stop the harness daemon that was attached to our browser, so it
-            # does not outlive the browser it was talking to.
+        if self.daemon_used:
+            # Stop the harness daemon whenever one may exist, whoever owns the
+            # browser. It outlives an external browser we never close, so
+            # ownership is the wrong test: a call was made, so stop it.
             try:
                 clone = resolve_clone()
                 env = dict(os.environ, BU_NAME=self.daemon_name())

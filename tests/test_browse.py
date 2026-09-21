@@ -319,6 +319,51 @@ class TestACall(CallCase):
         self.assertIn("[REDACTED]", result["content"][0]["text"])
 
 
+class TestShutdown(CallCase):
+    def shut_down_after(self, calls, owned):
+        self.browse.chromium.owned.return_value = owned
+        with mock.patch.object(server, "run_runner", return_value=dict(self.RESULT)) as run:
+            for _ in range(calls):
+                call(self.srv, goal="open https://example.com")
+            run.reset_mock()
+            self.browse.shutdown()
+        return run
+
+    def assert_one_stop(self, run):
+        self.assertEqual(run.call_count, 1)
+        request, env, clone, _timeout = run.call_args[0]
+        self.assertEqual(request, {"op": "stop_daemon"})
+        self.assertEqual(env["BU_NAME"], self.browse.daemon_name())
+        self.assertEqual(clone, self.clone)
+        self.browse.chromium.close.assert_called_once_with()
+
+    def test_an_attached_browser_still_has_its_daemon_stopped(self):
+        self.assert_one_stop(self.shut_down_after(1, owned=False))
+
+    def test_an_owned_browser_has_its_daemon_stopped(self):
+        self.assert_one_stop(self.shut_down_after(1, owned=True))
+
+    def test_a_call_that_failed_in_the_runner_still_counts(self):
+        self.browse.chromium.owned.return_value = False
+        with mock.patch.object(server, "run_runner",
+                               side_effect=server.BrowseError("the agent fell over")):
+            self.assertTrue(call(self.srv, goal="open https://example.com")["isError"])
+        with mock.patch.object(server, "run_runner") as run:
+            self.browse.shutdown()
+        self.assert_one_stop(run)
+
+    def test_no_call_means_no_daemon_to_stop(self):
+        for owned in (False, True):
+            run = self.shut_down_after(0, owned=owned)
+            run.assert_not_called()
+
+    def test_a_stop_that_fails_still_closes_the_browser(self):
+        self.browse.daemon_used = True
+        with mock.patch.object(server, "run_runner", side_effect=OSError("gone")):
+            self.browse.shutdown()
+        self.browse.chromium.close.assert_called_once_with()
+
+
 class TestErrorPaths(CallCase):
     def test_a_missing_clone_names_the_installer(self):
         with mock.patch.dict(os.environ, {"JEV_ULTRAFAST_DIR": str(Path(self.tmp) / "absent")}), \
