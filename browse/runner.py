@@ -29,6 +29,8 @@ def _evaluate(browser, expression, attempts=10):
         except Exception as exc:  # StalePage while the document changes
             last = exc
             time.sleep(0.1)
+    if last is None:
+        raise RuntimeError("_evaluate called with attempts <= 0")
     raise last
 
 

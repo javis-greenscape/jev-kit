@@ -11,8 +11,8 @@ import os
 import unittest
 from unittest import mock
 
-from tests import posix_only
 from airlock import policy, rules, scope
+from tests import posix_only
 
 HOME = "C:\\Users\\alice"
 ENV = {"USERPROFILE": HOME, "APPDATA": HOME + "\\AppData\\Roaming",
@@ -211,8 +211,8 @@ class TestTheSuggestion(unittest.TestCase):
         self.assertNotIn("case-insensitive match", suggestion)
 
     def test_evaluate_search_denies_with_the_right_advice_per_platform(self):
-        kwargs = dict(scope="disk_wide", search_intent="filename_search",
-                      confidence=0.99, root_has_graphify_graph=False, margin=0.9)
+        kwargs = {"scope": "disk_wide", "search_intent": "filename_search",
+                  "confidence": 0.99, "root_has_graphify_graph": False, "margin": 0.9}
         linux = policy.evaluate_search(command="find / -name x", windows=False, **kwargs)
         windows = policy.evaluate_search(command="dir /s C:\\", windows=True, **kwargs)
         self.assertTrue(linux["would_deny"])
@@ -221,8 +221,8 @@ class TestTheSuggestion(unittest.TestCase):
         self.assertIn("es.exe", windows["suggestion"])
 
     def test_a_command_already_on_the_index_is_allowed_on_both(self):
-        kwargs = dict(scope="disk_wide", search_intent="filename_search",
-                      confidence=0.99, root_has_graphify_graph=False, margin=0.9)
+        kwargs = {"scope": "disk_wide", "search_intent": "filename_search",
+                  "confidence": 0.99, "root_has_graphify_graph": False, "margin": 0.9}
         self.assertFalse(policy.evaluate_search(
             command="plocate -i x", windows=False, **kwargs)["would_deny"])
         self.assertFalse(policy.evaluate_search(

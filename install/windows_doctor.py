@@ -35,10 +35,11 @@ import tempfile
 import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-import windows_common as wc  # noqa: E402
+import windows_common as wc
 
 sys.path.insert(0, wc.REPO_ROOT)
-from airlock import everything, keyfile, mode as mode_mod, paths, policy, scope  # noqa: E402
+from airlock import everything, keyfile, paths, policy, scope
+from airlock import mode as mode_mod
 
 # The deny proof is R1, secret exposure -- NOT R6 (GUI/browser), which is
 # `off` by default on Windows because a workstation with a desktop opening a
@@ -66,7 +67,7 @@ ALLOW_PAYLOAD = {
 SEARCH_COMMAND = "dir /s C:\\ *.xlsm"
 
 
-class Report(object):
+class Report:
     def __init__(self):
         self.passed = 0
         self.failed = 0
@@ -351,7 +352,9 @@ def check_file_search(r):
         r.bad("scope: %r classified as %r" % (SEARCH_COMMAND, result))
 
     suggestion = policy.filename_search_suggestion(windows=True)
-    if "es.exe" in suggestion:
+    if suggestion is None:
+        r.bad("steer: no suggestion -- Everything looks unusable on this machine")
+    elif "es.exe" in suggestion:
         r.ok("steer: the suggestion names es.exe")
         for line in suggestion.splitlines():
             print("        %s" % line)
