@@ -11,7 +11,7 @@ Two properties matter more than any of the mechanics:
      would make the softener injectable.
 """
 
-import tests  # noqa: F401 -- MUST be the first import. `python3 -m unittest
+import tests  # noqa: F401, I001 -- MUST be the first import. `python3 -m unittest
 # discover -s tests` runs with start_dir == top_level_dir, so unittest treats
 # `tests/` as a flat directory of top-level modules and never executes
 # tests/__init__.py as a package init (name == '.' in TestLoader._find_tests).
@@ -171,7 +171,8 @@ class EnforceBase(unittest.TestCase):
         self._tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self._tmp.cleanup)
         home = Path(self._tmp.name)
-        from airlock import log as log_mod, state as state_mod
+        from airlock import log as log_mod
+        from airlock import state as state_mod
         p1 = mock.patch.object(log_mod, "LOG_DIR", home / "state")
         p2 = mock.patch.object(log_mod, "LOG_FILE", home / "state" / "shadow.jsonl")
         p3 = mock.patch.object(state_mod, "STATE_DIR", home / "state")

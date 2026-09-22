@@ -15,7 +15,7 @@ The two things worth being strict about:
      capped.
 """
 
-import tests  # noqa: F401 -- MUST be the first import, see tests/__init__.py
+import tests  # noqa: F401, I001 -- MUST be the first import, see tests/__init__.py
 
 import io
 import sys
@@ -25,7 +25,7 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT / "monitoring"))
-import kuma_push  # noqa: E402
+import kuma_push
 
 PUSH_URL = "https://status.example/api/push/TOKEN"
 
@@ -43,7 +43,7 @@ def params(url):
     return dict(urllib.parse.parse_qsl(urllib.parse.urlsplit(url).query))
 
 
-class PushRecorder(object):
+class PushRecorder:
     """Stands in for the real GET. The point of mocking here is not speed --
     it is that a unit suite must never depend on, or touch, a network."""
 

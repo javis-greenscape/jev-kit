@@ -2,7 +2,7 @@
 enforce path. No network: every Jev call is mocked.
 """
 
-import tests  # noqa: F401 -- MUST be the first import. `python3 -m unittest
+import tests  # noqa: F401, I001 -- MUST be the first import. `python3 -m unittest
 # discover -s tests` runs with start_dir == top_level_dir, so unittest treats
 # `tests/` as a flat directory of top-level modules and never executes
 # tests/__init__.py as a package init (name == '.' in TestLoader._find_tests).
@@ -18,8 +18,8 @@ from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+from airlock import enforce, rules
 from tests import posix_only
-from airlock import enforce, rules  # noqa: E402
 
 HOME = os.path.expanduser("~")
 

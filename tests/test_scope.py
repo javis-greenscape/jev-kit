@@ -1,5 +1,5 @@
 
-import tests  # noqa: F401 -- MUST be the first import. `python3 -m unittest
+import tests  # noqa: F401, I001 -- MUST be the first import. `python3 -m unittest
 # discover -s tests` runs with start_dir == top_level_dir, so unittest treats
 # `tests/` as a flat directory of top-level modules and never executes
 # tests/__init__.py as a package init (name == '.' in TestLoader._find_tests).
@@ -340,6 +340,7 @@ class WslDriveRootScopeTests(unittest.TestCase):
 
     def test_mnt_drive_root_is_disk_wide_under_wsl(self):
         from unittest import mock
+
         from airlock import scope
         with mock.patch("airlock.headless.is_wsl", return_value=True):
             result = scope.classify_command("find /mnt/c -name x", "/mnt/c")
@@ -348,6 +349,7 @@ class WslDriveRootScopeTests(unittest.TestCase):
 
     def test_mnt_drive_root_with_trailing_slash_is_disk_wide_under_wsl(self):
         from unittest import mock
+
         from airlock import scope
         with mock.patch("airlock.headless.is_wsl", return_value=True):
             result = scope.classify_command("find /mnt/c/ -name x", "/mnt/c")
@@ -356,6 +358,7 @@ class WslDriveRootScopeTests(unittest.TestCase):
     def test_mnt_drive_subdirectory_is_not_disk_wide(self):
         # /mnt/c/Users is a directory WITHIN the drive, not the drive root.
         from unittest import mock
+
         from airlock import scope
         with mock.patch("airlock.headless.is_wsl", return_value=True):
             result = scope.classify_command("find /mnt/c/Users -name x", "/mnt/c/Users")
@@ -365,6 +368,7 @@ class WslDriveRootScopeTests(unittest.TestCase):
         # A non-WSL Linux box with something manually mounted at /mnt/c has
         # no Windows drive semantics attached to that path.
         from unittest import mock
+
         from airlock import scope
         with mock.patch("airlock.headless.is_wsl", return_value=False):
             result = scope.classify_command("find /mnt/c -name x", "/mnt/c")
@@ -376,6 +380,7 @@ class WslDriveRootScopeTests(unittest.TestCase):
         # side and would have replaced a two-sided search with a one-sided
         # index.
         from unittest import mock
+
         from airlock import scope
         with mock.patch("airlock.headless.is_wsl", return_value=True):
             result = scope.classify_command(
@@ -389,6 +394,7 @@ class WslDriveRootScopeTests(unittest.TestCase):
         # single_dir, so an accumulator that took only disk-wide stages
         # dropped exactly the root the suggestion needs.
         from unittest import mock
+
         from airlock import scope
         cmd = 'find "$HOME" -name x; find %s -name x' % "/mnt/c/Users"
         with mock.patch("airlock.headless.is_wsl", return_value=True):
@@ -401,6 +407,7 @@ class WslDriveRootScopeTests(unittest.TestCase):
         # the accumulator only for a disk-wide verdict handed policy one
         # stage's root and dropped the other half of the search.
         from unittest import mock
+
         from airlock import scope
         win = "/mnt/c/Users"
         for cmd in ('find %s -name x; find /home/alice/docs -name x' % win,
@@ -413,6 +420,7 @@ class WslDriveRootScopeTests(unittest.TestCase):
 
     def test_roots_are_deduplicated_across_stages(self):
         from unittest import mock
+
         from airlock import scope
         with mock.patch("airlock.headless.is_wsl", return_value=True):
             result = scope.classify_command(

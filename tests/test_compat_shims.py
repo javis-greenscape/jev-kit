@@ -9,7 +9,7 @@ all of them must be the SAME objects as the new names, not a second copy that
 can drift.
 """
 
-import tests  # noqa: F401 -- MUST be the first import. `python3 -m unittest
+import tests  # noqa: F401, I001 -- MUST be the first import. `python3 -m unittest
 # discover -s tests` runs with start_dir == top_level_dir, so unittest treats
 # `tests/` as a flat directory of top-level modules and never executes
 # tests/__init__.py as a package init (name == '.' in TestLoader._find_tests).
@@ -107,12 +107,13 @@ def _run_hook(path, payload, home, session_id, extra_env=None):
 
 class TestPackageShims(unittest.TestCase):
     def test_submodules_are_the_same_objects(self):
+        import jev_guard.enforce
+        import jev_guard.rules  # noqa: F401
+        import plumbline.enforce
+        import plumbline.rules  # noqa: F401
+
         import airlock.enforce
         import airlock.rules
-        import jev_guard.enforce  # noqa: F401
-        import jev_guard.rules  # noqa: F401
-        import plumbline.enforce  # noqa: F401
-        import plumbline.rules  # noqa: F401
 
         self.assertIs(sys.modules["jev_guard.rules"], airlock.rules)
         self.assertIs(sys.modules["plumbline.rules"], airlock.rules)
@@ -128,9 +129,10 @@ class TestPackageShims(unittest.TestCase):
         self.assertIs(mid_policy, new_policy)
 
     def test_there_is_no_second_rules_table(self):
-        import airlock.rules
         import jev_guard.rules
         import plumbline.rules
+
+        import airlock.rules
 
         self.assertIs(jev_guard.rules.RULES, airlock.rules.RULES)
         self.assertIs(plumbline.rules.RULES, airlock.rules.RULES)
@@ -273,9 +275,10 @@ class TestMigrationScript(MigrationTestBase):
 
     def test_mode_resolves_to_enforce_before_and_after(self):
         """The expensive silent failure this whole fallback exists to stop."""
+        from unittest import mock
+
         from airlock import mode as mode_mod
         from airlock import paths
-        from unittest import mock
 
         with tempfile.TemporaryDirectory() as home:
             self._live_layout(home)
