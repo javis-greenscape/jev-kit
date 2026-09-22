@@ -1,4 +1,4 @@
-import tests  # noqa: F401 -- MUST be the first import; see test_policy.py.
+import tests  # noqa: F401, I001 -- MUST be the first import; see test_policy.py.
 
 import os
 import tempfile
@@ -600,7 +600,8 @@ class TestTheAdviceMatchesTheMachine(unittest.TestCase):
     def test_policy_and_scope_share_one_comment_parser(self):
         # The comment fix landed in policy and not in scope, and a
         # commented-out stage was still read as a real search.
-        from airlock import policy as _p, scope as _s
+        from airlock import policy as _p
+        from airlock import scope as _s
         self.assertIs(_p._strip_shell_comment("x # y").__class__, str)
         for command in ('find /opt -name x # ; es y',
                         'find /opt -name "a#b"',
@@ -981,9 +982,9 @@ class IndexedInvocationMustCoverTheRoot(unittest.TestCase):
     command counted as covering every root it searched, so an unrelated
     invocation silenced a real deny."""
 
-    KW = dict(scope="single_dir", search_intent="filename_search",
-              confidence=0.99, margin=0.9, root_has_graphify_graph=False,
-              wsl=True)
+    KW = {"scope": "single_dir", "search_intent": "filename_search",
+          "confidence": 0.99, "margin": 0.9, "root_has_graphify_graph": False,
+          "wsl": True}
 
     def deny(self, command, roots=("/mnt/c/Users",)):
         return policy.evaluate_search(command=command, roots=list(roots),
