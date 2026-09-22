@@ -21,13 +21,14 @@ INSTALL_DIR = os.path.join(REPO_ROOT, "install")
 if INSTALL_DIR not in sys.path:
     sys.path.insert(0, INSTALL_DIR)
 
-from airlock import everything  # noqa: E402
-import windows_common as wc  # noqa: E402
-import windows_install  # noqa: E402
-import windows_uninstall  # noqa: E402
+import windows_common as wc
+import windows_install
+import windows_uninstall
+
+from airlock import everything
 
 
-class _Sink(object):
+class _Sink:
     """Swallow the installer's own reporting: the test asserts on the files it
     produced, and 40 copies of the prerequisite advice make a test run
     unreadable."""

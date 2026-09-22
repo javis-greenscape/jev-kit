@@ -7,7 +7,7 @@ shadow log showed 17 of the 20 carried no Jev answer at all, and that the
 prompt described a policy the guard no longer had. These tests hold both
 halves of that fix down.
 """
-import tests  # noqa: F401 -- MUST be the first import; see tests/__init__.py.
+import tests  # noqa: F401, I001 -- MUST be the first import; see tests/__init__.py.
 
 import os
 import stat

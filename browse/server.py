@@ -64,7 +64,7 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT))
 
-from airlock import keyfile  # noqa: E402
+from airlock import keyfile
 
 SERVER_NAME = "jev-kit-browse"
 SERVER_VERSION = "0.1.0"
@@ -309,7 +309,7 @@ def running_chromiums():
     return rows
 
 
-class Chromium(object):
+class Chromium:
     """The one headless Chromium this server process may own."""
 
     def __init__(self):
@@ -441,7 +441,7 @@ def parse_arguments(args):
             raise BrowseError("give `start_url`, or put an http(s) URL in the goal: "
                               "the agent needs a page to start on.")
         start_url = m.group(0).rstrip(".,;:!?)]}")
-    if not re.match(r"https?://", start_url, re.I):
+    if not re.match(r"https?://", start_url, re.IGNORECASE):
         raise BrowseError("`start_url` must be an http:// or https:// URL.")
     return {"goal": goal.strip(), "start_url": start_url,
             "extract": (args.get("extract") or "").strip() or None,
@@ -455,7 +455,7 @@ def trim_text(text, limit=TEXT_LIMIT_BYTES):
     return raw[:limit].decode("utf-8", errors="ignore"), True
 
 
-class Browse(object):
+class Browse:
     def __init__(self):
         self.chromium = Chromium()
         self.calls = 0
@@ -551,7 +551,7 @@ def tool_result(text, is_error=False):
     return {"content": [{"type": "text", "text": text}], "isError": bool(is_error)}
 
 
-class Server(object):
+class Server:
     def __init__(self, browse=None):
         self.browse = browse or Browse()
 

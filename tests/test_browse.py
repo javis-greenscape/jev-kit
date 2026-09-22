@@ -20,7 +20,7 @@ from unittest import mock
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT))
 
-from browse import server  # noqa: E402
+from browse import server
 
 KEY = "apikey_test_0123456789"
 
@@ -44,7 +44,7 @@ def call(srv, **arguments):
     return response["result"]
 
 
-class FakeBrowse(object):
+class FakeBrowse:
     def __init__(self, result=None, error=None):
         self.result, self.error = result or {"final_url": "https://example.com/"}, error
         self.calls, self.shut = [], 0

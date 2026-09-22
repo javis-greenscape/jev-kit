@@ -53,8 +53,8 @@ REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if REPO_ROOT not in sys.path:
     sys.path.insert(0, REPO_ROOT)
 
-from airlock import paths  # noqa: E402
-from airlock.platform_compat import is_windows  # noqa: E402
+from airlock import paths
+from airlock.platform_compat import is_windows
 
 LAUNCHER_NAME = "airlock-hook.py"
 SESSION_LAUNCHER_NAME = "airlock-session-check.py"

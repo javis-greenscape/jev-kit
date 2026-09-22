@@ -1,5 +1,5 @@
 
-import tests  # noqa: F401 -- MUST be the first import. `python3 -m unittest
+import tests  # noqa: F401, I001 -- MUST be the first import. `python3 -m unittest
 # discover -s tests` runs with start_dir == top_level_dir, so unittest treats
 # `tests/` as a flat directory of top-level modules and never executes
 # tests/__init__.py as a package init (name == '.' in TestLoader._find_tests).
@@ -79,10 +79,9 @@ class TestDefaultEnvFile(unittest.TestCase):
                                  lambda p: p.replace("~", home, 1))
 
     def test_kit_path_when_nothing_exists(self):
-        with tempfile.TemporaryDirectory() as home:
-            with self._with_home(home):
-                self.assertEqual(keyfile.default_env_file(),
-                                 os.path.join(home, ".config/jev-kit/env"))
+        with tempfile.TemporaryDirectory() as home, self._with_home(home):
+            self.assertEqual(keyfile.default_env_file(),
+                             os.path.join(home, ".config/jev-kit/env"))
 
     def test_kit_path_wins_when_both_defaults_exist(self):
         with tempfile.TemporaryDirectory() as home:

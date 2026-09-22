@@ -19,7 +19,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from airlock import redact as redact_mod  # noqa: E402
+from airlock import redact as redact_mod
 
 LABELS = ("investigate", "attention", "routine", "noise", "unclear")
 
@@ -182,7 +182,7 @@ def triage_question():
 
 # --- the triager -------------------------------------------------------------
 
-class Triager(object):
+class Triager:
     """One configured triager. `ask(body) -> response_dict` is injected, so the
     tests run with Jev fully mocked and nothing here reads an API key."""
 

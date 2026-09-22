@@ -98,8 +98,7 @@ happened, and `install/windows_doctor.py` prints them.
 import os
 import stat
 
-from . import paths
-from . import platform_compat
+from . import paths, platform_compat
 from .platform_compat import is_windows
 
 ENV_VAR = "TYPESAFE_API_KEY"

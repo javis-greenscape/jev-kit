@@ -23,8 +23,8 @@ import tempfile
 import unittest
 from unittest import mock
 
-from tests import posix_only
 from airlock import client, enforce, keyfile, paths, platform_compat, winpath
+from tests import posix_only
 
 
 def _remove_quietly(path):

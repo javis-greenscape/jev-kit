@@ -349,7 +349,7 @@ def run_completion(model_field: str, messages: list[dict], response_format: dict
 class Handler(BaseHTTPRequestHandler):
     server_version = "claude-cli-shim/0.1"
 
-    def log_message(self, format, *args):  # noqa: A002 - matches base signature
+    def log_message(self, format, *args):
         logger.info("%s - %s", self.address_string(), format % args)
 
     def _send_json(self, status: int, payload: dict):

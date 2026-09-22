@@ -18,8 +18,8 @@ document store's folder tree is exactly the thing that gets restructured.
 See README.md.
 """
 from .classify import (  # noqa: F401
-    ClassificationError,
     NOT_IN_LIST,
+    ClassificationError,
     classify_page,
     load_taxonomy,
     validate_taxonomy,

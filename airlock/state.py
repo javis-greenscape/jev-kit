@@ -19,10 +19,8 @@ silently allowed through loop protection.
 import json
 import os
 import time
-from pathlib import Path
 
-from . import paths
-from . import platform_compat
+from . import paths, platform_compat
 
 STATE_DIR = paths.state_dir()
 STATE_FILE = STATE_DIR / "loop_state.json"

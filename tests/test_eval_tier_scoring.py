@@ -8,7 +8,7 @@ mocked throughout, and assert that what the eval predicts is what the hook would
 actually do.
 """
 
-import tests  # noqa: F401 -- MUST be the first import. `python3 -m unittest
+import tests  # noqa: F401, I001 -- MUST be the first import. `python3 -m unittest
 # discover -s tests` runs with start_dir == top_level_dir, so unittest treats
 # `tests/` as a flat directory of top-level modules and never executes
 # tests/__init__.py as a package init (name == '.' in TestLoader._find_tests).
@@ -222,7 +222,6 @@ class TestCasesFileLabels(unittest.TestCase):
         relabelling a case to whatever the model answered."""
         prior_failure_ids = set()
         for c in self.tier:
-            prompt = (c["payload"]["tool_input"].get("prompt") or "")
             chosen = c["payload"]["tool_input"].get("subagent_type") or ""
             expected = c["expected"]
             outcome = eval_mod.expected_tier_outcome(expected)

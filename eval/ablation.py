@@ -33,8 +33,8 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT))
 
-from airlock import client, policy, questions  # noqa: E402
-from airlock.eval import load_cases  # noqa: E402
+from airlock import client, policy, questions
+from airlock.eval import load_cases
 
 RESULT_FILE = REPO_ROOT / "eval" / "ablation_result.json"
 MAX_WORKERS = 4

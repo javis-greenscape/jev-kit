@@ -28,9 +28,9 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT))
 
-from airlock import questions as q_mod  # noqa: E402
-from airlock import scope as scope_mod  # noqa: E402
-from airlock.eval import load_cases  # noqa: E402
+from airlock import questions as q_mod
+from airlock import scope as scope_mod
+from airlock.eval import load_cases
 
 OUT_DIR = REPO_ROOT / "eval" / "jevcal"
 

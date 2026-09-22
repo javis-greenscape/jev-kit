@@ -30,10 +30,10 @@ import shutil
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-import windows_common as wc  # noqa: E402
+import windows_common as wc
 
 sys.path.insert(0, wc.REPO_ROOT)
-from airlock import paths  # noqa: E402
+from airlock import paths
 
 
 def parse_args(argv=None):

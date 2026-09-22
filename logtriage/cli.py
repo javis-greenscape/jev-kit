@@ -17,7 +17,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from logtriage.triage import LABELS, Triager, load_config  # noqa: E402
+from logtriage.triage import LABELS, Triager, load_config
 
 
 def _default_ask(body):

@@ -19,7 +19,7 @@ LINK_RE = re.compile(r"!?\[[^\]]*\]\(([^)\s]+)(?:\s+\"[^\"]*\")?\)")
 # src="..." inside the HTML header block.
 SRC_RE = re.compile(r"<img[^>]*\ssrc=\"([^\"]+)\"")
 FENCE_RE = re.compile(r"^```(\w*)\s*$")
-HTML_COMMENT_RE = re.compile(r"<!--.*?-->", re.S)
+HTML_COMMENT_RE = re.compile(r"<!--.*?-->", re.DOTALL)
 MERMAID_HEADER_RE = re.compile(r"^(flowchart|graph)\s+(TD|TB|BT|LR|RL)\s*$")
 
 SKIP_SCHEMES = ("http://", "https://", "mailto:", "#")

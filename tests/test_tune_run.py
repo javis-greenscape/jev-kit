@@ -1,4 +1,4 @@
-import tests  # noqa: F401 -- MUST be the first import; see tests/__init__.py.
+import tests  # noqa: F401, I001 -- MUST be the first import; see tests/__init__.py.
 
 import io
 import json
@@ -270,8 +270,7 @@ class TestRunCategories(unittest.TestCase):
 
     def _write_rows(self, rows):
         with open(self.shadow, "w") as f:
-            for r in rows:
-                f.write(json.dumps(r) + "\n")
+            f.writelines(json.dumps(r) + "\n" for r in rows)
 
     def _synthetic_rows(self, n, secret=False):
         rows = []

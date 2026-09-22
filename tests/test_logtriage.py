@@ -6,7 +6,7 @@ component exists, so it is asserted against the actual request body, not
 inferred from reading the code.
 """
 
-import tests  # noqa: F401 -- MUST be the first import. `python3 -m unittest
+import tests  # noqa: F401, I001 -- MUST be the first import. `python3 -m unittest
 # discover -s tests` runs with start_dir == top_level_dir, so unittest treats
 # `tests/` as a flat directory of top-level modules and never executes
 # tests/__init__.py as a package init (name == '.' in TestLoader._find_tests).
@@ -15,13 +15,14 @@ import tests  # noqa: F401 -- MUST be the first import. `python3 -m unittest
 
 import json
 import os
+import re
 import tempfile
 import unittest
 
 from logtriage import triage as lt
 
 
-class RecordingAsk(object):
+class RecordingAsk:
     """Records every request body and returns a fixed answer."""
 
     def __init__(self, label="attention", confidence=0.9):
@@ -200,7 +201,7 @@ class TestConfig(unittest.TestCase):
 
     def test_a_broken_regex_is_rejected_loudly(self):
         path = self._write({"rules": [["noise", "x", "([unclosed"]]})
-        with self.assertRaises(Exception):
+        with self.assertRaises(re.error):
             lt.load_config(path)
 
     def test_custom_protected_patterns_are_honoured(self):

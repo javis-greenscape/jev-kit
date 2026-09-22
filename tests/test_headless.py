@@ -6,7 +6,7 @@ rules.json (including the case that matters most -- a user's explicit R6 value
 is never overwritten).
 """
 
-import tests  # noqa: F401 -- MUST be the first import; see test_compat_shims.py
+import tests  # noqa: F401, I001 -- MUST be the first import; see test_compat_shims.py
 
 import json
 import os

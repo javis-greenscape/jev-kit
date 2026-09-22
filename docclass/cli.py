@@ -22,7 +22,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from docclass.classify import (  # noqa: E402
+from docclass.classify import (
     ClassificationError,
     classify_page,
     default_taxonomy_path,

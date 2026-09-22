@@ -36,7 +36,9 @@ import sys
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
-from . import client, policy, questions, rules as rules_mod, scope as scope_mod
+from . import client, policy, questions
+from . import rules as rules_mod
+from . import scope as scope_mod
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 

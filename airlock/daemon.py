@@ -48,8 +48,8 @@ from collections import deque
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from airlock import keyfile, paths, redact  # noqa: E402
-from airlock.client import API_URL  # noqa: E402
+from airlock import keyfile, paths, redact
+from airlock.client import API_URL
 
 _URL = urllib.parse.urlsplit(API_URL)
 HOST = _URL.hostname
@@ -110,7 +110,7 @@ def new_https_connection(timeout_s):
 
 
 class _Slot:
-    __slots__ = ("lock", "conn")
+    __slots__ = ("conn", "lock")
 
     def __init__(self):
         self.lock = threading.Lock()
@@ -330,7 +330,7 @@ def _bind_socket(sock_dir, sock_path):
             probe.connect(sock_path)
             probe.close()
             raise SystemExit("airlock daemon already running at %s" % sock_path)
-        except (ConnectionRefusedError, FileNotFoundError, socket.timeout, OSError):
+        except (TimeoutError, ConnectionRefusedError, FileNotFoundError, OSError):
             pass
         finally:
             try:

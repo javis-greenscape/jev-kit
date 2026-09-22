@@ -50,7 +50,7 @@ import os
 import re
 
 from . import keyfile, paths
-from .headless import is_small_host, cpu_count
+from .headless import cpu_count, is_small_host
 from .platform_compat import is_windows
 
 HOME = os.path.expanduser("~")
@@ -70,11 +70,11 @@ CONFIG_FILE = str(paths.config_file("rules.json"))
 VALID_ACTIONS = ("deny", "ask", "warn", "log", "off")
 
 
-class Match(object):
+class Match:
     """A code pre-filter hit. `ask=True` means the rule still needs Jev for
     the fuzzy half; `ask=False` means the code decided on its own."""
 
-    __slots__ = ("detail", "suggestion", "ask", "extra")
+    __slots__ = ("ask", "detail", "extra", "suggestion")
 
     def __init__(self, detail, suggestion="", ask=False, extra=None):
         self.detail = detail
@@ -86,9 +86,19 @@ class Match(object):
         return {"detail": self.detail, "suggestion": self.suggestion, "ask": self.ask, "extra": self.extra}
 
 
-class Rule(object):
-    __slots__ = ("id", "tools", "action", "windows_action", "prefilter", "questions",
-                 "deny_when", "legacy", "fallback", "why")
+class Rule:
+    __slots__ = (
+        "action",
+        "deny_when",
+        "fallback",
+        "id",
+        "legacy",
+        "prefilter",
+        "questions",
+        "tools",
+        "why",
+        "windows_action",
+    )
 
     def __init__(self, id, tools, action, prefilter=None, questions=None, deny_when=None,
                  legacy=None, fallback=False, why="", windows_action=None):
@@ -290,8 +300,8 @@ SECRET_PATH_RES = [
     # One separator-tolerant, case-insensitive pattern each covers all four,
     # so `type %APPDATA%\airlock\env` and `Get-Content ...\jev-kit\env` are
     # protected exactly as well as `cat ~/.config/airlock/env`.
-    re.compile(r"[\\/]jev-kit[\\/]env\b", re.I),
-    re.compile(r"[\\/]airlock[\\/]env\b", re.I),
+    re.compile(r"[\\/]jev-kit[\\/]env\b", re.IGNORECASE),
+    re.compile(r"[\\/]airlock[\\/]env\b", re.IGNORECASE),
     re.compile(r"\.credentials\.json\b"),
     re.compile(r"\bcredentials(\.json|\.yml|\.yaml|\.ini)?\b(?!\.example)"),
     re.compile(r"(^|/)\.env(\.[A-Za-z0-9_-]+)?$"),
@@ -358,7 +368,7 @@ def _literal_path_re(path, windows=None):
     Case-insensitive on Windows, where `%APPDATA%\\Airlock\\env` and
     `%appdata%\\airlock\\env` are the same file and R1 must not be fooled by
     which one a command happened to type."""
-    flags = re.I if is_windows(windows) else 0
+    flags = re.IGNORECASE if is_windows(windows) else 0
     out = []
     for form in (path, path[len(HOME) + 1:] if path.startswith(HOME + "/") else None):
         if not form:
@@ -418,7 +428,7 @@ AMBIGUOUS_SECRET_TOKENS = (
 )
 
 SECRET_VAR_RE = re.compile(r"\$\{?([A-Za-z_][A-Za-z_0-9]*)\}?")
-SECRET_VAR_NAME_RE = re.compile(r"(SECRET|TOKEN|PASSWORD|PASSWD|API_?KEY|PRIVATE_KEY|CREDENTIAL)", re.I)
+SECRET_VAR_NAME_RE = re.compile(r"(SECRET|TOKEN|PASSWORD|PASSWD|API_?KEY|PRIVATE_KEY|CREDENTIAL)", re.IGNORECASE)
 
 R1_SUGGESTION_POSIX = (
     "Do not print a secret. Load it into the environment instead, in the same "
@@ -565,7 +575,7 @@ def prefilter_secret(ctx):
         # curl -v with an Authorization header on the command line
         if prog in ("curl", "http", "wget"):
             verbose = any(a in ("-v", "--verbose", "--trace", "--trace-ascii", "-i", "--include") for a in args)
-            has_auth = bool(re.search(r"authorization\s*:", seg, re.I))
+            has_auth = bool(re.search(r"authorization\s*:", seg, re.IGNORECASE))
             if verbose and has_auth:
                 return Match(
                     "`%s` in verbose mode echoes the Authorization header, including the token" % prog,
@@ -1196,7 +1206,7 @@ _R10_DB_WRITE_RE = re.compile(
     r"|flushall|flushdb|copy\s+\w+\s+from)\b"
     # the document-store and key-value shapes, which are not SQL
     r"|\.(drop|dropDatabase|deleteMany|deleteOne|insertMany|insertOne"
-    r"|updateMany|updateOne|remove|renameCollection)\s*\(", re.I)
+    r"|updateMany|updateOne|remove|renameCollection)\s*\(", re.IGNORECASE)
 
 _R10_SERVICE_PROGRAMS = {"systemctl", "service", "launchctl", "initctl", "rc-service"}
 _R10_SERVICE_VERBS = {"start", "stop", "restart", "reload", "enable", "disable",
@@ -1467,7 +1477,8 @@ def questions_general_risk(ctx, match):
     thing the person running the session asked for is not something to warn
     them about. Like everywhere else it can only ever soften.
     """
-    from . import questions as questions_mod, redact
+    from . import questions as questions_mod
+    from . import redact
 
     # The user's own recent words, already redacted and truncated by
     # airlock/context.py, which never reads a tool-result row. Without them

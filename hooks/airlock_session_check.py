@@ -129,7 +129,7 @@ TUNE_COULD_NOT_RUN = "could_not_run"
 DISABLE_VARS = ("AIRLOCK_DISABLE", "PLUMBLINE_DISABLE", "JEV_GUARD_DISABLE")
 
 
-class Warning_(object):
+class Warning_:
     """One thing to say, with the key that de-duplicates it.
 
     `key` is the whole message, not a category, so a warning whose detail
@@ -182,7 +182,7 @@ def read_uptime_seconds(system=None, proc_uptime="/proc/uptime", ticks=None,
         if system == "windows":
             if ticks is None:
                 import ctypes
-                ticks = ctypes.windll.kernel32.GetTickCount64()  # noqa
+                ticks = ctypes.windll.kernel32.GetTickCount64()
             return float(ticks) / 1000.0
 
         if system == "linux":
