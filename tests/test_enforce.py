@@ -303,3 +303,32 @@ class TestLoopProtection(EnforceTestBase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class InputSummaryCapsTest(unittest.TestCase):
+    """The log row is cut shorter than what Jev sees. Both come from one
+    function so they cannot drift in shape, and the caps are the only
+    difference (jev-kit PR #5)."""
+
+    def _ctx(self):
+        # Plain words: the redactor folds any long run without spaces (a
+        # token, a deep path) into a placeholder, which is not what is
+        # measured here.
+        long_cmd = " ".join(["echo", "hello"] * 120)
+        return {
+            "tool_name": "Bash",
+            "command": long_cmd,
+            "tool_input": {"command": long_cmd, "description": " ".join(["some words here"] * 40)},
+        }
+
+    def test_jev_summary_keeps_the_300_char_view(self):
+        s = enforce._input_summary(self._ctx())
+        self.assertEqual(len(s["command"]), enforce.JEV_SUMMARY_CAP)
+        self.assertEqual(len(s["description"]), enforce.JEV_SUMMARY_CAP)
+
+    def test_log_summary_is_shorter(self):
+        s = enforce._log_input_summary(self._ctx())
+        self.assertEqual(len(s["command"]), enforce.LOG_COMMAND_CAP)
+        self.assertEqual(len(s["description"]), enforce.LOG_FIELD_CAP)
+        self.assertLess(enforce.LOG_COMMAND_CAP, enforce.JEV_SUMMARY_CAP)
+        self.assertLess(enforce.LOG_FIELD_CAP, enforce.JEV_SUMMARY_CAP)

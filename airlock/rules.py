@@ -1025,11 +1025,11 @@ def prefilter_gui(ctx, windows=None):
 
 # --- R7: destructive / outward-facing ----------------------------------------
 
+# One sentence. The advice rides on every hit and the reader has seen it
+# before; the detail line above it is the part that carries information
+# (Jonathan, 2026-09-22).
 R7_SUGGESTION = (
-    "Ask first for anything hard to reverse or outward-facing (rewriting history, "
-    "force-pushing, deleting branches or files wholesale). Uncommitted work is work "
-    "that can be lost: prefer a WIP commit to discarding, and `--force-with-lease` "
-    "to a bare force push."
+    "Hard to reverse: ask first unless the human already said to do this."
 )
 
 
@@ -1175,11 +1175,9 @@ R10_RISK_LEVELS = [
 # be read the way it leans.
 R10_FIRE_AT = 1.5
 
+# One sentence, same reason as R7_SUGGESTION.
 R10_SUGGESTION = (
-    "This is not something any specific rule covers, so nothing is being blocked. "
-    "It does look like it reaches outside this working tree. Worth a second's "
-    "thought about whether it is reversible, and whether the person running this "
-    "session actually asked for it."
+    "Reaches outside the working tree; not blocked. Check it was asked for."
 )
 
 _R10_PUBLISH = {

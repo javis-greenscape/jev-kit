@@ -402,7 +402,7 @@ def _run_rule(ctx, rule, match, eff, base, override_reason, b_ms, session_id, mo
         "rule_id": rule.id,
         "action": eff,
         "detail": match.detail,
-        "input_summary": _input_summary(ctx),
+        "input_summary": _log_input_summary(ctx),
     })
 
     if eff == "deny" and match.extra.get("downgrade_to") in ("warn", "log"):
@@ -530,16 +530,32 @@ def _run_rule(ctx, rule, match, eff, base, override_reason, b_ms, session_id, mo
     return True
 
 
-def _input_summary(ctx):
+# Two caps, on purpose. Jev's user_requested judgment reads the same
+# summary as the log row, and a shorter one there would change what it
+# decides (gate on jev-kit PR #5). So Jev keeps the 300-character view, and
+# only the row written to shadow.jsonl is cut to 200 for the command and 120
+# for the rest: enough to recognise the call when tuning, without a Bash
+# heredoc turning every row into a page (Jonathan, 2026-09-22).
+JEV_SUMMARY_CAP = 300
+LOG_COMMAND_CAP = 200
+LOG_FIELD_CAP = 120
+
+
+def _input_summary(ctx, command_cap=JEV_SUMMARY_CAP, field_cap=JEV_SUMMARY_CAP):
     from . import redact
     ti = ctx.get("tool_input") or {}
     summary = {}
     if ctx.get("command"):
-        summary["command"] = redact.redact_and_truncate_command(ctx["command"])[:300]
+        summary["command"] = redact.redact_and_truncate_command(ctx["command"])[:command_cap]
     for k in ("file_path", "skill", "subagent_type", "description"):
         if ti.get(k):
-            summary[k] = redact.redact(str(ti[k]))[:300]
+            summary[k] = redact.redact(str(ti[k]))[:field_cap]
     return summary
+
+
+def _log_input_summary(ctx):
+    """The shorter form for the shadow log row only."""
+    return _input_summary(ctx, LOG_COMMAND_CAP, LOG_FIELD_CAP)
 
 
 def _confidence_and_margin(answers):
