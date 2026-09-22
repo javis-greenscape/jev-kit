@@ -5,7 +5,6 @@ Never puts the API key on a command line: it goes in an Authorization header
 built in-process, never through a subprocess or shell.
 """
 import json
-import os
 import socket
 import time
 import urllib.error

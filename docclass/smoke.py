@@ -26,8 +26,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from docclass.classify import default_taxonomy_path, load_taxonomy  # noqa: E402
-from docclass.cli import classify_document, print_summary  # noqa: E402
+from docclass.classify import default_taxonomy_path, load_taxonomy
+from docclass.cli import classify_document, print_summary
 
 PUBLIC_PDF = "https://www.irs.gov/pub/irs-pdf/fw9.pdf"
 

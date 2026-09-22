@@ -18,8 +18,6 @@ state file and a missing uptime source must all end in "exit 0, print
 nothing" rather than an exception.
 """
 
-import tests  # noqa: F401 -- MUST be the first import, see tests/__init__.py
-
 import json
 import os
 import subprocess
@@ -29,11 +27,13 @@ import time
 import unittest
 from pathlib import Path
 
+import tests
+
 REPO_ROOT = Path(__file__).resolve().parent.parent
 HOOK = REPO_ROOT / "hooks" / "airlock_session_check.py"
 
 sys.path.insert(0, str(REPO_ROOT / "hooks"))
-import airlock_session_check as sc  # noqa: E402
+import airlock_session_check as sc
 
 
 def facts(**over):
@@ -276,7 +276,7 @@ class TestDeduplication(unittest.TestCase):
         self.assertIn("new", state["shown"])
 
 
-class HookRunMixin(object):
+class HookRunMixin:
     """Run the REAL hook process against a throwaway HOME."""
 
     def _home(self):

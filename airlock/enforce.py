@@ -25,7 +25,6 @@ second line of defence).
 """
 import datetime
 import json
-import os
 import re
 import sys
 import time
@@ -33,7 +32,9 @@ import time
 # client and guards are imported lazily (inside the branches that need them):
 # they pull in urllib and the keyfile reader, several ms of start-up that a
 # code-only rule -- the common matched case -- must not pay for.
-from . import log, paths, policy, rules as rules_mod, state as state_mod
+from . import log, paths, policy
+from . import rules as rules_mod
+from . import state as state_mod
 from .platform_compat import is_windows
 
 DEFAULT_BUDGET_MS = 1500
@@ -63,7 +64,7 @@ USER_REQUESTED_SOFTEN_AT = 0.75
 # use. Dropping an old one would silently stop honouring overrides
 # mid-cutover, which is exactly the class of failure a rename is meant to
 # avoid.
-_OVERRIDE_RE = re.compile(r"\[(?:airlock|plumbline|jev)-ok:\s*([^\]]*)\]", re.I)
+_OVERRIDE_RE = re.compile(r"\[(?:airlock|plumbline|jev)-ok:\s*([^\]]*)\]", re.IGNORECASE)
 
 _ACTION_RANK = {"deny": 0, "ask": 1, "warn": 2, "log": 3, "off": 4}
 

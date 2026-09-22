@@ -32,7 +32,7 @@ SCRATCH_DIR = Path("/tmp/jev-bench")
 SCRATCH_SOURCE = Path.home() / "code" / "auto-mail" / "src" / "silence_alert.py"
 
 sys.path.insert(0, str(REPO_ROOT))
-from bench import tasks as T  # noqa: E402
+from bench import tasks as T
 
 ARMS = ("jev", "none")
 TIMEOUT_S = 300
@@ -246,8 +246,7 @@ def main():
     stamp = time.strftime("%Y%m%d-%H%M%S")
     jsonl_path = RESULTS_DIR / ("%s.jsonl" % stamp)
     with open(jsonl_path, "w") as f:
-        for row in results:
-            f.write(json.dumps(row, default=str) + "\n")
+        f.writelines(json.dumps(row, default=str) + "\n" for row in results)
     print("Wrote %s" % jsonl_path)
 
     from bench.report import write_markdown

@@ -13,7 +13,6 @@ Deliberately dependency-free (stdlib only, no other airlock imports) so the
 hot path in hooks/airlock.py can resolve mode without pulling in client,
 guards, or policy for the common shadow/off case.
 """
-import os
 
 from . import paths
 

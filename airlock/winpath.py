@@ -41,7 +41,7 @@ _UNC_ROOT_RE = re.compile(r"^\\\\[^\\]+\\[^\\]+\\?$")
 # %VAR% and $env:VAR, the two ways a Windows path variable gets written in a
 # command line Claude Code might issue.
 _PERCENT_VAR_RE = re.compile(r"%([A-Za-z_][A-Za-z_0-9()]*)%")
-_PS_ENV_VAR_RE = re.compile(r"\$env:([A-Za-z_][A-Za-z_0-9]*)", re.I)
+_PS_ENV_VAR_RE = re.compile(r"\$env:([A-Za-z_][A-Za-z_0-9]*)", re.IGNORECASE)
 
 
 def looks_windows_path(path):

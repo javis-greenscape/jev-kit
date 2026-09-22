@@ -126,7 +126,7 @@ def check_t1(final_text, truth):
 def check_t2(final_text, truth):
     matches = truth["matches"]
     if not matches:
-        return bool(re.search(r"\bno\b.*\bfound\b|\bcould not find\b|\bnot found\b", final_text, re.I))
+        return bool(re.search(r"\bno\b.*\bfound\b|\bcould not find\b|\bnot found\b", final_text, re.IGNORECASE))
     for m in matches:
         name = Path(m).name
         if name in final_text or m in final_text:

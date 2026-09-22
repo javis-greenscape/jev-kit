@@ -128,7 +128,7 @@ def _spawn_shadow_worker(raw):
         # start_new_session=True on POSIX, DETACHED_PROCESS |
         # CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW on Windows. Either way
         # the worker outlives this process, which exits 0 immediately.
-        subprocess.Popen(  # noqa: F821 -- imported above
+        subprocess.Popen(
             [sys.executable, WORKER, path],
             stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL,

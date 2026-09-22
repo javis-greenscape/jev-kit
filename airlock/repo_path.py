@@ -70,8 +70,7 @@ guarantee the platform never gave.
 import os
 import stat
 
-from . import paths
-from . import platform_compat
+from . import paths, platform_compat
 from .platform_compat import is_windows
 
 # A one-line file holding the PATH of the tuning repo checkout, never its

@@ -44,7 +44,8 @@ try:
 except Exception:  # pragma: no cover - only if the tree is broken
     _policy = None
 
-from tuning import sampling, verdicts as verdict_store
+from tuning import sampling
+from tuning import verdicts as verdict_store
 
 try:
     from tuning import policy_text as _policy_text
@@ -344,7 +345,9 @@ def resolve_main_repo(script_dir):
     """
     repo_root = Path(script_dir).resolve().parent
     sys.path.insert(0, str(repo_root))
-    from airlock import repo_path as _repo_path  # local import: sys.path just set up above
+    from airlock import (
+        repo_path as _repo_path,  # local import: sys.path just set up above
+    )
 
     resolved = _repo_path.resolve_repo(script_dir)
     return Path(resolved).resolve() if resolved else None
@@ -973,8 +976,7 @@ def load_cases(path):
 def write_cases(path, cases):
     path.parent.mkdir(parents=True, exist_ok=True)
     with open(path, "w") as f:
-        for c in cases:
-            f.write(json.dumps(c, default=str) + "\n")
+        f.writelines(json.dumps(c, default=str) + "\n" for c in cases)
 
 
 def merge_new_cases(existing_cases, new_cases):

@@ -26,16 +26,14 @@ turned into that check's failure, not a crash of the whole probe.
 """
 import datetime
 import json
-import os
 import socket
 import sys
 import time
-from pathlib import Path
 
-from . import keyfile
-from . import paths
+from . import keyfile, paths
 from . import mode as mode_mod
-from .client import MODEL, _ask_via_daemon, _daemon_socket_path, ask as client_ask
+from .client import MODEL, _ask_via_daemon, _daemon_socket_path
+from .client import ask as client_ask
 from .log import LOG_FILE
 from .platform_compat import has_unix_sockets
 
@@ -289,9 +287,7 @@ def run_health_check(windows=None):
     if daemon_supported:
         if not ping.get("ok"):
             status = "down"
-        elif not ask.get("ok") or not key_ok:
-            status = "degraded"
-        elif last_hour["fail_open_rate"] > FAIL_OPEN_RATE_DEGRADED:
+        elif not ask.get("ok") or not key_ok or last_hour["fail_open_rate"] > FAIL_OPEN_RATE_DEGRADED:
             status = "degraded"
         else:
             status = "healthy"
@@ -299,11 +295,7 @@ def run_health_check(windows=None):
         # No daemon to be down: the hook itself is the service, and it is
         # proved by the doctor's real deny, not from here. A missing key or a
         # failed direct call is degraded, never down.
-        if direct is not None and direct.get("ok") is False:
-            status = "degraded"
-        elif not key_ok:
-            status = "degraded"
-        elif last_hour["fail_open_rate"] > FAIL_OPEN_RATE_DEGRADED:
+        if direct is not None and direct.get("ok") is False or not key_ok or last_hour["fail_open_rate"] > FAIL_OPEN_RATE_DEGRADED:
             status = "degraded"
         else:
             status = "healthy"

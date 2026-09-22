@@ -9,9 +9,8 @@ import re
 import shlex
 from pathlib import Path
 
-from . import tiers
+from . import tiers, winpath
 from .platform_compat import is_windows
-from . import winpath
 
 CONFIDENCE_THRESHOLD = 0.8
 MARGIN_THRESHOLD = 0.4
@@ -993,7 +992,7 @@ _LOCATE_RE = re.compile(r"(?<![A-Za-z0-9_])(plocate|locate)(?![A-Za-z0-9_])")
 # the very deny it should have triggered. This raw regex still does not know
 # about quoting, so it is now only a fallback (see _command_position_is_es)
 # for a segment shlex itself cannot parse.
-_ES_RE = re.compile(r"(?:^|[\n;&|(])\s*es(?:\.exe)?(?=\s|$)", re.I)
+_ES_RE = re.compile(r"(?:^|[\n;&|(])\s*es(?:\.exe)?(?=\s|$)", re.IGNORECASE)
 
 def _strip_shell_comment(command):
     """scope.strip_shell_comment(), so policy and the scope parser read a

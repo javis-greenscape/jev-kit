@@ -101,7 +101,7 @@ class Phrase:
     """One entry from the phrase list, compiled."""
 
     text: str
-    pattern: "re.Pattern[str]"
+    pattern: re.Pattern[str]
     hint: str = ""
 
 
@@ -114,7 +114,7 @@ def _apostrophe_insensitive(escaped: str) -> str:
     return "".join(_APOSTROPHE_CLASS if ch in _APOSTROPHES else ch for ch in escaped)
 
 
-def phrase_pattern(phrase: str) -> "re.Pattern[str]":
+def phrase_pattern(phrase: str) -> re.Pattern[str]:
     """Word-boundary-anchored, case-insensitive pattern for one phrase.
 
     A trailing ``\\b`` does not make a phrase match its own inflections:
@@ -312,7 +312,7 @@ _BOUNDARY_RE = re.compile(r"[.!?]+[\"'”’)\]*_]*(?=\s)")
 _TRAILING_TOKEN_RE = re.compile(r"(\S+)$")
 _ABBREVIATIONS = frozenset(
     {"e.g.", "i.e.", "mr.", "mrs.", "ms.", "dr.", "vs.", "approx.", "etc.",
-     "prof.", "st.", "jr.", "sr.", "no.", "fig.", "ms."}
+     "prof.", "st.", "jr.", "sr.", "no.", "fig."}
 )
 _WORD_RE = re.compile(r"[0-9A-Za-z][\w'’./%-]*")
 
@@ -355,7 +355,7 @@ class Finding:
     hint: str = ""
 
     def render(self, show_hints: bool) -> str:
-        head = "{}:{}: {}: {}".format(self.path, self.line, self.rule, self.text)
+        head = f"{self.path}:{self.line}: {self.rule}: {self.text}"
         if show_hints and self.hint:
             return head + "\n    hint: " + self.hint
         return head
@@ -394,7 +394,7 @@ def check_block(path: str, block: Block, phrases, opts) -> list:
             for m in phrase.pattern.finditer(text):
                 findings.append(Finding(
                     path, _line_at(starts, m.start()), "banned",
-                    '"{}" in: {}'.format(m.group(0), _excerpt(joined, m.start())),
+                    f'"{m.group(0)}" in: {_excerpt(joined, m.start())}',
                     phrase.hint,
                 ))
 
@@ -416,7 +416,7 @@ def check_block(path: str, block: Block, phrases, opts) -> list:
             if count > opts.max_sentence_words:
                 findings.append(Finding(
                     path, _line_at(starts, offset), "long-sentence",
-                    "{} words: {}".format(count, _excerpt(joined, offset)),
+                    f"{count} words: {_excerpt(joined, offset)}",
                     RULE_HINTS["long-sentence"],
                 ))
 
@@ -425,7 +425,7 @@ def check_block(path: str, block: Block, phrases, opts) -> list:
         if total > opts.max_paragraph_words:
             findings.append(Finding(
                 path, block.start, "long-paragraph",
-                "{} words: {}".format(total, _excerpt(joined, 0)),
+                f"{total} words: {_excerpt(joined, 0)}",
                 RULE_HINTS["long-paragraph"],
             ))
 
@@ -442,8 +442,7 @@ def check_block(path: str, block: Block, phrases, opts) -> list:
         if len(asides) > opts.max_parens:
             findings.append(Finding(
                 path, _line_at(starts, asides[opts.max_parens].start()), "parens",
-                "{} asides in one paragraph: {}".format(
-                    len(asides), _excerpt(joined, asides[opts.max_parens].start())),
+                f"{len(asides)} asides in one paragraph: {_excerpt(joined, asides[opts.max_parens].start())}",
                 RULE_HINTS["parens"],
             ))
 
@@ -485,8 +484,7 @@ def check_block(path: str, block: Block, phrases, opts) -> list:
                 offset = sentences[run_start][0]
                 findings.append(Finding(
                     path, _line_at(starts, offset), "anaphora",
-                    '{} sentences opening on "{}": {}'.format(
-                        end - run_start, openers[run_start], _excerpt(joined, offset)),
+                    f'{end - run_start} sentences opening on "{openers[run_start]}": {_excerpt(joined, offset)}',
                     RULE_HINTS["anaphora"],
                 ))
             run_start = end
@@ -553,8 +551,8 @@ def main(argv=None) -> int:
         counts = {}
         for finding in findings:
             counts[finding.rule] = counts.get(finding.rule, 0) + 1
-        summary = ", ".join("{} {}".format(v, k) for k, v in sorted(counts.items()))
-        print("\n{} finding(s): {}".format(len(findings), summary))
+        summary = ", ".join(f"{v} {k}" for k, v in sorted(counts.items()))
+        print(f"\n{len(findings)} finding(s): {summary}")
         return 1
     return 0
 

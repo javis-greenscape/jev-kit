@@ -10,10 +10,8 @@ tool call -- never interleave a partial line.
 """
 import json
 import os
-from pathlib import Path
 
-from . import paths
-from . import platform_compat
+from . import paths, platform_compat
 
 LOG_DIR = paths.state_dir()
 LOG_FILE = LOG_DIR / "shadow.jsonl"

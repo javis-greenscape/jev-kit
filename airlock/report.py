@@ -5,13 +5,11 @@ tokens, and the 20 most recent would_deny rows, so a human can judge the
 false-deny rate after a week of shadow-mode running.
 """
 import json
-import os
 import statistics
 import sys
 from pathlib import Path
 
 from . import paths
-
 from .log import LOG_FILE
 
 TUNE_LOG_FILE = Path(paths.env("AIRLOCK_TUNE_STATE_DIR", "PLUMBLINE_TUNE_STATE_DIR", "JEV_TUNE_STATE_DIR")

@@ -24,8 +24,8 @@ import time
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from airlock import keyfile, policy, questions  # noqa: E402
-from airlock import client as jclient  # noqa: E402
+from airlock import client as jclient
+from airlock import keyfile, policy, questions
 
 
 def _run_bash(label, command, cwd, fake_graphify=False):

@@ -9,7 +9,8 @@ to judge" case never even reaches the network.
 import datetime
 import random
 
-from . import client, keyfile, log, policy, questions, redact, scope as scope_mod, tiers
+from . import client, keyfile, log, policy, questions, redact, tiers
+from . import scope as scope_mod
 
 # `adequate` when the judgement never happened (the call was skipped, or the
 # request failed). The row still carries every field, and `skipped`/`error`
