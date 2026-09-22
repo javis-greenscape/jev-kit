@@ -534,11 +534,14 @@ def _input_summary(ctx):
     from . import redact
     ti = ctx.get("tool_input") or {}
     summary = {}
+    # 200 for the command and 120 for the rest: enough to recognise the
+    # call when tuning, without a Bash heredoc turning every row into a page
+    # (Jonathan, 2026-09-22).
     if ctx.get("command"):
-        summary["command"] = redact.redact_and_truncate_command(ctx["command"])[:300]
+        summary["command"] = redact.redact_and_truncate_command(ctx["command"])[:200]
     for k in ("file_path", "skill", "subagent_type", "description"):
         if ti.get(k):
-            summary[k] = redact.redact(str(ti[k]))[:300]
+            summary[k] = redact.redact(str(ti[k]))[:120]
     return summary
 
 
