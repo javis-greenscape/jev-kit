@@ -75,7 +75,7 @@ than its step count explains.
 
 Only `http://` and `https://` start pages are accepted.
 
-A real run on the development box, 2026-09-21, driven over stdio:
+A real run on the development box, 2026-09-23, driven over stdio:
 
 ```text
 goal:    "open https://example.com and report the main heading"
@@ -88,14 +88,17 @@ extract: "h1"
   "title": "Example Domain",
   "status": "done",
   "steps": 1,
-  "elapsed_ms": 2946,
+  "elapsed_ms": 1392,
   "text": "Example Domain\n\nThis domain is for use in documentation examples without needing permission. Avoid use in operations.\n\nLearn more",
-  "extracted": "Example Domain"
+  "extracted": "Example Domain",
+  "timing": {"decisions": 1, "ops": ["DONE"], "jev_ms": [431], "text_ms": [],
+             "agent_ms": 435, "total_ms": 977, "jev_transport": ["daemon"]}
 }
 ```
 
-That is one run, so treat the 2.9 seconds as an example and not a benchmark.
-It includes starting Chromium.
+That is one run, so treat the 1.4 seconds as an example and not a benchmark.
+It is the first call of a server, so it includes starting Chromium and the
+worker.
 
 ## How it runs
 
