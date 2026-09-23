@@ -19,7 +19,12 @@ the element labels Jev chose between. It answers with one line:
                          page, so a link far below the fold can be named in the next turn
     DONE <answer or ok>
 
-Everything that touches a browser is passed in (`step`, `look`), so the loop is testable
+A DONE is not taken on the planner's word. Before it is accepted, code asks Jev one Noul on the
+page as it stands ("is the task complete on this page?", `verify`) and gates it at the same 0.9
+the agent gates its own DONE on. A DONE that fails the check is fed back to the planner and the
+loop goes on, within the turn cap.
+
+Everything that touches a browser is passed in (`step`, `look`, `verify`), so the loop is testable
 without one, and the same loop serves the `browse` tool's `plan: true` and the benchmark.
 """
 
@@ -34,6 +39,7 @@ PAGE_TEXT_SHOWN = 700
 FIND_SHOWN = 40
 DEFAULT_MODEL = "sonnet"
 MODELS = ("sonnet", "haiku")
+NOT_COMPLETE = "the page check says the task is not complete on this page"
 
 SYSTEM_PROMPT = (
     "You plan one browser step at a time for a web task. Each message gives you the task, the "
@@ -151,13 +157,23 @@ def _usage(event):
     }
 
 
-def run(task, start_url, planner, step, look, budget_s, log=lambda _m: None):
+def done_threshold():
+    """The confidence the agent gates its own DONE on (questions.stop_threshold), so a
+    planner's DONE and the agent's DONE pass the same bar."""
+    from .questions import stop_threshold
+
+    return stop_threshold("DONE")
+
+
+def run(task, start_url, planner, step, look, budget_s, log=lambda _m: None, verify=None):
     """Plan and execute one task.
 
     planner    anything with .ask(prompt, timeout) returning a `claude` result event
     step       step(goal, url, rank_goal, deadline) -> page dict (final_url, title, text,
                links, ...) after the Jev agent ran that one step
     look       look(url, rank_goal) -> page dict for the page at `url`, without acting
+    verify     verify(task) -> probability (0..1, or None) that the task is complete on the
+               current page. None skips the check (the planner's DONE is taken as said).
     Returns {"page": the last page dict, "plan": what the planner did and what it cost}.
     """
     deadline = time.monotonic() + budget_s
@@ -165,6 +181,8 @@ def run(task, start_url, planner, step, look, budget_s, log=lambda _m: None):
     planner_ms = browse_ms = 0.0
     turns, finds, cost, tokens = 0, 0, 0.0, {}
     transcript, stopped, answer = [], None, None
+    checks, rejected = [], False
+    threshold = done_threshold() if verify is not None else None
 
     t0 = time.perf_counter()
     page = look(start_url, task)
@@ -183,6 +201,9 @@ def run(task, start_url, planner, step, look, budget_s, log=lambda _m: None):
                      "text": (page.get("text") or "")[:PAGE_TEXT_SHOWN]},
             "done_so_far": transcript,
         }
+        if rejected:
+            message["note"] = NOT_COMPLETE
+            rejected = False
         if found is not None:
             message["found"] = {"query": found_query, "elements": element_lines(found)}
             if not found:
@@ -211,8 +232,23 @@ def run(task, start_url, planner, step, look, budget_s, log=lambda _m: None):
             stopped = "the planner answered with nothing usable: %r" % said[:120]
             break
         if verb == "DONE":
-            stopped, answer = "planner said DONE", argument
-            break
+            if verify is None:
+                stopped, answer = "planner said DONE", argument
+                break
+            t0 = time.perf_counter()
+            try:
+                probability = verify(task)
+            except Exception as exc:
+                probability = None
+                log("the page check failed: %s: %s" % (type(exc).__name__, str(exc)[:200]))
+            browse_ms += (time.perf_counter() - t0) * 1000
+            passed = isinstance(probability, (int, float)) and probability >= threshold
+            checks.append({"turn": turn, "probability": probability, "passed": passed})
+            if passed:
+                stopped, answer = "planner said DONE", argument
+                break
+            rejected = True
+            continue
         t0 = time.perf_counter()
         try:
             if verb == "FIND":
@@ -229,6 +265,8 @@ def run(task, start_url, planner, step, look, budget_s, log=lambda _m: None):
             browse_ms += (time.perf_counter() - t0) * 1000
     else:
         stopped = "reached the %d-turn cap" % MAX_TURNS
+        if checks and not checks[-1]["passed"]:
+            stopped += "; the planner said DONE but %s" % NOT_COMPLETE
 
     return {
         "page": page,
@@ -239,6 +277,8 @@ def run(task, start_url, planner, step, look, budget_s, log=lambda _m: None):
             "answer": answer,
             "stopped": stopped,
             "transcript": transcript,
+            "done_checks": checks,
+            "done_threshold": threshold,
             "wall_ms": round((time.perf_counter() - started) * 1000),
             "planner_ms": round(planner_ms),
             "browse_ms": round(browse_ms),

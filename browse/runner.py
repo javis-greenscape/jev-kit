@@ -121,11 +121,14 @@ def _read(browser, request, elements):
     return result
 
 
-def _agent_step(request, goal, start_url, rank_goal):
-    """Run the Jev agent for one goal from start_url; the page it ends on, plus its state."""
+def _agent_step(request, goal, start_url, rank_goal, browser=None):
+    """Run the Jev agent for one goal; the page it ends on, plus its state.
+
+    With `browser`, the agent runs in that tab as it stands and leaves it open: the caller
+    owns it. Without, the agent opens start_url in a tab of its own and closes it."""
     from jev_ultrafast import Agent
 
-    with Agent(start_url, goal, rank_goal=rank_goal) as agent:
+    with Agent(start_url, goal, rank_goal=rank_goal, browser=browser) as agent:
         for _state in agent.run():
             pass
         state = agent.snapshot()
@@ -142,21 +145,26 @@ def browse(request):
     return result
 
 
-def _look(request, url, rank_goal, screenshot=False):
-    """The page at `url` with its element table ranked by `rank_goal`, nothing clicked."""
-    from jev_ultrafast.browser import Browser
+def _look_in(browser, request, rank_goal, screenshot=False):
+    """The page in `browser` as it stands, its element table ranked by `rank_goal`, nothing
+    clicked and nothing reloaded."""
     from jev_ultrafast.model import action_space
 
-    browser = Browser(url, goal=rank_goal)
-    try:
-        page = browser.observe(screenshot=False)
-        elements = action_space(page["actions"])[0]
-        wanted = dict(request, links=True)
-        if not screenshot:
-            wanted["screenshot_path"] = None
-        return _read(browser, wanted, elements)
-    finally:
-        browser.close()
+    browser.set_goal(rank_goal)
+    page = browser.observe(screenshot=False)
+    elements = action_space(page["actions"])[0]
+    wanted = dict(request, links=True)
+    if not screenshot:
+        wanted["screenshot_path"] = None
+    return _read(browser, wanted, elements)
+
+
+def _check_done(browser, task):
+    """The code-owned check behind the planner's DONE: one Jev Noul on the page as it stands."""
+    from jev_ultrafast.model import task_complete
+
+    browser.set_goal(task)
+    return task_complete(browser.observe(screenshot=False), task)
 
 
 # One warm planner child per model, for the life of this worker. Started on the first `plan`
@@ -175,43 +183,68 @@ def planner_for(model):
 
 
 def plan(request):
+    """One planned task in ONE tab, opened once and closed once.
+
+    Every planner turn, the FIND listings and the DONE check included, runs against the same
+    tab, so whatever the page keeps without changing its URL (an open menu or modal, an
+    expanded section, a filled field, a single-page app's state) survives from step to step."""
     from jev_ultrafast import planner as plan_module
+    from jev_ultrafast.browser import Browser
 
     started = time.perf_counter()
     planner = planner_for(request.get("plan_model"))
     budget_s = float(request.get("budget_s") or 170)
-    states = []
+    task = request["goal"]
+    states, checks = [], []
+    browser = None
 
-    def step(goal, url, rank_goal, _deadline):
-        page, state = _agent_step(dict(request, links=True, screenshot_path=None), goal, url, rank_goal)
+    def step(goal, _url, rank_goal, _deadline):
+        page, state = _agent_step(dict(request, links=True, screenshot_path=None), goal, None, rank_goal,
+                                  browser=browser)
         states.append(state)
         return page
 
+    def look(_url, rank_goal):
+        return _look_in(browser, request, rank_goal)
+
+    def verify(goal):
+        check = _check_done(browser, goal)
+        checks.append(check)
+        return check["probability"]
+
     try:
-        outcome = plan_module.run(request["goal"], request["start_url"], planner, step,
-                                  lambda url, rank: _look(request, url, rank), budget_s)
+        browser = Browser(request["start_url"], goal=task)
+        try:
+            outcome = plan_module.run(task, request["start_url"], planner, step, look, budget_s,
+                                      verify=verify)
+            # Every step already read its page with the caller's `extract`, so the last one is
+            # the answer. Only a screenshot needs one more read, of the same tab.
+            final = dict(outcome["page"])
+            if request.get("screenshot_path"):
+                final.update(_look_in(browser, request, task, screenshot=True))
+        finally:
+            browser.close()
     finally:
         # A fresh conversation for the next task, started now in the background so the next
         # call still finds a warm child: one task's hops are noise in the next one's context.
         planner.new_session()
-    # Every step already read its page with the caller's `extract`, so the last one is the
-    # answer. Only a screenshot needs the final page opened once more.
-    final = dict(outcome["page"])
     for key in ("status", "steps"):
         final.pop(key, None)
-    if request.get("screenshot_path"):
-        final.update(_look(request, final.get("final_url") or request["start_url"], request["goal"],
-                           screenshot=True))
     if not request.get("links"):
         final.pop("links", None)
     decisions = [d for s in states for d in (s.get("decisions") or [])]
-    final["status"] = "done" if outcome["plan"]["stopped"] == "planner said DONE" else "blocked"
+    stopped = outcome["plan"]["stopped"]
+    final["status"] = "done" if stopped == "planner said DONE" else "blocked"
+    if final["status"] == "blocked":
+        final["reason"] = stopped
     final["steps"] = len(decisions)
     final["plan"] = outcome["plan"]
     final["timing"] = _timing({"decisions": decisions,
                                "text_calls": [t for s in states for t in (s.get("text_calls") or [])],
                                "rechecks": [r for s in states for r in (s.get("rechecks") or [])]},
                               round((time.perf_counter() - started) * 1000))
+    final["timing"]["done_checks"] = [{"probability": c.get("probability"), "latency_ms": c.get("latency_ms")}
+                                      for c in checks]
     return final
 
 

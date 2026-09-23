@@ -1042,3 +1042,96 @@ def test_a_target_that_is_always_stale_stops_the_run_instead_of_the_budget(runne
     assert runner.state["status"] == "blocked"
     assert "stale" in runner.state["stopped"]
     assert len(runner.state["decisions"]) == loop.MAX_STALE_STREAK
+
+
+# --- a planner's steps share one tab ---------------------------------------------------
+
+
+def test_an_agent_given_a_tab_runs_in_it_and_leaves_it_open(monkeypatch):
+    from jev_ultrafast import agent as agent_module
+
+    monkeypatch.setattr(agent_module, "Browser", Mock(side_effect=AssertionError("opened a tab")))
+    tab = Mock(observe=Mock(return_value=page()))
+    with agent_module.Agent(None, "Click Go", rank_goal="the whole task", browser=tab) as agent:
+        assert agent.browser is tab
+    tab.set_goal.assert_called_once_with("the whole task")
+    tab.close.assert_not_called()
+    tab.call.assert_not_called()  # no navigation: the page stays as the last step left it
+
+
+# --- a passive page change re-arms the stop gate -----------------------------------------
+
+
+def test_a_page_that_changed_by_itself_rearms_the_gate(runner, monkeypatch):
+    runner.state["decision"] = stop_decision("DONE", 0.3)
+    runner.command("act", {"fingerprint": runner.state["page"]["fingerprint"]})
+    assert runner.state["stop_rechecked"] is True
+    moved = deepcopy(runner.state["page"])
+    moved["text"] = "Search results arrived late"
+    moved["fingerprint"] = fingerprint(moved)
+    runner.state["browser"].fresh.return_value = False
+    runner.state["browser"].observe.return_value = moved
+    runner.state["started_at"] = time.perf_counter()
+    monkeypatch.setattr(loop, "decide", lambda *_a: stop_decision("DONE", 0.3))
+    runner.command("predict")
+    assert runner.state["page"] is moved and runner.state["stop_rechecked"] is False
+    runner.state["browser"].fresh.return_value = True
+    runner.command("act", {"fingerprint": moved["fingerprint"]})
+    assert runner.state["status"] == "ready" and len(runner.state["rechecks"]) == 2
+
+
+def test_a_reobserve_of_the_same_page_does_not_rearm_the_gate(runner, monkeypatch):
+    runner.state["decision"] = stop_decision("BLOCKED", 0.3)
+    runner.command("act", {"fingerprint": runner.state["page"]["fingerprint"]})
+    runner.state["browser"].fresh.return_value = False
+    runner.state["started_at"] = time.perf_counter()
+    monkeypatch.setattr(loop, "decide", lambda *_a: stop_decision("BLOCKED", 0.3))
+    runner.command("predict")
+    assert runner.state["stop_rechecked"] is True
+
+
+# --- the planner's DONE is checked on the page ----------------------------------------------
+
+
+def done_pages():
+    start = {"final_url": "https://w/start", "title": "Start", "text": "", "links": []}
+    return start, (lambda *_a: start), (lambda *_a: dict(start, final_url="https://w/next"))
+
+
+def test_a_done_the_page_check_rejects_goes_back_to_the_planner():
+    _start, look, step = done_pages()
+    probabilities = [0.4, 0.95]
+    planner = FakePlanner(["DONE ok", "CLICK Next", "DONE ok"])
+    out = plan.run("Reach next", "https://w/start", planner, step, look, 60,
+                   verify=lambda _task: probabilities.pop(0))
+    assert planner.prompts[1]["note"] == plan.NOT_COMPLETE
+    assert "note" not in planner.prompts[2]
+    assert out["plan"]["stopped"] == "planner said DONE"
+    assert [c["probability"] for c in out["plan"]["done_checks"]] == [0.4, 0.95]
+    assert out["plan"]["done_threshold"] == 0.9
+
+
+def test_a_done_that_never_passes_ends_at_the_cap_with_the_reason():
+    _start, look, step = done_pages()
+    planner = FakePlanner(["DONE ok"] * plan.MAX_TURNS)
+    out = plan.run("Reach next", "https://w/start", planner, step, look, 60, verify=lambda _task: None)
+    assert out["plan"]["stopped"].startswith("reached the %d-turn cap" % plan.MAX_TURNS)
+    assert plan.NOT_COMPLETE in out["plan"]["stopped"]
+    assert len(out["plan"]["done_checks"]) == plan.MAX_TURNS
+    assert not any(c["passed"] for c in out["plan"]["done_checks"])
+
+
+def test_the_page_check_is_one_noul_with_the_task_as_data(monkeypatch):
+    sent = []
+
+    def post(body):
+        sent.append(body)
+        return {"answers": {"task_complete": {"type": "noul", "noul": 0.93}}}, "https"
+
+    monkeypatch.setattr(model, "_post", post)
+    out = model.task_complete(page(), "Find a book")
+    assert out["probability"] == 0.93
+    (question,) = sent[0]["questions"].values()
+    assert question["type"] == "noul"
+    assert question["instructions"] == {"question": model.TASK_COMPLETE, "task": "Find a book"}
+    assert "`task`" in model.TASK_COMPLETE

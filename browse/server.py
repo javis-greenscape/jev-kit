@@ -866,6 +866,8 @@ class Browse:
             out["screenshot_path"] = result.get("screenshot_path")
         if params["links"]:
             out["links"] = result.get("links") or []
+        if result.get("reason"):
+            out["reason"] = result["reason"]
         if result.get("plan"):
             out["plan"] = result["plan"]
         if result.get("timing"):

@@ -9,7 +9,7 @@ import uuid
 
 import httpx
 
-from .questions import FINAL_PAGE, NEEDED_OFF_SCREEN, OPERATION, TARGET, TEXT_VALUE
+from .questions import FINAL_PAGE, NEEDED_OFF_SCREEN, OPERATION, TARGET, TASK_COMPLETE, TEXT_VALUE
 
 # One client for the process, so HTTP/2 connection reuse survives between
 # decisions. It only helps a process that outlives a single run: a fresh
@@ -361,6 +361,24 @@ def choose(state, goal, history):
         "latency_ms": round((time.perf_counter() - started) * 1000),
         "omitted_targets": omitted_targets,
         "request": body,
+    }
+
+
+def task_complete(state, task):
+    """{"probability", "latency_ms", "transport"}: one Jev request, one Noul, asking whether
+    `task` is complete on the observed page `state`. The page and its elements are sent the
+    way a decision sends them. A missing or malformed answer is probability None, which a
+    caller must treat as not complete."""
+    body = build_questions(state, task, [])[0]
+    body["questions"] = {
+        "task_complete": {"type": "noul", "instructions": {"question": TASK_COMPLETE, "task": task}}
+    }
+    started = time.perf_counter()
+    result, transport = _post(body)
+    return {
+        "probability": valid_noul((result.get("answers") or {}).get("task_complete")),
+        "latency_ms": round((time.perf_counter() - started) * 1000),
+        "transport": transport,
     }
 
 

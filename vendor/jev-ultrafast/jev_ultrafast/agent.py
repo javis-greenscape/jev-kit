@@ -1,37 +1,23 @@
 """The complete agent loop. Typed choices, observable state, bounded execution."""
 
 import base64
-import os
 import time
 from pathlib import Path
 
 from .browser import Browser, StalePage
 from .model import action_space, decide, field_context, field_text
-from .questions import MAX_STEPS
+from .questions import MAX_STEPS, STOP_CONFIDENCE_DEFAULTS, stop_threshold  # noqa: F401
 
-# Confidence gates on the two operations that end a run. TypeSafe: "A confidence threshold is
-# not one number. Different actions within the same system should be gated at different levels
-# depending on the consequences of getting it wrong" and "Low confidence: Do not act"
-# (confidence.md). Ending the run is the one action with no recovery, so a DONE or BLOCKED
-# below its threshold is not accepted at once: the page is observed again and the decision is
-# asked again, once. The second answer stands, whatever its confidence, so the gate costs at
-# most one extra decision per page and can never loop. The defaults are chosen from recorded
-# confidences, see SPIKE-NOTES.md, "Confidence gate on DONE and BLOCKED".
-STOP_CONFIDENCE_DEFAULTS = {"DONE": 0.9, "BLOCKED": 0.5}
+# The DONE/BLOCKED confidence gates (STOP_CONFIDENCE_DEFAULTS, stop_threshold) live in
+# questions.py, so the planner can gate its own DONE on the same bar without importing the
+# browser stack. Re-exported here, where the gate is applied.
 
 
 MAX_STALE_STREAK = 8
 
 
-def stop_threshold(operation):
-    try:
-        return float(os.environ["JEV_%s_CONFIDENCE" % operation])
-    except (KeyError, ValueError):
-        return STOP_CONFIDENCE_DEFAULTS[operation]
-
-
 class Agent:
-    def __init__(self, url, goals, *, record_dir=None, screenshots=False, rank_goal=None):
+    def __init__(self, url, goals, *, record_dir=None, screenshots=False, rank_goal=None, browser=None):
         task = goals.strip() if isinstance(goals, str) else "\n".join(goals).strip()
         if not task:
             raise ValueError("Supply a task")
@@ -41,13 +27,21 @@ class Agent:
         # it. A caller that hands this agent one step of a longer task (a planner naming the
         # next click) can pass the whole task as `rank_goal`, so the ranking still sees what
         # the run is for. Nothing else uses it, and unset is the old behaviour exactly.
-        self.browser = Browser(url, goal=(rank_goal or task))
+        # A caller that passes `browser` owns that tab: the agent runs in it as it stands (no
+        # navigation to `url`) and leaves it open on close, so a planner can run every step of
+        # one task in the same tab and keep the page's own state between steps.
+        self.owns_browser = browser is None
+        if browser is None:
+            self.browser = Browser(url, goal=(rank_goal or task))
+        else:
+            browser.set_goal(rank_goal or task)
+            self.browser = browser
         self.record_dir = Path(record_dir) if record_dir else None
         self.screenshots = screenshots or bool(record_dir)
         try:
             page = self.browser.observe(screenshot=self.screenshots)
         except Exception:
-            self.browser.close()
+            self.close()
             raise
         self.state = dict(
             browser=self.browser,
@@ -93,7 +87,7 @@ class Agent:
                     state["stopped"] = "the chosen target went stale %d times in a row" % MAX_STALE_STREAK
                     state["elapsed_ms"] = round((time.perf_counter() - state["started_at"]) * 1000)
                     return self.snapshot()
-                state["page"] = state["browser"].observe(screenshot=self.screenshots)
+                self._reobserve()
                 state["elapsed_ms"] = round((time.perf_counter() - state["started_at"]) * 1000)
                 return self.snapshot()
         elif name == "predict":
@@ -102,7 +96,7 @@ class Agent:
             if state["started_at"] is None:
                 state["started_at"] = time.perf_counter()
             if not state["browser"].fresh(state["page"]):
-                state["page"] = state["browser"].observe(screenshot=self.screenshots)
+                self._reobserve()
             state["decision"] = None
             if state["status"] in {"done", "blocked"}:
                 raise ValueError("This run has stopped. Start a fresh demo.")
@@ -216,12 +210,25 @@ class Agent:
             raise ValueError("Unknown command")
         return self.snapshot()
 
+    def _reobserve(self):
+        """Replace the observed page with the one the tab shows now.
+
+        The page can change with no action of ours (a timer, a late render, a redirect). A
+        page that differs is a new page for the DONE/BLOCKED gate as much as one an action
+        produced, so it re-arms the gate the same way."""
+        state = self.state
+        before = state["page"]["fingerprint"]
+        state["page"] = state["browser"].observe(screenshot=self.screenshots)
+        if state["page"]["fingerprint"] != before:
+            state["stop_rechecked"] = False
+
     def run(self):
         while self.state["status"] not in {"done", "blocked"}:
             yield self.command("tick")
 
     def close(self):
-        self.browser.close()
+        if getattr(self, "owns_browser", True):
+            self.browser.close()
 
     def __enter__(self):
         return self

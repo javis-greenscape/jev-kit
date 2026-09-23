@@ -89,6 +89,15 @@ class Browser:
                 break
             time.sleep(0.02)
 
+    def set_goal(self, goal):
+        """Rank off-viewport candidates by `goal` from the next observe on, in the same tab.
+
+        A planner runs many steps against one tab, each ranked by its own step text, and must
+        not reopen the page to change the ranking: that would lose menus, modals, filled fields
+        and any other state kept at a stable URL."""
+        self.read_state = read_state(goal)
+        self.marker = marker_of(self.read_state)
+
     def call(self, method, **params):
         return cdp(method, session_id=self.session, **params)
 

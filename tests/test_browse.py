@@ -848,8 +848,22 @@ class TestRunnerPlan(unittest.TestCase):
         state = {"decisions": [{"operation": "CLICK", "latency_ms": 500, "confidence": 0.9}],
                  "text_calls": []}
         planner = Planner()
+        tabs = []
+
+        class Tab:
+            def __init__(self, url, goal=""):
+                self.closed = 0
+                tabs.append(self)
+
+            def close(self):
+                self.closed += 1
+
+        fake_browser = type(sys)("jev_ultrafast.browser")
+        fake_browser.Browser = Tab
         with mock.patch.object(runner, "planner_for", return_value=planner) as chosen, \
-                mock.patch.object(runner, "_look", return_value=start), \
+                mock.patch.dict(sys.modules, {"jev_ultrafast.browser": fake_browser}), \
+                mock.patch.object(runner, "_look_in", return_value=start), \
+                mock.patch.object(runner, "_check_done", return_value={"probability": 0.97, "latency_ms": 4}), \
                 mock.patch.object(runner, "_agent_step", return_value=(dict(end, status="done", steps=1),
                                                                         state)) as step:
             out = runner.handle({"op": "plan", "goal": "Open Bicycle wheel", "start_url": "https://w/start",
@@ -866,6 +880,12 @@ class TestRunnerPlan(unittest.TestCase):
         self.assertEqual(out["timing"]["confidence"], [0.9])
         # A fresh planner conversation for the next task, whatever happened in this one.
         self.assertEqual(Planner.sessions, 1)
+        # One tab for the whole call, handed to every step, closed once.
+        self.assertEqual(len(tabs), 1)
+        self.assertIs(step.call_args[1]["browser"], tabs[0])
+        self.assertEqual(tabs[0].closed, 1)
+        self.assertEqual(out["plan"]["done_checks"][0]["probability"], 0.97)
+        self.assertEqual(out["timing"]["done_checks"], [{"probability": 0.97, "latency_ms": 4}])
 
     def test_the_default_planner_is_sonnet_and_can_be_overridden(self):
         runner = self.runner
