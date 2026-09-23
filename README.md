@@ -19,8 +19,8 @@
 
 <p>
   <a href="#quickstart">Quickstart</a> &middot;
-  <a href="#jev-as-the-decision-maker-the-browser-agent">Browser result</a> &middot;
   <a href="#what-is-in-the-kit">What is in the kit</a> &middot;
+  <a href="#jev-as-the-decision-maker-the-browser-agent">Browser result</a> &middot;
   <a href="#how-it-works">How it works</a> &middot;
   <a href="#measured-results">Measured results</a> &middot;
   <a href="#safety-model">Safety</a> &middot;
@@ -125,6 +125,47 @@ shell, or `touch ~/.config/airlock/disabled` for the machine.
 Full detail, flags, config file, WSL, rollback and the agent checklist:
 **[docs/install.md](docs/install.md)**.
 
+## What is in the kit
+
+Airlock is the tool-call guard. It is one component of the kit, not the kit.
+
+`Exercised` means unit tests, a labelled eval, a measured bench and real daily
+use on at least one machine. `Experimental` means unit tests and hand-runs
+only: no labelled corpus, no measured numbers, no sustained use.
+
+| Component | What it does | Default | What leaves the machine | Exercised |
+|---|---|---|---|---|
+| **Guards** | | | | |
+| Airlock, the tool-call guard | Judges each `PreToolUse` call: rules table first, one typed Jev question for the ambiguous half | **yes** | Redacted call summaries | exercised |
+| Tier guard | Checks the sub-agent rung a dispatch chose against the task | **yes**, part of the guard | Dispatch description and prompt, redacted | exercised |
+| Belay | Sends a finished-but-unverified agent back to check its work | **yes** | Task text and check commands, redacted | exercised |
+| Session check | Says at session start when the guard has stopped judging | **yes** | Nothing. Local state only | exercised |
+| **Speed and cost** | | | | |
+| Warm daemon | Holds a warm connection: 0.3 s a judgement, not 0.9 s | **yes** | Nothing of its own | exercised |
+| Compaction | Installs the community `fast-jev-compaction` plugin | no, opt-in | **Up to 25,000 tokens of raw tool inputs and results per request** | never enabled here |
+| File search | Per-user `plocate` index of `$HOME`, refreshed hourly | **yes** | Nothing. Local | exercised |
+| File search (Windows) | Detects [Everything](https://www.voidtools.com/) (`es.exe`) and steers searches at it. Never installs it | **yes** on Windows | Nothing. Local | one Windows 11 machine |
+| **Uses** | | | | |
+| Browser agent | Jev decides each click, or a warm planner does with `plan: true`. Vendored at a pin | no, opt-in | Page state and goals, to the decider you configure | own numbers |
+| Review | A Jev code reviewer at a pin, with a fail-open wrapper | no, opt-in | Diffs, to the gate you configure | no numbers here |
+| Document classifier | Two-stage classifier with an escape hatch and a confidence gate | no | Page text, when you call it | **experimental** |
+| Log triage | Redact-first, local-rules-first triage on stdin | no | Redacted lines, once local rules run out | **experimental** |
+| Shim | An OpenAI-shaped HTTP shim over the `claude` CLI | no, opt-in | Whatever you send through it | **experimental** |
+| **Operations** | | | | |
+| Installer and doctor | Install, doctor with real calls, deploy, rollback, wire | n/a | Nothing | exercised |
+| Monitoring | Five-minute health check and its timer | **yes** | Nothing | exercised |
+| Push monitor | Pushes status to a monitor you host, in one of two modes | no, opt-in | A status word, plus which check failed, redacted and capped | exercised |
+| Tuning loop | Scores shadow-log verdicts, commits to its own branch | no, opt-in | Claude sessions on the account you nominate | exercised |
+| Auto-updater | Updates Claude Code, and only while no run is alive | **yes** | Nothing | exercised |
+
+Per-component detail, exposure and install flags:
+**[docs/components.md](docs/components.md)**. The rules themselves:
+**[docs/rules.md](docs/rules.md)**.
+
+The guard's steer toward `graphify query` instead of a raw recursive grep only
+exists where the search root carries a graph (`graphify-out/graph.json`). With
+no graph the branch is inert, which covers most users.
+
 ## Jev as the decision-maker: the browser agent
 
 A browser agent is where swapping the decision-maker shows up plainest. Same
@@ -164,161 +205,38 @@ records it and R11 warns instead of blocking for the next thirty minutes of
 that session. Try `browse` first and the door opens by itself. Nothing else
 opens it: a stamp and a repeat still do nothing.
 
-## jev-ultrafast: the vendored browser agent
+## jev-ultrafast, the vendored agent
 
-The agent behind `browse` is **jev-ultrafast**. It drives a headless Chromium
-over CDP, reads the page into a table of clickable things, and asks the
-decision model to pick one. No screenshots, no generated code, one choice per
-step.
-
-It is not ours. It is
+The agent behind `browse` is
 [browser-use/jev-ultrafast](https://github.com/browser-use/jev-ultrafast), MIT
-licensed, written by **Browser Use**, and it is vendored whole at
-[`vendor/jev-ultrafast`](vendor/jev-ultrafast) with `git subtree`. Upstream's
-own licence travels with it in
-[`vendor/jev-ultrafast/LICENSE`](vendor/jev-ultrafast/LICENSE), and
-[`NOTICE`](NOTICE) records the copy and the fact that we changed it. The pin is
-upstream commit **`1231850`**. Thanks to Browser Use for the original.
+licensed and written by **Browser Use**. It is vendored at
+[`vendor/jev-ultrafast`](vendor/jev-ultrafast) with `git subtree`, pinned at
+upstream commit **`1231850`**. Its licence travels with it, and
+[`NOTICE`](NOTICE) records the copy and our changes. Thanks to Browser Use for
+the original.
 
-Eight commits of ours sit on top of that pin, in this repository's history:
+Our changes on top of the pin, all in this repository's history:
 
-1. Headless CDP attach through `BU_CDP_URL`, so the agent drives a Chromium
-   somebody else started.
-2. A Claude text-model adapter for filling fields, going through the local
-   `claude` CLI rather than an API key.
-3. The same adapter as a standing child process, which removed the per-call
-   startup cost.
-4. Thinking turned off and the `TYPE_TEXT` context trimmed, which took a field
-   fill from seconds to well under one.
-5. Claude Haiku and Sonnet made pluggable as the decision-maker, with a
-   benchmark that holds everything else identical.
-6. A plain Playwright MCP arm in that benchmark, for a floor to compare against.
-7. Off-screen links offered to the chooser and scrolled into view before a
-   click, and the first scroll after a navigation no longer dropped. A two-hop
-   Wikipedia link-navigation task went from blocked to done in 7.2 s.
-8. Requests aligned with TypeSafe's own documentation: Choice options named by
-   meaning, 1,500 characters of page text, the extra judgments asked as Nouls
-   in the same request, and DONE gated on its confidence. The mismatches and
-   the quotes behind each change are in
-   [docs/jev-reference/USING-JEV.md](docs/jev-reference/USING-JEV.md).
+- Headless CDP attach, so the agent drives a Chromium somebody else started.
+- A warm Claude Haiku child writes field text, with thinking off.
+- Off-screen links are offered and scrolled into view, and the first scroll
+  after a navigation is no longer dropped.
+- Requests follow TypeSafe's own documentation: options named by meaning, short
+  page text, extra judgments in the same request, DONE gated on confidence. See
+  [docs/jev-reference/USING-JEV.md](docs/jev-reference/USING-JEV.md).
+- `plan: true` puts a warm Sonnet planner, effort low, in front of Jev for
+  tasks whose steps are not spelled out.
 
-### Five ways to do a Wikipedia suite
+On a Wikipedia suite of eight tasks, three runs each, on 23 September 2026:
 
-Eight tasks, three runs of each per arm, on 23 September 2026. Release
-`380aafa`, which carries the documentation fixes, is what the three fast arms
-ran against. Their "before" figures come from release `9adf232` earlier that
-day. The two Claude Code arms are reused from the sweep against
-release `16c46df` and were not rerun: nothing since touches how they drive the
-page.
+| Arm | Hops named | No hops named | Median cost, named / not |
+|---|---|---|---|
+| Jev alone | 15/18, 7.1 s | 0/6 | not reported by `browse` (Haiku writes field text) |
+| `plan: true`, Sonnet low | 16/18, 16.4 s | 6/6, 33.5 s | $0.048 / $0.113 |
+| Sonnet on Playwright MCP | 17/18, 26.0 s | 6/6, 47.1 s | $0.099 / $0.182 |
 
-Every arm had the same goal text and the same 180 second budget, and no two
-arms ran at the same time.
-
-- **jev** is Jev alone through this kit's own `browse` server, called over one
-  MCP session held open for the whole sweep, the way a real client reuses it.
-- **sonnet-low plans, `browse` executes** is `browse` with `plan: true`, its
-  opt-in plan mode and the default planner. One long-lived `claude -p` child on
-  Sonnet, effort low and thinking off, with no tools and no settings, sees the
-  task, the current URL and title, and the element table Jev is choosing from.
-  It answers with one line (`CLICK`, `TYPE`, `FIND` or `DONE`), `browse`
-  executes that line, and the loop repeats up to twelve times. `FIND <text>`
-  returns the links anywhere on the page that match the text.
-- **haiku plans, `browse` executes** is the same plan mode with the planner
-  model switched to Haiku (`JEV_PLANNER_MODEL=haiku`).
-- **sonnet + Playwright MCP** (reused) is `claude -p --model sonnet` holding the
-  Playwright MCP server and nothing else, driving the page a click at a time.
-- **sonnet planning, `browse` executing** (reused) is the same isolated Sonnet
-  session with `browse` as its only tool, handing `browse` one or two explicit
-  steps at a time.
-
-Tasks, checks and runner are in
-[vendor/jev-ultrafast/bench](vendor/jev-ultrafast/bench). The raw rows sit
-beside them: `results-wiki-20260923T154632Z.jsonl` for the fast arms after the
-fixes, `results-wiki-20260923T135921Z.jsonl` for them before, and
-`results-wiki-20260923T113839Z.jsonl` for the two reused arms.
-
-**Group A is navigation with every hop named**, ending "Stop when the X article
-is open". Passing means the final URL is the target article. The scorer reads
-the fact off that final page, the same way for every arm, and no arm is ever
-asked for it in its own words.
-
-| arm | pass rate | before the fixes | median s (passes) | before | p90 s | median cost USD |
-|---|---|---|---|---|---|---|
-| jev via `browse` | 15/18 (83%) | 11/18 (61%) | 7.1 | 6.3 | 11.3 | not reported by `browse` |
-| haiku plans, `browse` executes | 15/18 (83%) | 12/18 (67%) | 17.4 | 12.0 | 22.4 | $0.044 |
-| sonnet-low plans, `browse` executes (default planner) | 16/18 (89%) | 11/18 (61%) | 16.4 | 11.8 | 29.9 | $0.048 |
-| sonnet + Playwright MCP (reused) | 17/18 (94%) | | 26.0 | | 42.8 | $0.099 |
-| sonnet planning, `browse` executing (reused) | 12/18 (67%) | | 34.4 | | 150.7 | $0.080 |
-
-| task | jev | haiku plans | sonnet-low plans | sonnet + Playwright (reused) | sonnet plans (reused) |
-|---|---|---|---|---|---|
-| A1 chlorophyll, two link hops to Chlorophyll a | 3/3 (3/3) | 3/3 (3/3) | 3/3 (3/3) | 3/3 | 3/3 |
-| A2 chess loser, his birth city, its founding year (1703) | 1/3 (0/3) | 0/3 (0/3) | 1/3 (0/3) | 2/3 | 2/3 |
-| A3 Python's creator, the company he joined, its founding year (1975) | 3/3 (3/3) | 3/3 (3/3) | 3/3 (3/3) | 3/3 | 2/3 |
-| A4 Feynman's doctoral advisor, his birth year (1911) | 3/3 (0/3) | 3/3 (0/3) | 3/3 (0/3) | 3/3 | 0/3 |
-| A5 search Kilimanjaro, first to the summit, his nationality (German) | 2/3 (2/3) | 3/3 (3/3) | 3/3 (2/3) | 3/3 | 2/3 |
-| A6 bicycle wheel, two link hops to Axle | 3/3 (3/3) | 3/3 (3/3) | 3/3 (3/3) | 3/3 | 3/3 |
-
-The figure in brackets is the same arm before the fixes.
-
-**Group B is a start article and a goal article with no hops named**, which is
-not what `browse`'s Jev chooser is built for on its own.
-
-| arm | pass rate | before the fixes | median s (passes) | before | p90 s | median cost USD |
-|---|---|---|---|---|---|---|
-| jev via `browse` | 0/6 (0%) | 0/6 (0%) | n/a | n/a | n/a | not reported by `browse` |
-| haiku plans, `browse` executes | 4/6 (67%) | 1/6 (17%) | 28.5 | 18.9 | 62.5 | $0.108 |
-| sonnet-low plans, `browse` executes (default planner) | 6/6 (100%) | 5/6 (83%) | 33.5 | 25.8 | 35.6 | $0.113 |
-| sonnet + Playwright MCP (reused) | 6/6 (100%) | | 47.1 | | 52.7 | $0.182 |
-| sonnet planning, `browse` executing (reused) | 1/6 (17%) | | 65.5 | | 65.5 | $0.138 |
-
-| task | jev | haiku plans | sonnet-low plans | sonnet + Playwright (reused) | sonnet plans (reused) |
-|---|---|---|---|---|---|
-| B1 open-ended link race to Ancient Rome | 0/3 (0/3) | 2/3 (0/3) | 3/3 (3/3) | 3/3 | 0/3 |
-| B2 open-ended link race to Quantum mechanics | 0/3 (0/3) | 2/3 (1/3) | 3/3 (2/3) | 3/3 | 1/3 |
-
-Jev's timing comes from `browse`'s own `timing` block. The sweep's first call
-paid the one-time cold start at 7.0 s. The median Jev decision took 545 ms,
-against 596 ms before the fixes: the two extra Noul judgments ride in the same
-request, and Jev evaluates every question in a request in parallel.
-
-**Where the two planner arms spent their wall time.** `planner s` is the time
-inside the `claude -p` child, `browse s` the time the executing steps took.
-
-| arm | group | runs | median turns | median planner s | median browse s |
-|---|---|---|---|---|---|
-| haiku plans | A | 18 | 4 | 3.5 | 13.6 |
-| haiku plans | B | 6 | 6 | 5.7 | 22.4 |
-| sonnet-low plans | A | 18 | 3 | 4.0 | 12.6 |
-| sonnet-low plans | B | 6 | 6 | 7.2 | 23.7 |
-
-Tokens come from the child's own usage block, not from a rate. Haiku's median
-run sent 5,728 uncached input tokens and read 7,835 from cache, for 40 output.
-Sonnet-low sent 7 uncached and read 17,691 from cache, for 47. The twenty-four
-planner runs cost $2.55 on Haiku and $1.90 on Sonnet-low.
-
-**Read the arms as the trade they are.**
-
-Jev alone is still the fastest thing here and costs nothing in Claude tokens,
-on tasks whose hops are named. It cannot do Group B at all.
-
-Plan mode with Sonnet-low is the default planner. It now scores 16/18 on Group
-A and 6/6 on Group B, within one run of Sonnet on Playwright, at about 60% of
-its wall time and 50 to 60% of its cost.
-
-Haiku stays available as the cheaper model per token. It does Group A as well
-as Sonnet-low does and trails on Group B, 4/6 against 6/6. Because it reads
-less from cache, its runs did not come out cheaper here.
-
-**What the fixes changed.** A4 went from 0/3 to 3/3 on every fast arm. Its
-target sits in a long table below the ranked candidates, and the planner can
-now `FIND` it. The planner arms got slower per run, 12 to 17 s on Group A. A
-low-confidence DONE or BLOCKED now looks at the page again before the run ends,
-and `FIND` adds a call when it is used.
-
-**What still fails.** A2 passes 1/3 at best on the fast arms. In five of its
-eight failures the run left English Wikipedia through an interlanguage link and
-ended on `fr.wikipedia.org`, at Boris Spassky or at Saint Petersburg.
+Haiku as the planner, the per-task results and the method are in
+[docs/measurements.md](docs/measurements.md#the-wikipedia-suite).
 
 To move to a newer upstream:
 
@@ -327,50 +245,7 @@ git subtree pull --prefix vendor/jev-ultrafast \
   https://github.com/browser-use/jev-ultrafast <commit> --squash
 ```
 
-Our commits are already on top of the pin, so that is a merge rather than a
-set of patches to rewrite. [browser/README.md](browser/README.md) says what to
-re-run afterwards.
-
-## What is in the kit
-
-Airlock is the tool-call guard. It is one component of the kit, not the kit.
-
-`Exercised` means unit tests, a labelled eval, a measured bench and real daily
-use on at least one machine. `Experimental` means unit tests and hand-runs
-only: no labelled corpus, no measured numbers, no sustained use.
-
-| Component | What it does | Default | What leaves the machine | Exercised |
-|---|---|---|---|---|
-| **Guards** | | | | |
-| Airlock, the tool-call guard | Judges each `PreToolUse` call: rules table first, one typed Jev question for the ambiguous half | **yes** | Redacted call summaries | exercised |
-| Tier guard | Checks the sub-agent rung a dispatch chose against the task | **yes**, part of the guard | Dispatch description and prompt, redacted | exercised |
-| Belay | Sends a finished-but-unverified agent back to check its work | **yes** | Task text and check commands, redacted | exercised |
-| Session check | Says at session start when the guard has stopped judging | **yes** | Nothing. Local state only | exercised |
-| **Speed and cost** | | | | |
-| Warm daemon | Holds a warm connection: 0.3 s a judgement, not 0.9 s | **yes** | Nothing of its own | exercised |
-| Compaction | Installs the community `fast-jev-compaction` plugin | no, opt-in | **Up to 25,000 tokens of raw tool inputs and results per request** | never enabled here |
-| File search | Per-user `plocate` index of `$HOME`, refreshed hourly | **yes** | Nothing. Local | exercised |
-| File search (Windows) | Detects [Everything](https://www.voidtools.com/) (`es.exe`) and steers searches at it. Never installs it | **yes** on Windows | Nothing. Local | one Windows 11 machine |
-| **Uses** | | | | |
-| Browser agent | Jev decides each click. Cloned and patched at a pin | no, opt-in | Page state and goals, to the decider you configure | own numbers |
-| Review | A Jev code reviewer at a pin, with a fail-open wrapper | no, opt-in | Diffs, to the gate you configure | no numbers here |
-| Document classifier | Two-stage classifier with an escape hatch and a confidence gate | no | Page text, when you call it | **experimental** |
-| Log triage | Redact-first, local-rules-first triage on stdin | no | Redacted lines, once local rules run out | **experimental** |
-| Shim | An OpenAI-shaped HTTP shim over the `claude` CLI | no, opt-in | Whatever you send through it | **experimental** |
-| **Operations** | | | | |
-| Installer and doctor | Install, doctor with real calls, deploy, rollback, wire | n/a | Nothing | exercised |
-| Monitoring | Five-minute health check and its timer | **yes** | Nothing | exercised |
-| Push monitor | Pushes status to a monitor you host, in one of two modes | no, opt-in | A status word, plus which check failed, redacted and capped | exercised |
-| Tuning loop | Scores shadow-log verdicts, commits to its own branch | no, opt-in | Claude sessions on the account you nominate | exercised |
-| Auto-updater | Updates Claude Code, and only while no run is alive | **yes** | Nothing | exercised |
-
-Per-component detail, exposure and install flags:
-**[docs/components.md](docs/components.md)**. The rules themselves:
-**[docs/rules.md](docs/rules.md)**.
-
-The guard's steer toward `graphify query` instead of a raw recursive grep only
-exists where the search root carries a graph (`graphify-out/graph.json`). With
-no graph the branch is inert, which covers most users.
+[browser/README.md](browser/README.md) says what to re-run afterwards.
 
 ## How it works
 
