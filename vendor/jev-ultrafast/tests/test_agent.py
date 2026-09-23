@@ -321,3 +321,31 @@ def test_navigation_during_prediction_reobserves_without_action(runner):
     assert runner.state["status"] == "ready"
     assert runner.state["decision"] is None
     runner.state["browser"].act.assert_not_called()
+
+
+def test_offscreen_click_is_offered_with_its_direction_and_flag():
+    state = page()
+    state["actions"].insert(
+        3,
+        {
+            "id": "e4",
+            "kind": "click",
+            "label": "Photosynthesis (below)",
+            "role": "link",
+            "value": "",
+            "node": 30,
+            "offscreen": "below",
+        },
+    )
+    elements, targets, _controls = model.action_space(state["actions"])
+    assert "Photosynthesis (below)" in [e["label"] for e in elements]
+    chosen = targets["CLICK"][str(len(elements))]
+    assert chosen["id"] == "e4" and chosen["offscreen"] == "below"
+
+
+def test_a_scroll_that_moves_the_page_changes_the_fingerprint():
+    state = page()
+    moved = deepcopy(state)
+    moved["scroll"] = {"y": 560}
+    # The in-viewport action set changes with the scroll offset too; the offset alone must be enough.
+    assert fingerprint(moved) != fingerprint(state)

@@ -12,6 +12,11 @@ from browser_harness.helpers import cdp
 # Atomically read visible content and controls, preserving actual DOM node identity.
 READ_STATE = Path(__file__).with_name("snapshot.js").read_text()
 MARKER = f"(() => {{ const state={READ_STATE}; return state?.marker ?? null; }})()"
+# The scroll offsets a wheel at (550, 650) could move: the page, and every element under the cursor.
+SCROLL_POSITION = (
+    "(() => { const s=[scrollX,scrollY]; let e=document.elementFromPoint(550,650); "
+    "while (e) { s.push(e.scrollTop,e.scrollLeft); e=e.parentElement; } return s; })()"
+)
 
 class StalePage(ValueError):
     """A decision no longer refers to the observed page."""
@@ -136,7 +141,18 @@ def browser_operation(request):
         action = request["action"]
         kind = action["kind"]
         if kind == "scroll":
-            call("Input.dispatchMouseEvent", type="mouseWheel", x=550, y=650, deltaX=0, deltaY=action["delta"])
+            # Chromium drops the first wheel event dispatched after every navigation, so the first
+            # scroll of each page silently did nothing, counted as an unchanged step, and three of
+            # them blocked the run. Confirm the scroll landed, and dispatch once more if it did not.
+            # The dropped event is dropped, not deferred, so the retry cannot scroll twice.
+            before = evaluate(SCROLL_POSITION)
+            for _ in range(2):
+                call("Input.dispatchMouseEvent", type="mouseWheel", x=550, y=650, deltaX=0, deltaY=action["delta"])
+                deadline = time.monotonic() + 0.25
+                while time.monotonic() < deadline:
+                    if evaluate(SCROLL_POSITION) != before:
+                        return {"executed": action["id"]}
+                    time.sleep(0.02)
         elif kind != "wait":
             if type(action["node"]) is not int:
                 raise ValueError("Invalid observed node")
@@ -146,6 +162,8 @@ def browser_operation(request):
               if (!e?.isConnected || e.matches(':disabled') || e.closest('[aria-disabled="true"],[inert]') ||
                   !e.checkVisibility({checkOpacity:true,checkVisibilityCSS:true})) return null;
               if (action.kind==='fill' && (e.readOnly || e.getAttribute('aria-readonly')==='true')) return null;
+              // Observed off-viewport: bring it into view, then resolve geometry and hit-test as usual.
+              if (action.offscreen) e.scrollIntoView({block:'center',inline:'center',behavior:'instant'});
               const r=e.getBoundingClientRect(), x=r.x+r.width/2, y=r.y+r.height/2;
               if (!r.width || !r.height || x<0 || y<0 || x>=innerWidth || y>=innerHeight) return null;
               if (!e.contains(document.elementFromPoint(x,y))) return null;

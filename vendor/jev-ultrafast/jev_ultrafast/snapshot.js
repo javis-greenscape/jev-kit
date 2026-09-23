@@ -52,11 +52,24 @@
       e.getAttribute('aria-expanded'),e.getAttribute('aria-checked'),e.getAttribute('aria-selected'),
       e.getAttribute('href'),scope?.innerText?.slice(0,6000)||''];
   };
-  const actions=[];
+  const LIMIT=250;
+  const actions=[], offscreen=[];
   for (const e of document.querySelectorAll(selector)) {
     if (!safe(e) || !visible(e) || e.matches(':disabled') || e.closest('[aria-disabled="true"]')) continue;
     const r=e.getBoundingClientRect(), x=r.x+r.width/2, y=r.y+r.height/2, rname=role(e);
-    if (!rname || r.width<=0 || r.height<=0 || x<0 || y<0 || x>=innerWidth || y>=innerHeight) continue;
+    if (!rname || r.width<=0 || r.height<=0) continue;
+    if (x<0 || y<0 || x>=innerWidth || y>=innerHeight) {
+      // A long page keeps almost every link out of the viewport. Offer the nearest links and
+      // buttons anyway, clearly labelled; Browser.act scrolls one into view before clicking it,
+      // and geometry is still re-resolved and hit-tested there. Fields are deliberately excluded:
+      // typing into something nobody has seen is not the same kind of safe.
+      if (rname!=='link' && rname!=='button') continue;
+      const where=y<0 ? 'above' : y>=innerHeight ? 'below' : 'offscreen';
+      offscreen.push({node:identity(e),role:rname,label:(name(e)||rname)+' ('+where+')',
+        rect:{x:r.x,y:r.y,w:r.width,h:r.height},kind:'click',value:'',offscreen:where,
+        distance:y<0 ? -y : y>=innerHeight ? y-innerHeight+1 : 0});
+      continue;
+    }
     if (rname==='gridcell' && e.querySelector('button,[role="button"]')) continue;
     const base={node:identity(e),role:rname,label:name(e)||rname,
       rect:{x:r.x,y:r.y,w:r.width,h:r.height}};
@@ -79,6 +92,12 @@
       if (editable) actions.push({...base,kind:'click',value,label:'Open '+base.label});
     }
   }
+  // In-viewport actions first, then the nearest off-viewport ones, within the one budget.
+  offscreen.sort((a,b)=>a.distance-b.distance || a.node-b.node);
+  const room=Math.max(0,LIMIT-actions.length);
+  const omitted_actions=Math.max(0,actions.length-LIMIT)+Math.max(0,offscreen.length-room);
+  actions.splice(LIMIT);
+  for (const a of offscreen.slice(0,room)) { delete a.distance; actions.push(a); }
   const words=[], walker=document.createTreeWalker(document.body,NodeFilter.SHOW_TEXT);
   const range=document.createRange(); let node,length=0;
   while ((node=walker.nextNode()) && length<6000) {
@@ -96,8 +115,6 @@
   const semantics=actions.map(({rect,...action})=>action);
   const marker=[performance.timeOrigin,location.href,scrollX,scrollY,innerWidth,innerHeight,
     document.title,text,semantics,page_key[6]];
-  const omitted_actions=Math.max(0,actions.length-250);
-  actions.splice(250);
   actions.forEach((a,i)=>a.id='e'+(i+1));
   if (scrollY+innerHeight<height-2) actions.push({id:'scroll_down',kind:'scroll',label:'Scroll down',delta:560});
   if (scrollY>0) actions.push({id:'scroll_up',kind:'scroll',label:'Scroll up',delta:-560});

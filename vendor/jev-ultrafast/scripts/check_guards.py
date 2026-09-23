@@ -124,6 +124,30 @@ def main():
         assert value == "Generated", repr(value)
         assert any(a.get("role") == "option" for a in page["actions"])
         passed.append("real text input waits for asynchronous combobox suggestions")
+        # A long page keeps its links out of the viewport; they stay reachable and marked.
+        browser.evaluate("document.body.innerHTML=" + repr("""
+          <div style="height:3000px">Tall filler</div>
+          <a href="#" id="far" onclick="window.farClicks=(window.farClicks||0)+1;return false">Far link</a>
+          <div style="height:3000px">More filler</div>
+        """))
+        page = browser.observe(screenshot=False)
+        far = next(a for a in page["actions"] if a["label"].startswith("Far link"))
+        assert far["label"] == "Far link (below)", far["label"]
+        assert far["offscreen"] == "below" and far["kind"] == "click", far
+        browser.act(far, page)
+        assert browser.evaluate("window.farClicks") == 1
+        assert browser.evaluate("scrollY") > 0, "the click should have scrolled the target into view"
+        passed.append("off-viewport link is offered, marked, and scrolled into view before the click")
+
+        browser.evaluate("scrollTo(0,0)")
+        page = browser.observe(screenshot=False)
+        scroll = next(a for a in page["actions"] if a["id"] == "scroll_down")
+        browser.act(scroll, page)
+        moved = browser.observe(screenshot=False)
+        assert moved["scroll"]["y"] > 0, moved["scroll"]
+        assert moved["fingerprint"] != page["fingerprint"]
+        passed.append("the first scroll of a page moves it and changes the fingerprint")
+
         browser.call("Page.navigate", url="about:blank")
         assert not browser.fresh(page, field)
         passed.append("navigation invalidates the old document")

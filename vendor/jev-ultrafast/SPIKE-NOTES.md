@@ -953,3 +953,55 @@ with "Charged per input token. Output tokens are free."
   server's launch args
 - `~/.cache/ms-playwright/chromium-1246/` (outside this repo): installed, since this account's
   `@playwright/mcp@latest` needed it and it was missing
+
+## Long pages: off-viewport actions and the dropped first wheel (2026-09-23)
+
+Two independent defects made any article-length page a dead end for the agent.
+
+**Measured on a long Wikipedia article** (about 103,000 px tall, 1120x780 viewport):
+3,503 links and buttons pass `checkVisibility`, and **28** of them have their centre inside the
+viewport. `snapshot.js` skipped the other 3,475, so the action space held nav chrome and the
+first paragraph. The Wikipedia fundraising banner is not an overlay -- `#centralNotice` is
+`position: static`, in flow, 540 px tall -- so it intercepts nothing; it simply eats 540 of the
+780 px and pushes the article out of view. The link the goal wanted sits at document
+y = 1564, i.e. 784 px below the fold, and ranks **51st** among off-viewport elements ordered by
+distance from the viewport.
+
+With no goal-relevant target on offer, the chooser fell back to BLOCKED. Traced run of a
+two-hop link-navigation goal:
+
+| step | choice | operation probabilities |
+|---|---|---|
+| 1 | `e49` first-hop link | CLICK 0.87, BLOCKED 0.12, SCROLL_DOWN 0.01 |
+| 2 | `e71` the same link again (self-link) | CLICK 0.87, BLOCKED 0.08, SCROLL_DOWN 0.02 |
+| 3 | **BLOCKED** | BLOCKED 0.49, SCROLL_DOWN 0.25, TYPE_TEXT 0.18 |
+
+Scrolling was not a live escape either. **Chromium drops the first `Input.dispatchMouseEvent`
+`mouseWheel` dispatched after every navigation** -- not defers, drops:
+
+```
+blank prime wheel -> 0    page A wheel1 -> 0    page A wheel2 -> 560
+                          page B wheel1 -> 0    page B wheel2 -> 560
+```
+
+So the first `scroll_down` on each page left the fingerprint identical and logged
+`page_changed: False`, feeding the three-unchanged-steps block in `agent.py`.
+
+**The fix.** `snapshot.js` now also collects off-viewport links and buttons, labelled
+`"<name> (below)"` / `"(above)"` and flagged `offscreen`, sorted by distance from the viewport
+and appended after the in-viewport ones inside the same 250 budget. Fields are excluded on
+purpose: typing into something nobody has seen is a different kind of risk. `Browser.act`
+calls `scrollIntoView({block: 'center'})` for a flagged action before resolving geometry, so
+the existing hit test and freshness guards still apply unchanged. `browser_operation` confirms
+a wheel actually moved something and dispatches once more if it did not.
+
+**Before → after** (through the `browse` MCP server, same box, same goals):
+
+| goal | before | after |
+|---|---|---|
+| two-hop Wikipedia link navigation, article links only | blocked, 1 step, 3.4 s | done, 5 steps, 7.2 s |
+| the same, routed through a named intermediate article | blocked, 3 steps, 5.9 s | done, 5 steps, 8.0 s |
+| example.com, report the heading | done, 1 step, 1.4 s | done, 1 step, 1.6 s |
+
+`scripts/check_guards.py` gained two live checks (23 total, all passing); `pytest` is 33
+passing; `ruff check .` clean.
