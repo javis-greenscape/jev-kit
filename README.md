@@ -10,7 +10,7 @@
 
 <p>
   <a href="LICENSE"><img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-blue"></a>
-  <img alt="tests" src="https://img.shields.io/badge/tests-1255%20passing-brightgreen">
+  <img alt="tests" src="https://img.shields.io/badge/tests-1310%20passing-brightgreen">
   <img alt="Python 3.10+" src="https://img.shields.io/badge/python-3.10%2B-blue">
   <img alt="Platforms" src="https://img.shields.io/badge/platforms-Linux%20%7C%20WSL2%20%7C%20Windows-lightgrey">
   <img alt="Claude Code" src="https://img.shields.io/badge/Claude%20Code-PreToolUse%20hook-8A3FFC">
@@ -157,6 +157,59 @@ Shell commands and Playwright scripts are never looked at, and the Playwright
 servers stay registered. See
 [docs/rules.md](docs/rules.md#r11-browse-via-jev-a-playwright-mcp-call-is-pointed-at-browse).
 
+`browse` cannot do everything, so the rule gives way when it fails. Jev chooses
+one step at a time out of what it can see, which puts a multi-hop task out of
+reach. When a `browse` call comes back `blocked`, or errors, a PostToolUse hook
+records it and R11 warns instead of blocking for the next thirty minutes of
+that session. Try `browse` first and the door opens by itself. Nothing else
+opens it: a stamp and a repeat still do nothing.
+
+## jev-ultrafast: the vendored browser agent
+
+The agent behind `browse` is **jev-ultrafast**. It drives a headless Chromium
+over CDP, reads the page into a table of clickable things, and asks the
+decision model to pick one. No screenshots, no generated code, one choice per
+step.
+
+It is not ours. It is
+[browser-use/jev-ultrafast](https://github.com/browser-use/jev-ultrafast), MIT
+licensed, written by **Browser Use**, and it is vendored whole at
+[`vendor/jev-ultrafast`](vendor/jev-ultrafast) with `git subtree`. Upstream's
+own licence travels with it in
+[`vendor/jev-ultrafast/LICENSE`](vendor/jev-ultrafast/LICENSE), and
+[`NOTICE`](NOTICE) records the copy and the fact that we changed it. The pin is
+upstream commit **`1231850`**. Thanks to Browser Use for the original.
+
+Seven commits of ours sit on top of that pin, in this repository's history:
+
+1. Headless CDP attach through `BU_CDP_URL`, so the agent drives a Chromium
+   somebody else started.
+2. A Claude text-model adapter for filling fields, going through the local
+   `claude` CLI rather than an API key.
+3. The same adapter as a standing child process, which removed the per-call
+   startup cost.
+4. Thinking turned off and the `TYPE_TEXT` context trimmed, which took a field
+   fill from seconds to well under one.
+5. Claude Haiku and Sonnet made pluggable as the decision-maker, with a
+   benchmark that holds everything else identical.
+6. A plain Playwright MCP arm in that benchmark, for a floor to compare against.
+7. Off-screen links offered to the chooser and scrolled into view before a
+   click, and the first scroll after a navigation no longer dropped. A two-hop
+   Wikipedia link-navigation task went from blocked to done in 7.2 s.
+
+Benchmark: Sonnet vs Jev on a Wikipedia suite, results to follow.
+
+To move to a newer upstream:
+
+```bash
+git subtree pull --prefix vendor/jev-ultrafast \
+  https://github.com/browser-use/jev-ultrafast <commit> --squash
+```
+
+Our commits are already on top of the pin, so that is a merge rather than a
+set of patches to rewrite. [browser/README.md](browser/README.md) says what to
+re-run afterwards.
+
 ## What is in the kit
 
 Airlock is the tool-call guard. It is one component of the kit, not the kit.
@@ -282,6 +335,11 @@ Full tables, methods and the known limits: **[docs/measurements.md](docs/measure
 - **An override stamp.** `[airlock-ok: <reason>]` in a call's description gets
   past any deny, with the reason recorded.
 - **Loop protection.** The same call is never denied twice in ten minutes.
+- **One rule ignores those two.** `R11-browse-via-jev` is a cost steer with an
+  equally good tool sitting in the same session, so a stamp on it is logged and
+  refused and a repeat is denied again. The other nets still cover it, and only
+  the user turns it off. Its one door is the `browse` tool failing: a `blocked`
+  or errored `browse` call turns the rule into a warn for thirty minutes.
 - **A kill switch that beats the mode.** `AIRLOCK_DISABLE=1`, or
   `~/.config/airlock/disabled`, or `echo off > ~/.config/airlock/mode`.
 - **Confidence bars.** Where Jev decides, a deny needs confidence of at least
@@ -355,6 +413,12 @@ Yes it can, and there are four ways out, in rising order of permanence:
 
 Loop protection also means the same call is never denied twice in ten minutes,
 so a retry gets through on its own.
+
+`R11-browse-via-jev` is the exception to the first and the last of those. A
+stamp on it is logged and refused, and a repeat is denied again. Use `browse`.
+If `browse` comes back `blocked` or errors, Playwright is yours for the next
+thirty minutes of that session, with no stamp needed. Past that, ask the person
+to switch the rule off.
 
 </details>
 

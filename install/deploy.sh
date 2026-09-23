@@ -67,6 +67,28 @@ else
   mv "$EXPORT_TMP" "$RELEASE_DIR"
 fi
 
+# --- 2b. the browser agent's Python environment. vendor/jev-ultrafast rides
+# along in the export, but its dependencies must not: a venv inside a release
+# would be rebuilt on every deploy and then pruned with it. One environment
+# under $AIRLOCK_HOME is shared by every release, and it is only re-synced when
+# the release's uv.lock differs from the one it was built from. -----------
+VENDORED="$RELEASE_DIR/vendor/jev-ultrafast"
+VENV="${JEV_ULTRAFAST_VENV:-$AIRLOCK_HOME/jev-ultrafast-venv}"
+if [ -f "$VENDORED/uv.lock" ]; then
+  if ! cmp -s "$VENDORED/uv.lock" "$VENV/.jev-kit-uv.lock"; then
+    if command -v uv >/dev/null 2>&1; then
+      echo "deploy.sh: syncing the browser agent's environment ($VENV)" >&2
+      ( cd "$VENDORED" && UV_PROJECT_ENVIRONMENT="$VENV" nice -n 10 uv sync --no-install-project )
+      cp "$VENDORED/uv.lock" "$VENV/.jev-kit-uv.lock"
+    else
+      echo "deploy.sh: uv.lock changed but 'uv' is not on PATH; \`browse\` may" >&2
+      echo "  be running against a stale environment. Run browser/install.sh." >&2
+    fi
+  else
+    echo "deploy.sh: browser agent environment already matches uv.lock" >&2
+  fi
+fi
+
 # --- 3. flip `current` atomically: build the new symlink under a temp
 # name in the same directory, then rename over the old one -- rename is
 # atomic on the same filesystem, so `current` is never observed missing

@@ -3,24 +3,28 @@
 # registers it. Nothing is applied: ~/.claude.json is yours, and this script
 # never opens it.
 #
-# The server drives the pinned jev-ultrafast clone that browser/install.sh
-# makes, so that clone has to exist first.
+# The server drives the vendored jev-ultrafast at vendor/jev-ultrafast, which
+# ships with this repository. What it still needs is that project's Python
+# environment, which browser/install.sh syncs.
 set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 SERVER="$SCRIPT_DIR/server.py"
-CLONE="${JEV_ULTRAFAST_DIR:-${AIRLOCK_BROWSER_DIR:-$HOME/code/jev-ultrafast}}"
+REPO_ROOT="$(dirname "$SCRIPT_DIR")"
+CLONE="${JEV_ULTRAFAST_DIR:-${AIRLOCK_BROWSER_DIR:-$REPO_ROOT/vendor/jev-ultrafast}}"
 CLONE="${CLONE/#\~/$HOME}"
+AIRLOCK_HOME="${AIRLOCK_HOME:-$HOME/.local/share/airlock}"
+VENV="${JEV_ULTRAFAST_VENV:-$AIRLOCK_HOME/jev-ultrafast-venv}"
 PY="${PYTHON:-python3}"
 
 usage() {
   cat >&2 <<USAGE
 usage: $0
 
-Verifies the jev-ultrafast clone (\$JEV_ULTRAFAST_DIR, else
-\$AIRLOCK_BROWSER_DIR, else \$HOME/code/jev-ultrafast), runs the server through
-a real MCP handshake, and prints the mcpServers block to add to ~/.claude.json.
-It never edits that file.
+Verifies the vendored jev-ultrafast (\$JEV_ULTRAFAST_DIR, else
+\$AIRLOCK_BROWSER_DIR, else vendor/jev-ultrafast here) and its environment,
+runs the server through a real MCP handshake, and prints the mcpServers block
+to add to ~/.claude.json. It never edits that file.
 USAGE
   exit 2
 }
@@ -30,19 +34,22 @@ command -v "$PY" >/dev/null 2>&1 || { echo "browse: '$PY' not found" >&2; exit 1
 [ -f "$SERVER" ] || { echo "browse: no server at $SERVER" >&2; exit 1; }
 
 if [ ! -f "$CLONE/jev_ultrafast/agent.py" ]; then
-  echo "browse: the jev-ultrafast clone was not found at $CLONE" >&2
-  echo "  Run this first, then run me again:" >&2
-  echo "      $(dirname "$SCRIPT_DIR")/browser/install.sh" >&2
-  echo "  A clone somewhere else? Set JEV_ULTRAFAST_DIR to it." >&2
+  echo "browse: the vendored jev-ultrafast was not found at $CLONE" >&2
+  echo "  It ships at vendor/jev-ultrafast in this checkout ($REPO_ROOT)." >&2
+  echo "  A copy somewhere else? Set JEV_ULTRAFAST_DIR to it." >&2
   exit 1
 fi
-echo "browse: clone at $CLONE ($(git -C "$CLONE" rev-parse --short HEAD 2>/dev/null || echo 'no git'))"
+echo "browse: agent at $CLONE"
 
-if [ ! -x "$CLONE/.venv/bin/python" ] && ! command -v uv >/dev/null 2>&1; then
-  echo "browse: $CLONE has no .venv and 'uv' is not on PATH." >&2
-  echo "  Install uv, then run 'uv sync' in the clone." >&2
+if [ ! -x "$VENV/bin/python" ] && [ ! -x "$CLONE/.venv/bin/python" ] \
+   && ! command -v uv >/dev/null 2>&1; then
+  echo "browse: no environment at $VENV and 'uv' is not on PATH." >&2
+  echo "  Run this first, then run me again:" >&2
+  echo "      $REPO_ROOT/browser/install.sh" >&2
   exit 1
 fi
+echo "browse: environment at $VENV"
+
 
 chmod +x "$SERVER" 2>/dev/null || true
 

@@ -42,7 +42,8 @@ NEW_HOOK_COMMAND = "%s %s" % (PYTHON3, NEW_HOOK)
 
 def _run(path, apply_=False, belay=False, function_hooks=False,
          belay_wrapper="/nonexistent/airlock-belay-run",
-         session_check=False, session_hook=None):
+         session_check=False, session_hook=None,
+         browse_unlock=False, browse_hook=None):
     env = dict(os.environ)
     env["NEW_HOOK"] = NEW_HOOK
     env["NEW_HOOK_COMMAND"] = NEW_HOOK_COMMAND
@@ -56,6 +57,11 @@ def _run(path, apply_=False, belay=False, function_hooks=False,
     env["SESSION_CHECK_HOOK"] = session_hook or ""
     env["SESSION_CHECK_COMMAND"] = (
         "%s %s" % (PYTHON3, session_hook)) if session_hook else ""
+    # Same again for the PostToolUse browse unlock: off unless a test asks.
+    env["BROWSE_UNLOCK"] = "1" if browse_unlock else "0"
+    env["BROWSE_UNLOCK_HOOK"] = browse_hook or ""
+    env["BROWSE_UNLOCK_COMMAND"] = (
+        "%s %s" % (PYTHON3, browse_hook)) if browse_hook else ""
     return subprocess.run([sys.executable, str(WIRE), str(path)],
                           capture_output=True, text=True, env=env, timeout=30)
 
@@ -543,3 +549,108 @@ class TestSessionCheckOnWindows(WireTestBase):
         before = Path(path).read_text()
         self._win_run(path, session_hook)
         self.assertEqual(Path(path).read_text(), before)
+
+
+class TestBrowseUnlockEntry(WireTestBase):
+    """The PostToolUse browse-unlock entry: added, repointed, idempotent, and
+    never merged into a matcher="*" block. It is the only hook here with a
+    real matcher, because it has exactly one tool to watch."""
+
+    MATCHER = "mcp__browse__browse"
+
+    def _hook_file(self, name="airlock_browse_unlock.py"):
+        tmpdir = tempfile.mkdtemp()
+        self.addCleanup(lambda: __import__("shutil").rmtree(tmpdir, ignore_errors=True))
+        path = os.path.join(tmpdir, "hooks")
+        os.makedirs(path)
+        hook = os.path.join(path, name)
+        with open(hook, "w") as f:
+            f.write("# stand-in\n")
+        return hook
+
+    def _post_entries(self, path):
+        return (self._data(path).get("hooks") or {}).get("PostToolUse") or []
+
+    def _post_commands(self, path):
+        out = []
+        for entry in self._post_entries(path):
+            for h in entry.get("hooks") or []:
+                out.append(h.get("command"))
+        return out
+
+    def test_a_fresh_settings_file_gets_the_entry(self):
+        hook = self._hook_file()
+        path = self._missing_path()
+        _run(path, apply_=True, browse_unlock=True, browse_hook=hook)
+        entries = self._post_entries(path)
+        self.assertEqual(len(entries), 1)
+        self.assertEqual(entries[0]["matcher"], self.MATCHER)
+        self.assertEqual(entries[0]["hooks"][0]["command"],
+                         "%s %s" % (PYTHON3, hook))
+        self.assertEqual(entries[0]["hooks"][0]["timeout"], 5)
+
+    def test_it_is_added_to_a_file_that_already_wires_the_guard(self):
+        hook = self._hook_file()
+        path = self._file(_settings(NEW_HOOK_COMMAND))
+        _run(path, apply_=True, browse_unlock=True, browse_hook=hook)
+        self.assertEqual(self._post_commands(path), ["%s %s" % (PYTHON3, hook)])
+        # The PreToolUse entry it found is untouched.
+        self.assertEqual(self._command(path), NEW_HOOK_COMMAND)
+
+    def test_it_is_idempotent(self):
+        hook = self._hook_file()
+        path = self._file(_settings(NEW_HOOK_COMMAND))
+        _run(path, apply_=True, browse_unlock=True, browse_hook=hook)
+        before = Path(path).read_text()
+        out = _run(path, apply_=True, browse_unlock=True, browse_hook=hook)
+        self.assertEqual(Path(path).read_text(), before)
+        self.assertIn("already wired", out.stdout)
+
+    def test_a_stale_path_is_repointed_and_the_interpreter_kept(self):
+        hook = self._hook_file()
+        old = "/opt/airlock/releases/20250101/hooks/airlock_browse_unlock.py"
+        path = self._file(json.dumps({"hooks": {
+            "PreToolUse": [{"matcher": "*", "hooks": [
+                {"type": "command", "command": NEW_HOOK_COMMAND, "timeout": 5}]}],
+            "PostToolUse": [{"matcher": self.MATCHER, "hooks": [
+                {"type": "command", "command": "/usr/bin/python3.11 %s" % old,
+                 "timeout": 5}]}]}}))
+        out = _run(path, apply_=True, browse_unlock=True, browse_hook=hook)
+        self.assertEqual(self._post_commands(path),
+                         ["/usr/bin/python3.11 %s" % hook])
+        self.assertIn("repointed", out.stdout)
+
+    def test_it_never_joins_a_star_matcher_block(self):
+        """Merged into a "*" entry it would run after every tool call in the
+        session, which is the one thing a PostToolUse hook must not do."""
+        hook = self._hook_file()
+        path = self._file(json.dumps({"hooks": {
+            "PreToolUse": [{"matcher": "*", "hooks": [
+                {"type": "command", "command": NEW_HOOK_COMMAND, "timeout": 5}]}],
+            "PostToolUse": [{"matcher": "*", "hooks": [
+                {"type": "command", "command": "/usr/bin/true", "timeout": 5}]}]}}))
+        _run(path, apply_=True, browse_unlock=True, browse_hook=hook)
+        entries = self._post_entries(path)
+        self.assertEqual([e["matcher"] for e in entries], ["*", self.MATCHER])
+        self.assertEqual([h["command"] for h in entries[0]["hooks"]], ["/usr/bin/true"])
+
+    def test_a_missing_hook_file_is_skipped_and_said_so(self):
+        path = self._file(_settings(NEW_HOOK_COMMAND))
+        out = _run(path, apply_=True, browse_unlock=True,
+                   browse_hook="/nonexistent/hooks/airlock_browse_unlock.py")
+        self.assertEqual(self._post_commands(path), [])
+        self.assertIn("skipping PostToolUse entry", out.stdout)
+
+    def test_off_means_no_entry(self):
+        hook = self._hook_file()
+        path = self._file(_settings(NEW_HOOK_COMMAND))
+        _run(path, apply_=True, browse_unlock=False, browse_hook=hook)
+        self.assertEqual(self._post_commands(path), [])
+
+    def test_print_mode_touches_nothing(self):
+        hook = self._hook_file()
+        path = self._file(_settings(NEW_HOOK_COMMAND))
+        before = Path(path).read_text()
+        out = _run(path, apply_=False, browse_unlock=True, browse_hook=hook)
+        self.assertEqual(Path(path).read_text(), before)
+        self.assertIn("browse unlock", out.stdout)

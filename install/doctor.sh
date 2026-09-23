@@ -504,26 +504,24 @@ fi
 
 # ---------------------------------------------------------------------------
 head_ "Optional components"
-for pair in \
-  "browser:${AIRLOCK_BROWSER_DIR:-$HOME/code/jev-ultrafast}" \
-  "review:${AIRLOCK_REVIEW_DIR:-$HOME/code/jev-review}"
-do
-  name="${pair%%:*}"; dir="${pair#*:}"
-  if [ -d "$dir/.git" ]; then
-    pass "$name: clone at $dir ($(git -C "$dir" rev-parse --short HEAD 2>/dev/null))"
-  else
-    skip "$name: not installed"
-  fi
-done
+REVIEW_DIR="${AIRLOCK_REVIEW_DIR:-$HOME/code/jev-review}"
+if [ -d "$REVIEW_DIR/.git" ]; then
+  pass "review: clone at $REVIEW_DIR ($(git -C "$REVIEW_DIR" rev-parse --short HEAD 2>/dev/null))"
+else
+  skip "review: not installed"
+fi
 # browse: run the server through a real MCP handshake over stdio. It needs the
-# browser clone, so without one it is a skip and not a failure. No call is
+# vendored agent, so without one it is a skip and not a failure. No call is
 # made, so no Chromium starts and no key is read.
 BROWSE_SERVER="$LIVE/browse/server.py"
-BROWSE_CLONE="${JEV_ULTRAFAST_DIR:-${AIRLOCK_BROWSER_DIR:-$HOME/code/jev-ultrafast}}"
+BROWSE_DIR="${JEV_ULTRAFAST_DIR:-${AIRLOCK_BROWSER_DIR:-$LIVE/vendor/jev-ultrafast}}"
+BROWSE_VENV="${JEV_ULTRAFAST_VENV:-${AIRLOCK_HOME:-$HOME/.local/share/airlock}/jev-ultrafast-venv}"
 if [ ! -f "$BROWSE_SERVER" ]; then
   skip "browse: not present in the live copy"
-elif [ ! -f "$BROWSE_CLONE/jev_ultrafast/agent.py" ]; then
-  skip "browse: no jev-ultrafast clone at $BROWSE_CLONE (install/install.sh --browser --browse-mcp)"
+elif [ ! -f "$BROWSE_DIR/jev_ultrafast/agent.py" ]; then
+  skip "browse: no vendored jev-ultrafast at $BROWSE_DIR"
+elif [ ! -x "$BROWSE_VENV/bin/python" ] && ! command -v uv >/dev/null 2>&1; then
+  skip "browse: no environment at $BROWSE_VENV and no uv (browser/install.sh)"
 else
   BROWSE_OUT="$(printf '%s\n' \
     '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"doctor","version":"0"}}}' \

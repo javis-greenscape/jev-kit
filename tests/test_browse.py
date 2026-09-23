@@ -20,7 +20,7 @@ from unittest import mock
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT))
 
-from browse import server
+from browse import server  # noqa: E402
 
 KEY = "apikey_test_0123456789"
 
@@ -130,8 +130,8 @@ class TestTheReadLoop(unittest.TestCase):
     def _serve(self, lines, browse=None):
         browse = browse or FakeBrowse()
         out = io.StringIO()
-        server.Server(browse).serve(io.StringIO("".join(l + "\n" for l in lines)), out)
-        return [json.loads(l) for l in out.getvalue().splitlines()], browse
+        server.Server(browse).serve(io.StringIO("".join(x + "\n" for x in lines)), out)
+        return [json.loads(x) for x in out.getvalue().splitlines()], browse
 
     def test_one_response_per_request_one_line_each(self):
         out, browse = self._serve([
@@ -169,7 +169,7 @@ class TestTheReadLoop(unittest.TestCase):
                               input="\n".join(lines) + "\n", capture_output=True,
                               text=True, timeout=30)
         self.assertEqual(done.returncode, 0, done.stderr)
-        out = [json.loads(l) for l in done.stdout.splitlines()]
+        out = [json.loads(x) for x in done.stdout.splitlines()]
         self.assertEqual([r["id"] for r in out], [1, 2])
         self.assertEqual(out[1]["result"]["tools"][0]["name"], "browse")
 
@@ -365,24 +365,64 @@ class TestShutdown(CallCase):
 
 
 class TestErrorPaths(CallCase):
-    def test_a_missing_clone_names_the_installer(self):
+    def test_a_missing_source_tree_names_the_vendored_copy(self):
         with mock.patch.dict(os.environ, {"JEV_ULTRAFAST_DIR": str(Path(self.tmp) / "absent")}), \
              mock.patch.object(server, "run_runner") as run:
             result = call(self.srv, goal="open https://example.com")
         self.assertTrue(result["isError"])
         text = result["content"][0]["text"]
-        self.assertIn("browser/install.sh", text)
+        self.assertIn("vendor/jev-ultrafast", text)
         self.assertIn("JEV_ULTRAFAST_DIR", text)
         run.assert_not_called()
         self.browse.chromium.ensure.assert_not_called()
 
-    def test_the_clone_falls_back_to_the_installers_own_variable(self):
+    def test_the_source_tree_falls_back_to_the_vendored_copy(self):
         with mock.patch.dict(os.environ, {"AIRLOCK_BROWSER_DIR": "/somewhere/else"}):
             self.assertEqual(server.clone_dir(), self.clone)
             os.environ.pop("JEV_ULTRAFAST_DIR")
             self.assertEqual(server.clone_dir(), Path("/somewhere/else"))
             os.environ.pop("AIRLOCK_BROWSER_DIR")
-            self.assertEqual(server.clone_dir(), Path.home() / "code" / "jev-ultrafast")
+            # Relative to server.py, so it is the checkout in development and
+            # $AIRLOCK_HOME/releases/<sha>/vendor/jev-ultrafast once deployed.
+            self.assertEqual(server.clone_dir(),
+                             server.REPO_ROOT / "vendor" / "jev-ultrafast")
+            self.assertTrue((server.REPO_ROOT / "vendor" / "jev-ultrafast"
+                             / "jev_ultrafast" / "agent.py").is_file())
+
+    def test_the_environment_lives_outside_the_release(self):
+        with mock.patch.dict(os.environ, {"JEV_ULTRAFAST_VENV": "~/elsewhere/venv"}):
+            self.assertEqual(server.venv_dir(),
+                             Path(os.path.expanduser("~/elsewhere/venv")))
+        with mock.patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("JEV_ULTRAFAST_VENV", None)
+            venv = server.venv_dir()
+        # Under $AIRLOCK_HOME, never inside the release: a release is pruned
+        # and re-exported, and the environment has to outlive that.
+        self.assertEqual(venv.name, "jev-ultrafast-venv")
+        self.assertFalse(str(venv).startswith(str(server.REPO_ROOT) + os.sep))
+
+    def test_the_runner_prefers_the_shared_environment(self):
+        venv = Path(self.tmp) / "venv"
+        (venv / "bin").mkdir(parents=True)
+        python = venv / "bin" / "python"
+        python.write_text("")
+        with mock.patch.dict(os.environ, {"JEV_ULTRAFAST_VENV": str(venv)}):
+            self.assertEqual(server.runner_command(self.clone)[0], str(python))
+
+    def test_the_child_is_told_where_the_source_is(self):
+        captured = {}
+
+        def fake_popen(argv, **kwargs):
+            captured.update(kwargs)
+            raise OSError("stop here")
+
+        with mock.patch.object(server, "runner_command", return_value=["x"]), \
+             mock.patch.object(server.subprocess, "Popen", fake_popen):
+            with self.assertRaises(server.BrowseError):
+                server.run_runner({"op": "browse"}, {"PYTHONPATH": "/keep"},
+                                  self.clone, 5)
+        self.assertEqual(captured["env"]["PYTHONPATH"],
+                         str(self.clone) + os.pathsep + "/keep")
 
     def test_a_missing_key_names_the_key_file(self):
         for missing in (None, ""):
@@ -411,9 +451,9 @@ class TestErrorPaths(CallCase):
             with mock.patch.dict(os.environ, {"JEV_BROWSE_TIMEOUT": raw}):
                 self.assertEqual(server.call_timeout_s(), want, raw)
 
-    def test_a_chromium_refusal_is_an_error_result(self):
-        self.browse.chromium.ensure.side_effect = server.BrowseError("a Chromium this server "
-                                                                     "did not start")
+    def test_a_chromium_failure_is_an_error_result(self):
+        self.browse.chromium.ensure.side_effect = server.BrowseError(
+            "no Chromium binary found")
         with mock.patch.object(server, "run_runner") as run:
             result = call(self.srv, goal="open https://example.com")
         self.assertTrue(result["isError"])
@@ -468,7 +508,7 @@ class TestTheChildProcess(unittest.TestCase):
         with mock.patch.object(server.shutil, "which", return_value=None):
             with self.assertRaises(server.BrowseError) as caught:
                 server.runner_command(Path(tempfile.gettempdir()) / "no-such-clone")
-        self.assertIn("uv sync", str(caught.exception))
+        self.assertIn("browser/install.sh", str(caught.exception))
 
 
 class TestChromium(unittest.TestCase):
@@ -482,25 +522,55 @@ class TestChromium(unittest.TestCase):
         popen.assert_not_called()
         self.assertFalse(c.owned())
 
-    def test_the_default_cdp_url(self):
+    def test_an_unset_cdp_url_is_never_probed(self):
+        """The old default was http://127.0.0.1:9333. Whatever answers there
+        is somebody else's browser unless a person named it."""
         c = server.Chromium()
         with mock.patch.dict(os.environ), \
-             mock.patch.object(server, "cdp_answers", return_value=True) as answers:
+             mock.patch.object(server, "cdp_answers", return_value=True) as answers, \
+             mock.patch.object(server, "running_chromiums", return_value=[]), \
+             mock.patch.object(server, "find_chromium", return_value=None):
             os.environ.pop("BU_CDP_URL", None)
-            self.assertEqual(c.ensure(), "http://127.0.0.1:9333")
-        answers.assert_called_once_with("http://127.0.0.1:9333")
-
-    def test_a_chromium_somebody_else_started_is_a_refusal(self):
-        c = server.Chromium()
-        with mock.patch.object(server, "cdp_answers", return_value=False), \
-             mock.patch.object(server, "running_chromiums",
-                               return_value=[(4242, "chrome --headless")]), \
-             mock.patch.object(server.subprocess, "Popen") as popen:
             with self.assertRaises(server.BrowseError) as caught:
                 c.ensure()
-        self.assertIn("4242", str(caught.exception))
-        self.assertIn("One Chromium at a time", str(caught.exception))
-        popen.assert_not_called()
+        # It went looking for a binary of its own instead of attaching.
+        self.assertIn("playwright install chromium", str(caught.exception))
+        answers.assert_not_called()
+
+    def test_a_chromium_somebody_else_started_does_not_stop_us(self):
+        """A Playwright MCP browser, or another session's own browse server,
+        used to make every call here fail. Now it is noted and ignored."""
+        c = server.Chromium()
+        with mock.patch.dict(os.environ), \
+             mock.patch.object(server, "cdp_answers", return_value=False), \
+             mock.patch.object(server, "running_chromiums",
+                               return_value=[(4242, "chrome --headless")]), \
+             mock.patch.object(server, "find_chromium", return_value=None):
+            os.environ.pop("BU_CDP_URL", None)
+            with self.assertRaises(server.BrowseError) as caught:
+                c.ensure()
+        said = str(caught.exception)
+        self.assertNotIn("One Chromium at a time", said)
+        self.assertNotIn("4242", said)
+        # It got all the way to looking for its own binary.
+        self.assertIn("playwright install chromium", said)
+
+    def test_a_dead_own_chromium_is_replaced_and_its_profile_removed(self):
+        c = server.Chromium()
+        stale = tempfile.mkdtemp(prefix="jev-browse-profile-")
+        c.proc = mock.Mock(**{"poll.return_value": 9, "pid": 4242})
+        c.profile = stale
+        c.url = "http://127.0.0.1:1"
+        with mock.patch.dict(os.environ), \
+             mock.patch.object(server, "cdp_answers", return_value=False), \
+             mock.patch.object(server, "running_chromiums", return_value=[]), \
+             mock.patch.object(server, "find_chromium", return_value=None):
+            os.environ.pop("BU_CDP_URL", None)
+            with self.assertRaises(server.BrowseError):
+                c.ensure()
+        self.assertIsNone(c.proc)
+        self.assertIsNone(c.profile)
+        self.assertFalse(os.path.exists(stale))
 
     def test_no_binary_is_a_message(self):
         c = server.Chromium()

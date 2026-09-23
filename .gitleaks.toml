@@ -1,0 +1,17 @@
+# Secret scanning for this repository. The default gitleaks rule set, plus one
+# narrow path allowance.
+#
+# vendor/jev-ultrafast/bench/ holds recorded benchmark runs, and a run records
+# the URLs the agent visited. Wikipedia hands an anonymous visitor a
+# `centralauthLoginToken` query parameter, and the generic-api-key rule reads
+# that as a credential. It is not one: it belongs to nobody, it expired when
+# the run ended, and these are upstream benchmark artefacts rather than
+# anything this project configures. Only that directory is excused, and only
+# there; everything else in vendor/ is scanned like the rest of the tree.
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "recorded benchmark runs in the vendored browser agent"
+targets = ["path"]
+paths = ['''^vendor/jev-ultrafast/bench/results-.*\.jsonl$''']

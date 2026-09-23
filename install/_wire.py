@@ -12,8 +12,11 @@ Two jobs, both idempotent:
      has nothing to repoint: there is no airlock hook command anywhere yet),
      the SessionStart session-check entry (a DEFAULT component: the guard
      fails open, so a dead guard is silent, and on a workstation the only
-     reliable moment to say so is when somebody starts a session), and, opt
-     in per flag, the belay Stop hook and the function-hooks env var.
+     reliable moment to say so is when somebody starts a session), the
+     PostToolUse browse-unlock entry (also a default: it is the only thing
+     that lets R11 stand aside when the kit's own `browse` tool has given up
+     -- see hooks/airlock_browse_unlock.py), and, opt in per flag, the belay
+     Stop hook and the function-hooks env var.
      Adding necessarily changes the JSON's structure, so this path
      re-serializes the whole file (via json.load/json.dump, which preserves
      existing key order -- Python dicts keep insertion order) rather than
@@ -27,9 +30,9 @@ it also needs a repoint -- there is no way to add new nested JSON without
 becoming a JSON re-serializer for that file.
 
 Reads NEW_HOOK, NEW_HOOK_COMMAND, APPLY, BELAY, BELAY_WRAPPER,
-FUNCTION_HOOKS, SESSION_CHECK, SESSION_CHECK_HOOK and
-SESSION_CHECK_COMMAND from the environment (set by wire.sh) and the
-settings.json paths from argv.
+FUNCTION_HOOKS, SESSION_CHECK, SESSION_CHECK_HOOK, SESSION_CHECK_COMMAND,
+BROWSE_UNLOCK, BROWSE_UNLOCK_HOOK and BROWSE_UNLOCK_COMMAND from the
+environment (set by wire.sh) and the settings.json paths from argv.
 Never touches a path not given on the command line.
 """
 import copy
@@ -54,6 +57,19 @@ FUNCTION_HOOKS_ENV_KEY = "CLAUDE_CODE_ENABLE_FUNCTION_HOOKS"
 SESSION_CHECK = os.environ.get("SESSION_CHECK", "1") == "1"
 SESSION_CHECK_HOOK = os.environ.get("SESSION_CHECK_HOOK", "")
 SESSION_CHECK_COMMAND = os.environ.get("SESSION_CHECK_COMMAND", SESSION_CHECK_HOOK)
+# The browse unlock is a DEFAULT too, for the same reason the session check
+# is: without it R11 denies every Playwright call in a session where the kit's
+# own `browse` tool has already failed, and the agent is left with no browser.
+# It is the only way past that rule, so an install that skips it installs a
+# strictness nobody chose.
+BROWSE_UNLOCK = os.environ.get("BROWSE_UNLOCK", "1") == "1"
+BROWSE_UNLOCK_HOOK = os.environ.get("BROWSE_UNLOCK_HOOK", "")
+BROWSE_UNLOCK_COMMAND = os.environ.get("BROWSE_UNLOCK_COMMAND", BROWSE_UNLOCK_HOOK)
+# The one matcher in the whole file that is not "*". PostToolUse fires after
+# every tool call in the session, and this hook has exactly one tool to say
+# anything about, so the filtering is worth doing before the interpreter
+# starts rather than inside it.
+BROWSE_UNLOCK_MATCHER = "mcp__browse__browse"
 # 5 s here on every platform, including native Windows: the enforce judgement
 # budget there is 2000ms (airlock/enforce.py:WINDOWS_DEFAULT_BUDGET_MS, no
 # warm daemon so every call is a fresh HTTPS connection, measured median
@@ -62,6 +78,10 @@ SESSION_CHECK_COMMAND = os.environ.get("SESSION_CHECK_COMMAND", SESSION_CHECK_HO
 PRETOOLUSE_TIMEOUT = 5
 BELAY_TIMEOUT = 25
 SESSION_CHECK_TIMEOUT = 5
+# The browse unlock reads one payload and writes one small JSON file. 5 s is
+# the same generous ceiling the other two carry, for a hook that should never
+# be near it.
+BROWSE_UNLOCK_TIMEOUT = 5
 
 # Matches a JSON string value that is (or ends in) a path to airlock.py's
 # hook entry point -- e.g. "$HOME/code/airlock/hooks/airlock.py" or
@@ -138,12 +158,31 @@ _SESSION_CMD_RE = re.compile(
 _WIN_SESSION_TAIL = r'(?:hooks\\\\airlock_session_check|airlock-session-check)\.py'
 _WIN_SESSION_TAIL_PARSED = r'(?:hooks[\\\\/]airlock_session_check|airlock-session-check)\.py'
 
+# And a THIRD pair, for the PostToolUse browse unlock. Same reasoning as the
+# session check's: the three hooks are repointed independently, and one
+# pattern covering several of them would make the "how many did we repoint"
+# count a lie. None of the three can collide -- each is anchored on its own
+# file name, and no name is a suffix of another.
+_BROWSE_TAIL = r'hooks/airlock_browse_unlock\.py'
+_BROWSE_PATTERN = re.compile(
+    r'"((?:(?:[^"\\]|\\.)*?\s)?)((?:[^"\\\s]|\\.)*' + _BROWSE_TAIL + r')"')
+_BROWSE_CMD_RE = re.compile(
+    r'^((?:(?:[^\\]|\\.)*?\s)?)((?:[^\\\s]|\\.)*' + _BROWSE_TAIL + r')$')
+
+_WIN_BROWSE_TAIL = r'(?:hooks\\\\airlock_browse_unlock|airlock-browse-unlock)\.py'
+_WIN_BROWSE_TAIL_PARSED = r'(?:hooks[\\\\/]airlock_browse_unlock|airlock-browse-unlock)\.py'
+
 QUOTED = os.environ.get("HOOK_COMMAND_QUOTED") == "1"
 
 _WIN_SESSION_PATTERN = re.compile(
     r'"((?:[^"\\]|\\.)*\\")(' + _WIN_PATH_CHARS + _WIN_SESSION_TAIL + r')(\\")"')
 _WIN_SESSION_CMD_RE = re.compile(
     r'^((?:[^"]|"[^"]*")*")([^"]*?' + _WIN_SESSION_TAIL_PARSED + r')(")$')
+
+_WIN_BROWSE_PATTERN = re.compile(
+    r'"((?:[^"\\]|\\.)*\\")(' + _WIN_PATH_CHARS + _WIN_BROWSE_TAIL + r')(\\")"')
+_WIN_BROWSE_CMD_RE = re.compile(
+    r'^((?:[^"]|"[^"]*")*")([^"]*?' + _WIN_BROWSE_TAIL_PARSED + r')(")$')
 
 
 def _text_pattern():
@@ -160,6 +199,14 @@ def _session_text_pattern():
 
 def _session_cmd_pattern():
     return _WIN_SESSION_CMD_RE if QUOTED else _SESSION_CMD_RE
+
+
+def _browse_text_pattern():
+    return _WIN_BROWSE_PATTERN if QUOTED else _BROWSE_PATTERN
+
+
+def _browse_cmd_pattern():
+    return _WIN_BROWSE_CMD_RE if QUOTED else _BROWSE_CMD_RE
 
 
 def _json_inner(value):
@@ -191,6 +238,19 @@ def _session_check_block():
          "timeout": SESSION_CHECK_TIMEOUT}]}
 
 
+def _browse_unlock_block():
+    return {"matcher": BROWSE_UNLOCK_MATCHER, "hooks": [
+        {"type": "command", "command": BROWSE_UNLOCK_COMMAND,
+         "timeout": BROWSE_UNLOCK_TIMEOUT}]}
+
+
+def _browse_unlock_ok():
+    """Same test as the session check's, and for the same reason: an entry
+    pointing at nothing would run and fail after every `browse` call."""
+    return bool(BROWSE_UNLOCK and BROWSE_UNLOCK_HOOK
+                and os.path.isfile(BROWSE_UNLOCK_HOOK))
+
+
 def _session_check_ok():
     """Only wire it if we were actually told where it is AND the file is
     there. A SessionStart entry pointing at nothing would run, fail and print
@@ -217,17 +277,21 @@ def _has_command(entries, command):
     return False
 
 
-def _append_hook(data, event, block, command):
+def _append_hook(data, event, block, command, matcher="*"):
     """Add `block`'s single hook to `data["hooks"][event]`, reusing an
-    existing matcher="*" entry when one is there rather than adding a
-    second one. No-op if `command` is already present anywhere in `event`."""
+    existing entry with the SAME matcher when one is there rather than adding
+    a second one. No-op if `command` is already present anywhere in `event`.
+
+    `matcher` is "*" for every hook here but the browse unlock, which is
+    registered against one tool name and must never be merged into a "*"
+    entry -- that would run it after every tool call in the session."""
     hooks = data.setdefault("hooks", {})
     entries = hooks.setdefault(event, [])
     if _has_command(entries, command):
         return False
-    existing_star = _matcher_block(entries, "*")
-    if existing_star is not None:
-        existing_star.setdefault("hooks", []).append(block["hooks"][0])
+    existing = _matcher_block(entries, matcher)
+    if existing is not None:
+        existing.setdefault("hooks", []).append(block["hooks"][0])
     else:
         entries.append(block)
     return True
@@ -237,6 +301,8 @@ def _fresh_settings():
     data = {"hooks": {"PreToolUse": [_pretooluse_block()]}}
     if _session_check_ok():
         data["hooks"]["SessionStart"] = [_session_check_block()]
+    if _browse_unlock_ok():
+        data["hooks"]["PostToolUse"] = [_browse_unlock_block()]
     if BELAY and BELAY_WRAPPER and os.path.isfile(BELAY_WRAPPER):
         data["hooks"]["Stop"] = [_belay_block()]
     if FUNCTION_HOOKS:
@@ -255,6 +321,15 @@ def _describe_fresh():
         else:
             lines.append("  SessionStart (session check): SKIPPED, no hook at %s"
                          % (SESSION_CHECK_HOOK or "<unset>"))
+    if BROWSE_UNLOCK:
+        if _browse_unlock_ok():
+            lines.append("  PostToolUse (browse unlock): matcher \"%s\", "
+                         "command \"%s\", timeout %d"
+                         % (BROWSE_UNLOCK_MATCHER, BROWSE_UNLOCK_COMMAND,
+                            BROWSE_UNLOCK_TIMEOUT))
+        else:
+            lines.append("  PostToolUse (browse unlock): SKIPPED, no hook at %s"
+                         % (BROWSE_UNLOCK_HOOK or "<unset>"))
     if BELAY:
         if BELAY_WRAPPER and os.path.isfile(BELAY_WRAPPER):
             lines.append("  Stop (belay): matcher \"*\", command \"%s\", timeout %d"
@@ -295,13 +370,16 @@ def _repoint_text(text):
     """Pure text substitution: repoint every airlock hook command found to its
     new path, keeping each command's own interpreter prefix.
 
-    Both hooks are repointed in the one pass -- the PreToolUse guard and the
-    SessionStart session check -- because a machine re-wiring after a release
-    needs both to follow, and doing them in two passes would mean two backups
-    of the same file for one logical edit."""
+    All three hooks are repointed in the one pass -- the PreToolUse guard, the
+    SessionStart session check and the PostToolUse browse unlock -- because a
+    machine re-wiring after a release needs all of them to follow, and doing
+    them separately would mean three backups of the same file for one logical
+    edit."""
     text = _repoint_one(text, _text_pattern(), NEW_HOOK)
     if SESSION_CHECK_HOOK:
         text = _repoint_one(text, _session_text_pattern(), SESSION_CHECK_HOOK)
+    if BROWSE_UNLOCK_HOOK:
+        text = _repoint_one(text, _browse_text_pattern(), BROWSE_UNLOCK_HOOK)
     return text
 
 
@@ -378,8 +456,18 @@ def process(path):
         hook_path == _json_inner(SESSION_CHECK_HOOK)
         for _prefix, hook_path in session_matches)
 
-    needs_repoint = needs_repoint or needs_repoint_session
-    needs_add = needs_add_pretooluse or needs_add_session or needs_belay or needs_function_hooks
+    # The PostToolUse browse unlock, the same two questions again.
+    browse_ok = _browse_unlock_ok()
+    browse_missing_hook = bool(BROWSE_UNLOCK and BROWSE_UNLOCK_HOOK and not browse_ok)
+    browse_matches = [(m[0], m[1]) for m in _browse_text_pattern().findall(text)]
+    needs_add_browse = browse_ok and not browse_matches
+    needs_repoint_browse = bool(browse_matches) and BROWSE_UNLOCK_HOOK and not all(
+        hook_path == _json_inner(BROWSE_UNLOCK_HOOK)
+        for _prefix, hook_path in browse_matches)
+
+    needs_repoint = needs_repoint or needs_repoint_session or needs_repoint_browse
+    needs_add = (needs_add_pretooluse or needs_add_session or needs_add_browse
+                 or needs_belay or needs_function_hooks)
 
     if not (needs_repoint or needs_add):
         if matches:
@@ -392,6 +480,9 @@ def process(path):
         if session_missing_hook:
             print("%s: --session-check given but no hook at %s, skipping "
                   "SessionStart entry" % (path, SESSION_CHECK_HOOK or "<unset>"))
+        if browse_missing_hook:
+            print("%s: no browse-unlock hook at %s, skipping PostToolUse entry"
+                  % (path, BROWSE_UNLOCK_HOOK or "<unset>"))
         return False
 
     # A pure repoint -- nothing to ADD -- keeps the byte-preserving text
@@ -406,9 +497,17 @@ def process(path):
             print("%s: substitution would produce invalid JSON (%s), refusing" % (path, exc),
                   file=sys.stderr)
             return False
-        pairs = ([(m, NEW_HOOK) for m in matches]
-                 + [(m, SESSION_CHECK_HOOK) for m in session_matches])
-        total = len(matches) + len(session_matches)
+        # Only the hooks this run was actually told where to find are counted
+        # or printed: _repoint_text leaves the others alone, so counting them
+        # would report an edit that did not happen.
+        pairs = [(m, NEW_HOOK) for m in matches]
+        total = len(matches)
+        if SESSION_CHECK_HOOK:
+            pairs += [(m, SESSION_CHECK_HOOK) for m in session_matches]
+            total += len(session_matches)
+        if BROWSE_UNLOCK_HOOK:
+            pairs += [(m, BROWSE_UNLOCK_HOOK) for m in browse_matches]
+            total += len(browse_matches)
         if not APPLY:
             print("%s: would repoint %d hook path(s)" % (path, total))
             for (prefix, hook_path), target in sorted(set(pairs)):
@@ -435,6 +534,10 @@ def process(path):
                 new_data, _session_cmd_pattern(), SESSION_CHECK_HOOK):
             actions.append("repointed %d session-check hook path(s) to %s"
                            % (len(session_matches), SESSION_CHECK_HOOK))
+        if needs_repoint_browse and _structural_repoint(
+                new_data, _browse_cmd_pattern(), BROWSE_UNLOCK_HOOK):
+            actions.append("repointed %d browse-unlock hook path(s) to %s"
+                           % (len(browse_matches), BROWSE_UNLOCK_HOOK))
     if needs_add_pretooluse:
         if _append_hook(new_data, "PreToolUse", _pretooluse_block(), NEW_HOOK_COMMAND):
             actions.append('added PreToolUse: matcher "*", command "%s", timeout %d'
@@ -445,6 +548,13 @@ def process(path):
             actions.append('added SessionStart (session check): matcher "*", '
                            'command "%s", timeout %d'
                            % (SESSION_CHECK_COMMAND, SESSION_CHECK_TIMEOUT))
+    if needs_add_browse:
+        if _append_hook(new_data, "PostToolUse", _browse_unlock_block(),
+                        BROWSE_UNLOCK_COMMAND, BROWSE_UNLOCK_MATCHER):
+            actions.append('added PostToolUse (browse unlock): matcher "%s", '
+                           'command "%s", timeout %d'
+                           % (BROWSE_UNLOCK_MATCHER, BROWSE_UNLOCK_COMMAND,
+                              BROWSE_UNLOCK_TIMEOUT))
     if needs_belay:
         if _append_hook(new_data, "Stop", _belay_block(), BELAY_WRAPPER):
             actions.append('added Stop (belay): matcher "*", command "%s", timeout %d'
@@ -470,6 +580,9 @@ def process(path):
         if session_missing_hook:
             print("  (--session-check given but no hook at %s, skipping "
                   "SessionStart entry)" % (SESSION_CHECK_HOOK or "<unset>"))
+        if browse_missing_hook:
+            print("  (no browse-unlock hook at %s, skipping PostToolUse entry)"
+                  % (BROWSE_UNLOCK_HOOK or "<unset>"))
         return True
 
     backup = _backup(path)
@@ -484,6 +597,9 @@ def process(path):
     if session_missing_hook:
         print("  (--session-check given but no hook at %s, skipping "
               "SessionStart entry)" % (SESSION_CHECK_HOOK or "<unset>"))
+    if browse_missing_hook:
+        print("  (no browse-unlock hook at %s, skipping PostToolUse entry)"
+              % (BROWSE_UNLOCK_HOOK or "<unset>"))
     return True
 
 

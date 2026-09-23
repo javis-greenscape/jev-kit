@@ -55,7 +55,7 @@ Components (default: --guard --session-check --daemon --monitoring
   --tuning       the unattended tuning timer
   --monitoring   the five-minute health check timer
   --filesearch   the per-user plocate index and its hourly timer
-  --browser      clone browser-use/jev-ultrafast at a pin and patch it
+  --browser      sync the vendored browser-use/jev-ultrafast environment
   --browse-mcp   check the 'browse' MCP server over that clone and print
                  (never apply) the mcpServers block for ~/.claude.json
   --review       clone devagrawal09/jev-review at a pin (needs Node 24)
@@ -248,7 +248,7 @@ if command -v uv >/dev/null 2>&1; then
   ok "uv $(uv --version 2>/dev/null | head -1)"
 else
   if [ "$WANT_BROWSER" = "1" ]; then
-    warn "uv not found; --browser will clone and patch but not sync dependencies"
+    warn "uv not found; --browser cannot sync the browser agent's dependencies"
   else
     warn "uv not found (only needed for --browser)"
   fi
@@ -493,6 +493,7 @@ if [ "$WANT_GUARD" = "1" ]; then
 
   HOOK="$AIRLOCK_HOME/current/hooks/airlock.py"
   SESSION_CHECK_HOOK="$AIRLOCK_HOME/current/hooks/airlock_session_check.py"
+  BROWSE_UNLOCK_HOOK="$AIRLOCK_HOME/current/hooks/airlock_browse_unlock.py"
   echo
   echo "   The settings.json edit. Register this ONE entry, matcher \"*\" -- the"
   echo "   rules table filters in code, far more cheaply than a regex matcher:"
@@ -537,6 +538,28 @@ EOF
 EOF
     echo
   fi
+  echo "   And the PostToolUse entry, the only way past R11. When the kit's own"
+  echo "   \`browse\` tool gives up on a goal, this records it and R11 warns"
+  echo "   instead of blocking for the next 30 minutes of that session. It is"
+  echo "   the one entry with a real matcher, because it has one tool to watch:"
+  echo
+  cat <<EOF
+     {
+       "hooks": {
+         "PostToolUse": [
+           {
+             "matcher": "mcp__browse__browse",
+             "hooks": [
+               { "type": "command",
+                 "command": "$PY $BROWSE_UNLOCK_HOOK",
+                 "timeout": 5 }
+             ]
+           }
+         ]
+       }
+     }
+EOF
+  echo
   if [ "${#WIRE_FILES[@]}" -gt 0 ]; then
     echo "   --wire given; applying to ${#WIRE_FILES[@]} file(s) (each backed up first):"
     WIRE_EXTRA_FLAGS=()
@@ -695,7 +718,8 @@ if [ "$WANT_BROWSER" = "1" ]; then
   "$REPO_ROOT/browser/install.sh" || warn "browser/install.sh reported a problem"
 fi
 
-# After --browser on purpose: the server drives the clone that step makes.
+# After --browser on purpose: the server drives the vendored agent that step
+# builds an environment for.
 if [ "$WANT_BROWSE_MCP" = "1" ]; then
   step "Browse MCP server"
   "$REPO_ROOT/browse/install.sh" || warn "browse/install.sh reported a problem"
