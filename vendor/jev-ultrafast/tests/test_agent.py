@@ -915,3 +915,83 @@ def test_the_threshold_can_be_set_per_operation(runner, monkeypatch):
     runner.command("act", {"fingerprint": runner.state["page"]["fingerprint"]})
     assert runner.state["status"] == "done"
 
+
+# --- the planner loop ---------------------------------------------------------------
+
+
+from jev_ultrafast import planner as plan  # noqa: E402
+
+
+@pytest.mark.parametrize("line,expected", [
+    ("CLICK Bicycle wheel", ("CLICK", "Bicycle wheel")),
+    ('click: "Bicycle wheel"', ("CLICK", "Bicycle wheel")),
+    ("FIND Nobel laureates in Physics", ("FIND", "Nobel laureates in Physics")),
+    ("TYPE Search = Marie Curie", ("TYPE", ("Search", "Marie Curie"))),
+    ("DONE 1903", ("DONE", "1903")),
+    ("DONE", ("DONE", "ok")),
+    ("FIND", (None, None)),
+    ("TYPE Search", (None, None)),
+    ("", (None, None)),
+    ("Clicking is next", ("STEP", "Clicking is next")),
+    ("FINDING nothing", ("STEP", "FINDING nothing")),
+])
+def test_planner_lines_parse(line, expected):
+    assert plan.parse(line) == expected
+
+
+def test_find_returns_matching_rows_best_first():
+    links = [{"role": "link", "label": "Physics"}, {"role": "link", "label": "Chemistry"},
+             {"role": "link", "label": "List of Nobel laureates in Physics (below)"},
+             {"role": "link", "label": "Nobel Prize"}]
+    rows = plan.matching(links, "Nobel laureates in Physics")
+    assert [r["label"] for r in rows] == ["List of Nobel laureates in Physics (below)", "Physics", "Nobel Prize"]
+    assert plan.matching(links, "zebra") == []
+
+
+class FakePlanner:
+    model = "fake"
+
+    def __init__(self, answers):
+        self.answers, self.prompts = list(answers), []
+
+    def ask(self, prompt, timeout=None):
+        self.prompts.append(json.loads(prompt))
+        return {"result": self.answers.pop(0), "total_cost_usd": 0.01, "usage": {"input_tokens": 100}}
+
+
+def test_a_find_shows_the_planner_what_the_table_left_out():
+    far = {"role": "link", "label": "Bicycle wheel (below)"}
+    pages = {"start": {"final_url": "https://w/start", "title": "Start", "text": "",
+                       "links": [{"role": "link", "label": "Art"}]}}
+    looks, steps = [], []
+
+    def look(url, rank):
+        looks.append((url, rank))
+        if len(looks) == 1:
+            return pages["start"]
+        return dict(pages["start"], links=[{"role": "link", "label": "Art"}, far])
+
+    def step(goal, url, rank, _deadline):
+        steps.append((goal, url, rank))
+        return {"final_url": "https://w/Bicycle_wheel", "title": "Bicycle wheel", "text": "", "links": []}
+
+    planner = FakePlanner(["FIND bicycle wheel", "CLICK Bicycle wheel (below)", "DONE ok"])
+    out = plan.run("Open the Bicycle wheel article", "https://w/start", planner, step, look, 60)
+    assert looks[1] == ("https://w/start", "bicycle wheel")
+    assert planner.prompts[1]["found"]["elements"] == ["link Bicycle wheel (below)"]
+    assert "elements" not in planner.prompts[1]
+    assert steps == [('Click the element labelled "Bicycle wheel (below)".', "https://w/start",
+                      "Bicycle wheel (below)\nOpen the Bicycle wheel article")]
+    assert out["page"]["final_url"] == "https://w/Bicycle_wheel"
+    assert out["plan"]["turns"] == 3 and out["plan"]["finds"] == 1
+    assert out["plan"]["stopped"] == "planner said DONE" and out["plan"]["cost_usd"] == 0.03
+
+
+def test_a_failed_step_stops_the_loop_with_the_page_it_had():
+    start = {"final_url": "https://w/start", "title": "Start", "text": "", "links": []}
+
+    def step(*_args):
+        raise RuntimeError("boom")
+
+    out = plan.run("t", "https://w/start", FakePlanner(["CLICK X"]), step, lambda *_: start, 60)
+    assert out["page"] is start and out["plan"]["stopped"].startswith("the CLICK step failed")
