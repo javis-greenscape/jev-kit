@@ -1013,3 +1013,13 @@ def test_a_failed_step_stops_the_loop_with_the_page_it_had():
 
     out = plan.run("t", "https://w/start", FakePlanner(["CLICK X"]), step, lambda *_: start, 60)
     assert out["page"] is start and out["plan"]["stopped"].startswith("the CLICK step failed")
+
+
+def test_a_target_that_is_always_stale_stops_the_run_instead_of_the_budget(runner, monkeypatch):
+    runner.state["browser"].act.side_effect = StalePage("Target changed or is covered.")
+    monkeypatch.setattr(loop, "decide", lambda *_a: decision("e3"))
+    for _ in range(loop.MAX_STALE_STREAK):
+        runner.command("tick")
+    assert runner.state["status"] == "blocked"
+    assert "stale" in runner.state["stopped"]
+    assert len(runner.state["decisions"]) == loop.MAX_STALE_STREAK

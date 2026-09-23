@@ -20,6 +20,9 @@ from .questions import MAX_STEPS
 STOP_CONFIDENCE_DEFAULTS = {"DONE": 0.9, "BLOCKED": 0.5}
 
 
+MAX_STALE_STREAK = 8
+
+
 def stop_threshold(operation):
     try:
         return float(os.environ["JEV_%s_CONFIDENCE" % operation])
@@ -81,6 +84,15 @@ class Agent:
             except StalePage:
                 state["decision"] = None
                 state["status"] = "ready"
+                # A target that goes stale every time it is chosen is never executed, so it never
+                # reaches history and the no-progress stop never sees it. Count consecutive stale
+                # attempts and stop the run instead of spending the whole decision budget.
+                state["stale_streak"] = state.get("stale_streak", 0) + 1
+                if state["stale_streak"] >= MAX_STALE_STREAK:
+                    state["status"] = "blocked"
+                    state["stopped"] = "the chosen target went stale %d times in a row" % MAX_STALE_STREAK
+                    state["elapsed_ms"] = round((time.perf_counter() - state["started_at"]) * 1000)
+                    return self.snapshot()
                 state["page"] = state["browser"].observe(screenshot=self.screenshots)
                 state["elapsed_ms"] = round((time.perf_counter() - state["started_at"]) * 1000)
                 return self.snapshot()
@@ -154,6 +166,7 @@ class Agent:
             state["browser"].act(action, page, text=text)
             self.pending_text = None
             state["elapsed_ms"] = round((time.perf_counter() - state["started_at"]) * 1000)
+            state["stale_streak"] = 0
             # Record execution before observing. A stale post-action observation must not erase the action.
             state["history"].append(
                 {

@@ -221,9 +221,24 @@ def browser_operation(request):
               if (action.kind==='fill' && (e.readOnly || e.getAttribute('aria-readonly')==='true')) return null;
               // Observed off-viewport: bring it into view, then resolve geometry and hit-test as usual.
               if (action.offscreen) e.scrollIntoView({block:'center',inline:'center',behavior:'instant'});
-              const r=e.getBoundingClientRect(), x=r.x+r.width/2, y=r.y+r.height/2;
-              if (!r.width || !r.height || x<0 || y<0 || x>=innerWidth || y>=innerHeight) return null;
-              if (!e.contains(document.elementFromPoint(x,y))) return null;
+              // A link that wraps onto two lines has a bounding box whose centre can sit over
+              // the next table cell; try the centre of each line box before the whole box.
+              const point=()=>{
+                for (const r of [...e.getClientRects(), e.getBoundingClientRect()]) {
+                  const x=r.x+r.width/2, y=r.y+r.height/2;
+                  if (!r.width || !r.height || x<0 || y<0 || x>=innerWidth || y>=innerHeight) continue;
+                  if (e.contains(document.elementFromPoint(x,y))) return {x,y};
+                }
+                return null;
+              };
+              // A target observed on screen can still be clipped by a scrolled table or covered
+              // by a sticky header by the time it is clicked. Bring it to the centre once and
+              // hit-test again, rather than calling the page stale and choosing the same
+              // element again forever.
+              let at=point();
+              if (!at) { e.scrollIntoView({block:'center',inline:'center',behavior:'instant'}); at=point(); }
+              if (!at) return null;
+              const {x,y}=at;
               if (action.kind==='select') {
                 if (e.tagName!=='SELECT' || ![...e.options].some(o=>o.value===action.value &&
                     !o.disabled && !o.closest('optgroup[disabled]'))) return null;

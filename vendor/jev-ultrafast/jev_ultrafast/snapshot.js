@@ -104,6 +104,18 @@
       // and geometry is still re-resolved and hit-tested there. Fields are deliberately excluded:
       // typing into something nobody has seen is not the same kind of safe.
       if (rname!=='link' && rname!=='button') continue;
+      // A link inside a collapsed box (a Wikipedia navbox, a folded accordion) passes the CSS
+      // visibility check but is clipped to nothing by an ancestor, and no scroll can bring it
+      // into view: the click is refused as covered, every time. Skip anything an overflow
+      // ancestor clips away entirely.
+      let clipped=false;
+      for (let a=e.parentElement; a && a!==document.body && !clipped; a=a.parentElement) {
+        const st=getComputedStyle(a);
+        if (st.overflowX==='visible' && st.overflowY==='visible') continue;
+        const c=a.getBoundingClientRect();
+        clipped=r.right<=c.left || r.left>=c.right || r.bottom<=c.top || r.top>=c.bottom;
+      }
+      if (clipped) continue;
       const where=y<0 ? 'above' : y>=innerHeight ? 'below' : 'offscreen';
       const plain=(name(e)||rname)+fragment;
       offscreen.push({node:identity(e),role:rname,label:plain+' ('+where+')',
