@@ -860,9 +860,19 @@ class TestRunnerPlan(unittest.TestCase):
 
         fake_browser = type(sys)("jev_ultrafast.browser")
         fake_browser.Browser = Tab
+        final_reads = []
+
+        def look_in(_browser, _request, _rank_goal, screenshot=None):
+            # The planner's own looks pass no screenshot flag; the read of the tab just before
+            # it closes does, and it sees the page the last step left.
+            if screenshot is None:
+                return start
+            final_reads.append(screenshot)
+            return end
+
         with mock.patch.object(runner, "planner_for", return_value=planner) as chosen, \
                 mock.patch.dict(sys.modules, {"jev_ultrafast.browser": fake_browser}), \
-                mock.patch.object(runner, "_look_in", return_value=start), \
+                mock.patch.object(runner, "_look_in", side_effect=look_in), \
                 mock.patch.object(runner, "_check_done", return_value={"probability": 0.97, "latency_ms": 4}), \
                 mock.patch.object(runner, "_agent_step", return_value=(dict(end, status="done", steps=1),
                                                                         state)) as step:
@@ -871,6 +881,7 @@ class TestRunnerPlan(unittest.TestCase):
         chosen.assert_called_once_with("haiku")
         self.assertEqual(step.call_args[0][1], 'Click the element labelled "Bicycle wheel".')
         self.assertEqual(asked[0]["elements"], ["link Bicycle wheel"])
+        self.assertEqual(final_reads, [False])
         self.assertEqual(out["final_url"], "https://w/Bicycle_wheel")
         self.assertEqual(out["extracted"], "Bicycle wheel")
         self.assertEqual(out["status"], "done")

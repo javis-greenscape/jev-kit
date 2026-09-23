@@ -217,11 +217,11 @@ def plan(request):
         try:
             outcome = plan_module.run(task, request["start_url"], planner, step, look, budget_s,
                                       verify=verify)
-            # Every step already read its page with the caller's `extract`, so the last one is
-            # the answer. Only a screenshot needs one more read, of the same tab.
+            # Read the tab once more before it closes: a redirect or live update after the last
+            # step would otherwise return an older page than the one the DONE check passed.
             final = dict(outcome["page"])
-            if request.get("screenshot_path"):
-                final.update(_look_in(browser, request, task, screenshot=True))
+            final.update(_look_in(browser, request, task,
+                                  screenshot=bool(request.get("screenshot_path"))))
         finally:
             browser.close()
     finally:

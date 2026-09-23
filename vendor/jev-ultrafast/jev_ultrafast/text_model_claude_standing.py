@@ -239,7 +239,9 @@ class StandingTextModel:
 
     def _start_background_replacement(self):
         with self._lock:
-            if self._replacing:
+            # A live replacement is already waiting: a second one would overwrite it and leave
+            # the first running, untracked by anything that will ever use or stop it.
+            if self._replacing or (self._next is not None and self._next.alive()):
                 return
             self._replacing = True
 
@@ -252,8 +254,15 @@ class StandingTextModel:
                     self._replacing = False
                 return
             with self._lock:
-                self._next = child
+                spare = None
+                if self._next is not None and self._next.alive():
+                    spare = child
+                else:
+                    self._next = child
                 self._replacing = False
+            if spare is not None:
+                spare.terminate()
+                _TRACKED_CHILDREN.discard(spare)
 
         threading.Thread(target=_bg, daemon=True).start()
 

@@ -1138,3 +1138,61 @@ def test_the_page_check_is_one_noul_with_the_task_as_data(monkeypatch):
     assert question["type"] == "noul"
     assert question["instructions"] == {"question": model.TASK_COMPLETE, "task": "Find a book"}
     assert "`task`" in model.TASK_COMPLETE
+
+
+class _FakeChild:
+    def __init__(self):
+        self.terminated = False
+
+    def alive(self):
+        return not self.terminated
+
+    def terminate(self):
+        self.terminated = True
+
+
+class _SyncThread:
+    def __init__(self, target, daemon=None):
+        self._target = target
+
+    def start(self):
+        self._target()
+
+
+def _standing(monkeypatch, spawn):
+    from jev_ultrafast import text_model_claude_standing as standing
+
+    monkeypatch.setattr(standing.threading, "Thread", _SyncThread)
+    model = standing.StandingTextModel()
+    monkeypatch.setattr(model, "_spawn", lambda: spawn(model))
+    return model
+
+
+def test_a_waiting_replacement_is_reused_not_doubled(monkeypatch):
+    spawned = []
+
+    def spawn(_model):
+        spawned.append(_FakeChild())
+        return spawned[-1]
+
+    model = _standing(monkeypatch, spawn)
+    model.new_session()
+    model.new_session()
+    assert len(spawned) == 1
+    assert model._next is spawned[0] and not spawned[0].terminated
+
+
+def test_a_replacement_that_loses_the_race_is_stopped(monkeypatch):
+    waiting = _FakeChild()
+    spawned = []
+
+    def spawn(model):
+        # Another replacement lands while this one is still starting.
+        model._next = waiting
+        spawned.append(_FakeChild())
+        return spawned[-1]
+
+    model = _standing(monkeypatch, spawn)
+    model.new_session()
+    assert model._next is waiting
+    assert spawned[0].terminated
