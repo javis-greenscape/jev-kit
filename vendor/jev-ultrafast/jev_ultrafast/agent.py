@@ -139,7 +139,6 @@ class Agent:
             if len(state["history"]) >= MAX_STEPS:
                 state["status"] = "blocked"
                 raise ValueError(f"Stopped at the {MAX_STEPS}-action demo budget")
-            state["stop_rechecked"] = False
             text, helper = None, None
             if action["kind"] == "fill":
                 if not state["browser"].fresh(page):
@@ -179,8 +178,14 @@ class Agent:
             )
             state["page"] = state["browser"].observe(screenshot=self.screenshots)
             state["elapsed_ms"] = round((time.perf_counter() - state["started_at"]) * 1000)
+            changed = state["page"]["fingerprint"] != page["fingerprint"]
+            if changed:
+                # Only an action that changed the page re-arms the gate. A WAIT or a no-op click
+                # does not, or a low-confidence BLOCKED, WAIT, BLOCKED, ... cycle would recheck
+                # forever and run the decision budget out.
+                state["stop_rechecked"] = False
             state["history"][-1].update(
-                page_changed=state["page"]["fingerprint"] != page["fingerprint"],
+                page_changed=changed,
                 url=state["page"]["url"],
                 elapsed_ms=state["elapsed_ms"],
             )

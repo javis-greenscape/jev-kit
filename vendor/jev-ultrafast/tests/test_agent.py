@@ -899,9 +899,24 @@ def test_a_confident_done_ends_the_run_at_once(runner):
     runner.state["browser"].observe.assert_not_called()
 
 
-def test_an_executed_action_rearms_the_gate(runner):
+def test_only_an_action_that_changed_the_page_rearms_the_gate(runner):
+    runner.state["decision"] = stop_decision("BLOCKED", 0.3)
+    runner.command("act", {"fingerprint": runner.state["page"]["fingerprint"]})
+    # A WAIT that leaves the page as it was does not re-arm: the next BLOCKED stands.
+    runner.state["decision"] = decision("wait")
+    runner.command("act", {"fingerprint": runner.state["page"]["fingerprint"]})
+    runner.state["decision"] = stop_decision("BLOCKED", 0.3)
+    runner.command("act", {"fingerprint": runner.state["page"]["fingerprint"]})
+    assert runner.state["status"] == "blocked" and len(runner.state["rechecks"]) == 1
+
+
+def test_an_action_that_changed_the_page_rearms_the_gate(runner):
     runner.state["decision"] = stop_decision("DONE", 0.3)
     runner.command("act", {"fingerprint": runner.state["page"]["fingerprint"]})
+    moved = deepcopy(runner.state["page"])
+    moved["url"] = "https://example.test/next"
+    moved["fingerprint"] = fingerprint(moved)
+    runner.state["browser"].observe.return_value = moved
     runner.state["decision"] = decision("e3")
     runner.command("act", {"fingerprint": runner.state["page"]["fingerprint"]})
     runner.state["decision"] = stop_decision("DONE", 0.3)
