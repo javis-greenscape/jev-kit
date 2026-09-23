@@ -228,6 +228,10 @@ def extract_final_url(text):
     urls = []
     for m in re.finditer(r"https?://[^\s\"'>`]+", text or ""):
         u = m.group(0).rstrip(".,;:")
+        # Sonnet wraps its final-URL line in markdown bold/italics
+        # ("**https://...**"), and `*` is a legal URL character, so it has
+        # to be stripped explicitly rather than left to the character class.
+        u = u.rstrip("*_")
         while u.endswith(")") and u.count("(") < u.count(")"):
             u = u[:-1]
         urls.append(u)
