@@ -1,12 +1,12 @@
-"""Head-to-head on bench/wiki_tasks.py: Jev through `browse`, against a Sonnet
-Claude Code session driving Playwright MCP.
+"""Three ways to do bench/wiki_tasks.py: Jev alone through `browse`, a Sonnet
+Claude Code session driving Playwright MCP, and Sonnet planning the route while
+`browse` executes each step.
 
-    uv run python bench/run_wiki_bench.py            # 8 tasks x 3 reps x 2 arms
+    uv run python bench/run_wiki_bench.py            # 8 tasks x 3 reps x 3 arms
     uv run python bench/run_wiki_bench.py --reps 1   # a shorter smoke sweep
 
-Both arms get the same goal text and the same 180 s budget, and the two arms
-run one after another, never side by side, so neither is timed against the
-other's load.
+Every arm gets the same goal text and the same 180 s budget, and the arms run
+one after another, never side by side, so none is timed against another's load.
 
   jev              One `browse` MCP server is started for the whole sweep and
                    kept open across every jev task and rep, the way a real
@@ -27,14 +27,23 @@ other's load.
                    and fetch tools disallowed so the page is the only source.
                    Cost and tokens come out of `--output-format json`; they
                    are never computed from rates.
+  sonnet-plans-jev The intended shape: the same Sonnet session, isolated the
+                   same way, with the installed release's `browse` server as
+                   its only tool. Claude plans the route and hands `browse`
+                   one or two explicit steps at a time; `browse` executes them
+                   and says where it ended. It starts its own server per run,
+                   so unlike the jev arm every run pays a cold start. The row
+                   carries `browse_calls` and `browse_ms`, the summed `timing`
+                   the calls report, so the time inside the tool can be told
+                   apart from the time Claude spent planning.
 
-Neither arm is ever asked to report a fact and neither is believed about its
-own success. Group A tasks name every hop and end "Stop when the X article is
+No arm is ever asked to report a fact and none is believed about its own
+success. Group A tasks name every hop and end "Stop when the X article is
 open" - the scorer, not the arm, reads the fact off the final page:
 `browse`'s own `text`/`extracted` for jev, and an independent urllib fetch of
-`final_url` (wiki_tasks.fetch_page_text) for sonnet, so both arms are scored
-from the same kind of source. Group B is the old open-ended pair, kept as a
-labelled contrast; it never checks a fact, only the final URL.
+`final_url` (wiki_tasks.fetch_page_text) for the two Sonnet arms, so every arm
+is scored from the same kind of source. Group B is the old open-ended pair,
+kept as a labelled contrast; it never checks a fact, only the final URL.
 
 Rows land in bench/results-wiki-<timestamp>.jsonl.
 """
@@ -58,6 +67,7 @@ sys.path.insert(0, str(BENCH_DIR))
 
 from wiki_tasks import TASKS, check, fetch_page_text  # noqa: E402
 
+ARMS = ("jev", "sonnet-playwright", "sonnet-plans-jev")
 RUN_BUDGET_S = 180.0
 KILL_GRACE_S = 20.0
 DEFAULT_BROWSE_SERVER = Path.home() / ".local/share/airlock/current/browse/server.py"
@@ -302,6 +312,151 @@ def run_sonnet(task, mcp_config, settings_file, log_path):
     return row
 
 
+# --- arm: sonnet planning the route and handing each step to `browse` ---------
+
+# The intended shape: Claude plans, Jev executes. `browse` is fast at "click the
+# link that says X" and cannot plan or know a fact; a Claude session can plan and
+# cannot see the page. This arm gives each of them only the half it is good at.
+PLANS_JEV_SUFFIX = " Use the browse tool. When you are done, say the final URL you ended on."
+PLANS_JEV_SYSTEM = (
+    "You have one tool: `browse`. It drives a real browser. It executes concrete on-screen "
+    "steps quickly, but it cannot plan and it does not know any facts. You do the planning.\n"
+    "- Work the route out yourself, then call `browse` with one or two explicit steps at a "
+    "time. Never hand it the whole multi-hop task.\n"
+    "- Write the goal as the literal clicks or keystrokes to perform, naming the exact link "
+    "text to click.\n"
+    "- Set `start_url` to the page you are on now. For the first call that is the page the "
+    "task starts on.\n"
+    "- The reply is JSON. Read `final_url` for where you now are and `text` for what the page "
+    "says, and continue from there. Do not assume a call went where you meant it to.\n"
+    "- Pass `extract` with a CSS selector when you need particular text off the page.\n"
+    "- A reply with `status` of `blocked` means it could not find what you named. Reword the "
+    "step or split it, rather than repeating it unchanged."
+)
+
+
+def parse_stream(stdout):
+    """(events, browse_calls, browse_ms) out of one `--output-format stream-json` run.
+
+    `browse_ms` is the sum of the `timing.total_ms` each `browse` reply carries: the time
+    inside the tool, which the session's own wall time contains. The difference between the
+    two is what Claude spent planning."""
+    events, calls, browse_ms = [], 0, 0
+    for line in (stdout or "").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        events.append(event)
+        content = ((event.get("message") or {}).get("content")) or []
+        if not isinstance(content, list):
+            continue
+        for block in content:
+            if not isinstance(block, dict):
+                continue
+            if block.get("type") == "tool_use" and str(block.get("name", "")).endswith("browse"):
+                calls += 1
+            if block.get("type") == "tool_result":
+                for part in block.get("content") or []:
+                    if not isinstance(part, dict) or part.get("type") != "text":
+                        continue
+                    try:
+                        payload = json.loads(part.get("text") or "")
+                    except (json.JSONDecodeError, TypeError):
+                        continue
+                    if isinstance(payload, dict):
+                        browse_ms += ((payload.get("timing") or {}).get("total_ms")) or 0
+    return events, calls, browse_ms
+
+
+def last_browse_url(events):
+    """The `final_url` of the last `browse` reply, which is where the session actually ended."""
+    url = None
+    for event in events:
+        content = ((event.get("message") or {}).get("content")) or []
+        if not isinstance(content, list):
+            continue
+        for block in content:
+            if not isinstance(block, dict) or block.get("type") != "tool_result":
+                continue
+            for part in block.get("content") or []:
+                if not isinstance(part, dict) or part.get("type") != "text":
+                    continue
+                try:
+                    payload = json.loads(part.get("text") or "")
+                except (json.JSONDecodeError, TypeError):
+                    continue
+                if isinstance(payload, dict) and payload.get("final_url"):
+                    url = payload["final_url"]
+    return url
+
+
+def run_sonnet_plans_jev(task, mcp_config, settings_file, log_path):
+    row = {"arm": "sonnet-plans-jev", "task_id": task["id"], "group": task["group"]}
+    cmd = [
+        "claude", "-p", "--model", "sonnet",
+        "--output-format", "stream-json", "--verbose",
+        "--permission-mode", "bypassPermissions",
+        "--mcp-config", str(mcp_config), "--strict-mcp-config",
+        "--settings", str(settings_file), "--setting-sources", "",
+        "--append-system-prompt", PLANS_JEV_SYSTEM,
+        "--disallowedTools", *BLOCKED_TOOLS,
+    ]
+    started = time.perf_counter()
+    try:
+        proc = subprocess.run(
+            cmd, input=task["goal"] + PLANS_JEV_SUFFIX,
+            capture_output=True, text=True, timeout=RUN_BUDGET_S,
+            start_new_session=True,
+        )
+        stdout, stderr, returncode = proc.stdout, proc.stderr, proc.returncode
+        timed_out = False
+    except subprocess.TimeoutExpired as exc:
+        stdout = exc.stdout.decode() if isinstance(exc.stdout, bytes) else (exc.stdout or "")
+        stderr, returncode, timed_out = "", None, True
+    row["wall_s"] = round(time.perf_counter() - started, 2)
+    with open(log_path, "a") as fh:
+        fh.write("\n=== %s ===\n%s\n" % (task["id"], (stderr or "")[-2000:]))
+    events, calls, browse_ms = parse_stream(stdout)
+    row["browse_calls"] = calls
+    row["browse_ms"] = browse_ms
+    if timed_out:
+        row.update(passed=False, reason="timed out at %.0fs" % RUN_BUDGET_S,
+                   steps=None, final_url=None, cost_usd=None, tokens=None)
+        return row
+    result = next((e for e in reversed(events) if e.get("type") == "result"), None)
+    if result is None:
+        row.update(passed=False, steps=None, final_url=None, cost_usd=None, tokens=None,
+                   reason="no result event in the session stream (exit %s): %s"
+                          % (returncode, (stdout or "")[-300:]))
+        return row
+    final_text = result.get("result") or ""
+    # Where it ended is read off the last `browse` reply, not off the session's prose; the
+    # stated URL is only the fallback when no call returned one.
+    final_url = last_browse_url(events) or extract_final_url(final_text)
+    page_text = fetch_page_text(final_url) if final_url else ""
+    passed, reason = check(task["id"], final_url, page_text)
+    usage = result.get("usage") or {}
+    row.update(
+        passed=passed, reason=reason, final_url=final_url,
+        steps=result.get("num_turns"),
+        cost_usd=result.get("total_cost_usd"),
+        tokens={
+            "input": usage.get("input_tokens"),
+            "output": usage.get("output_tokens"),
+            "cache_read": usage.get("cache_read_input_tokens"),
+            "cache_creation": usage.get("cache_creation_input_tokens"),
+        },
+        duration_ms=result.get("duration_ms"),
+        final_text=final_text[:1200],
+        returncode=returncode,
+    )
+    return row
+
+
 # --- the sweep ----------------------------------------------------------------
 
 
@@ -317,7 +472,7 @@ def summarise(rows):
         lines.append("")
         lines.append("| arm | pass rate | median s (passes) | p90 s (passes) | median cost USD |")
         lines.append("|---|---|---|---|---|")
-        for arm in ("jev", "sonnet-playwright"):
+        for arm in ARMS:
             mine = [r for r in group_rows if r["arm"] == arm]
             if not mine:
                 continue
@@ -331,16 +486,37 @@ def summarise(rows):
                          % (arm, len(passes), len(mine), 100.0 * len(passes) / len(mine),
                             median, p90, cost))
         lines.append("")
-        lines.append("| task | jev | sonnet-playwright |")
-        lines.append("|---|---|---|")
+        lines.append("| task | " + " | ".join(ARMS) + " |")
+        lines.append("|---" * (len(ARMS) + 1) + "|")
         for task in TASKS:
             if task["group"] != group:
                 continue
             cells = []
-            for arm in ("jev", "sonnet-playwright"):
+            for arm in ARMS:
                 mine = [r for r in group_rows if r["arm"] == arm and r["task_id"] == task["id"]]
                 cells.append("%d/%d" % (sum(1 for r in mine if r.get("passed")), len(mine)))
-            lines.append("| %s | %s | %s |" % (task["id"], cells[0], cells[1]))
+            lines.append("| %s | %s |" % (task["id"], " | ".join(cells)))
+        lines.append("")
+    plans = [r for r in rows if r["arm"] == "sonnet-plans-jev"]
+    if plans:
+        lines.append("### sonnet-plans-jev: where its wall time went")
+        lines.append("")
+        lines.append("| group | runs | median browse calls | median browse s | median claude s |")
+        lines.append("|---|---|---|---|---|")
+        for group in ("A", "B"):
+            mine = [r for r in plans if r.get("group") == group]
+            if not mine:
+                continue
+            calls = sorted(r.get("browse_calls") or 0 for r in mine)
+            in_browse = sorted((r.get("browse_ms") or 0) / 1000.0 for r in mine)
+            planning = sorted(
+                (r["wall_s"] - (r.get("browse_ms") or 0) / 1000.0) for r in mine if r.get("wall_s")
+            )
+            lines.append(
+                "| %s | %d | %.0f | %.1f | %.1f |"
+                % (group, len(mine), statistics.median(calls), statistics.median(in_browse),
+                   statistics.median(planning) if planning else 0.0)
+            )
         lines.append("")
     return "\n".join(lines)
 
@@ -349,7 +525,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--reps", type=int, default=3)
     parser.add_argument("--tasks", default="", help="comma-separated task ids, default all")
-    parser.add_argument("--arms", default="jev,sonnet-playwright")
+    parser.add_argument("--arms", default=",".join(ARMS))
     args = parser.parse_args()
 
     wanted = [t for t in TASKS if not args.tasks or t["id"] in args.tasks.split(",")]
@@ -364,10 +540,19 @@ def main():
         "command": "npx",
         "args": ["@playwright/mcp@latest", "--headless", "--isolated"],
     }}}))
+    # The third arm gets the installed release's own `browse` server and nothing else. It
+    # starts one per run, so every run of this arm pays the cold start the jev arm pays once.
+    browse_mcp_config = workdir / "mcp-browse.json"
+    browse_mcp_config.write_text(json.dumps({"mcpServers": {"browse": {
+        "command": sys.executable,
+        "args": [str(Path(os.environ.get("JEV_BROWSE_SERVER") or DEFAULT_BROWSE_SERVER))],
+        "env": {"JEV_BROWSE_TIMEOUT": str(int(RUN_BUDGET_S))},
+    }}}))
     settings_file = workdir / "no-hooks.json"
     settings_file.write_text(json.dumps({"hooks": {}}))
     jev_log = workdir / "browse.log"
     sonnet_log = workdir / "sonnet.log"
+    plans_log = workdir / "plans-jev.log"
 
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     results_path = BENCH_DIR / ("results-wiki-%s.jsonl" % stamp)
@@ -382,6 +567,8 @@ def main():
                         log("--- %s rep %d arm %s ---" % (task["id"], rep, arm))
                         if arm == "jev":
                             row = jev_session.ask(task)
+                        elif arm == "sonnet-plans-jev":
+                            row = run_sonnet_plans_jev(task, browse_mcp_config, settings_file, plans_log)
                         else:
                             row = run_sonnet(task, mcp_config, settings_file, sonnet_log)
                         row["rep"] = rep
