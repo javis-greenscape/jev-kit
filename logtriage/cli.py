@@ -29,7 +29,7 @@ def _default_ask(body):
 
 
 def main(argv=None):
-    parser = argparse.ArgumentParser(description=(__doc__ or "").splitlines()[0])
+    parser = argparse.ArgumentParser(description=next(iter((__doc__ or "").splitlines()), ""))
     parser.add_argument("--config", default=None,
                         help="JSON with 'rules' and/or 'protected' (default: the built-ins)")
     parser.add_argument("--no-model", action="store_true",

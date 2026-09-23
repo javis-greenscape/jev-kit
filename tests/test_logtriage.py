@@ -18,6 +18,7 @@ import os
 import re
 import tempfile
 import unittest
+from unittest import mock
 
 from logtriage import triage as lt
 
@@ -223,6 +224,19 @@ class TestStats(unittest.TestCase):
         self.assertEqual(t.stats["by_rule"], 1)
         self.assertEqual(t.stats["protected"], 1)
         self.assertEqual(t.stats["by_model"], 1)
+
+
+class TestCli(unittest.TestCase):
+    def test_main_builds_its_parser_when___doc___is_none(self):
+        # __doc__ is None under python -OO (docstrings stripped). The parser
+        # description reads `__doc__` before argparse ever sees `--help`, so
+        # a naive `(__doc__ or "").splitlines()[0]` still raises IndexError
+        # on an empty docstring -- `"".splitlines()` is `[]`, not `[""]`.
+        from logtriage import cli
+        with mock.patch.object(cli, "__doc__", None):
+            with self.assertRaises(SystemExit) as ctx:
+                cli.main(["--help"])
+        self.assertEqual(ctx.exception.code, 0)
 
 
 if __name__ == "__main__":
