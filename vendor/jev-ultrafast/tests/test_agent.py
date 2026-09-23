@@ -86,7 +86,7 @@ def test_all_heads_are_one_request_and_only_matching_head_executes(monkeypatch):
             "model": "test",
             "answers": {
                 "operation": choice(body["questions"]["operation"]["criteria"], "TYPE_TEXT"),
-                "type_text_target": choice(["1"], "1"),
+                "type_text_target": choice(["textbox: Search"], "textbox: Search"),
                 "click_target": {"choice": "invented"},
             },
         }
@@ -105,8 +105,8 @@ def test_click_cannot_consume_a_text_target(monkeypatch):
             "model": "test",
             "answers": {
                 "operation": choice(body["questions"]["operation"]["criteria"], "CLICK"),
-                "type_text_target": choice(["1"], "1"),
-                "click_target": choice(["1", "2", "999"], "999"),
+                "type_text_target": choice(["textbox: Search"], "textbox: Search"),
+                "click_target": choice(["textbox: Search", "button: Go", "link: 999"], "link: 999"),
             },
         }
 
@@ -116,7 +116,7 @@ def test_click_cannot_consume_a_text_target(monkeypatch):
         model.choose(page(), "Find a book", [])
 
 
-def test_target_head_receives_control_state_and_full_next_step_rules(monkeypatch):
+def test_target_head_receives_control_state_and_only_its_own_rules(monkeypatch):
     p = page()
     p["actions"].insert(0, {
         "id": "toggle", "kind": "click", "label": "Free cancellation", "node": 30,
@@ -126,21 +126,134 @@ def test_target_head_receives_control_state_and_full_next_step_rules(monkeypatch
     def post(_url, _key, body):
         questions = body["questions"]
         target = questions["click_target"]
-        assert target["criteria"]["1"]["checked"] == "true"
-        assert target["criteria"]["1"]["selected"] is False
-        assert questions["operation"]["instructions"]["rules"] in target["instructions"]["rules"]
+        assert target["criteria"]["checkbox: Free cancellation"]["checked"] == "true"
+        assert target["criteria"]["checkbox: Free cancellation"]["selected"] is False
+        # One judgment per question: the operation rulebook is not repeated in a target head.
+        assert target["instructions"]["rules"] == model.TARGET.format(operation="CLICK")
+        assert questions["operation"]["instructions"]["rules"] == model.OPERATION
         return {
             "model": "test",
             "answers": {
                 "operation": choice(questions["operation"]["criteria"], "CLICK"),
-                "click_target": choice(target["criteria"], "3"),
+                "click_target": choice(target["criteria"], "button: Go"),
             },
         }
 
     monkeypatch.setenv("TYPESAFE_API_KEY", "test")
     monkeypatch.setattr(model, "post_json", post)
     d = model.choose(p, "Search with free cancellation", [])
-    assert d["choice"] == "e3"
+    assert d["choice"] == "e3" and d["target"] == "3" and d["target_name"] == "button: Go"
+
+
+# --- option names Jev can read ---------------------------------------------------
+
+
+def links_page(labels):
+    actions = [
+        {"id": "e%d" % i, "kind": "click", "label": label, "role": "link", "value": "", "node": 100 + i}
+        for i, label in enumerate(labels, 1)
+    ]
+    state = {"url": "https://example.test/", "title": "T", "text": "x" * 9000, "scroll": {"y": 0},
+             "actions": actions}
+    state["fingerprint"] = fingerprint(state)
+    return state
+
+
+def test_target_options_are_named_by_role_and_label_not_by_number(monkeypatch):
+    sent = []
+
+    def post(_url, _key, body):
+        sent.append(body)
+        criteria = body["questions"]["click_target"]["criteria"]
+        return {"model": "test", "answers": {
+            "operation": choice(body["questions"]["operation"]["criteria"], "CLICK"),
+            "click_target": choice(criteria, "link: Bicycle wheel (2)"),
+        }}
+
+    monkeypatch.setenv("TYPESAFE_API_KEY", "test")
+    monkeypatch.setattr(model, "post_json", post)
+    d = model.choose(links_page(["Bicycle wheel", "Bicycle", "Bicycle wheel"]), "Open Bicycle wheel", [])
+    names = list(sent[0]["questions"]["click_target"]["criteria"])
+    assert names == ["link: Bicycle wheel", "link: Bicycle", "link: Bicycle wheel (2)"]
+    assert not any(n.isdigit() for n in names)
+    # The name maps back to the element it was built from, and nothing else.
+    assert d["choice"] == "e3" and d["target"] == "3"
+    assert d["probabilities"] == {"e1": 0.0, "e2": 0.0, "e3": 1.0}
+    # The state's element table uses the same names, so the two can be read together.
+    assert [e["name"] for e in sent[0]["state"]["elements"]] == names
+
+
+def test_names_are_unique_deterministic_and_bounded():
+    labels = ["A", "A", "A (2)", "x" * 500, ""]
+    first = model.element_names(model.action_space(links_page(labels)["actions"])[0])
+    again = model.element_names(model.action_space(links_page(labels)["actions"])[0])
+    assert first == again
+    assert len(set(first.values())) == len(labels)
+    assert list(first.values())[:3] == ["link: A", "link: A (2)", "link: A (2) (2)"]
+    assert all(len(n) <= model.OPTION_NAME_CHARS + len("link: ") for n in first.values())
+    assert first["5"] == "link: (no name)"
+
+
+def test_select_options_carry_the_value_they_pick():
+    _, targets, _ = model.action_space(select_page(3)["actions"])
+    elements, _, _ = model.action_space(select_page(3)["actions"])
+    named = model.target_names("SELECT", targets["SELECT"], model.element_names(elements))
+    assert list(named) == ["combobox: Country \u2192 Option 0",
+                           "combobox: Country \u2192 Option 1",
+                           "combobox: Country \u2192 Option 2"]
+    assert list(named.values()) == ["1:1", "1:2", "1:3"]
+
+
+# --- page text in the state --------------------------------------------------------
+
+
+@pytest.mark.parametrize("setting,expected", [("0", None), ("1500", 1500), ("", model.PAGE_TEXT_CHARS_DEFAULT)])
+def test_page_text_is_trimmed_to_the_configured_length(monkeypatch, setting, expected):
+    monkeypatch.setenv("JEV_PAGE_TEXT_CHARS", setting)
+    body, *_ = model.build_questions(links_page(["A"]), "goal", [])
+    if expected is None:
+        assert "text" not in body["state"]["page"]
+    else:
+        assert len(body["state"]["page"]["text"]) == min(expected, 9000)
+
+
+# --- one judgment per question, in one request or two ------------------------------
+
+
+def test_sequential_shape_asks_the_target_only_after_the_operation(monkeypatch):
+    sent = []
+
+    def post(_url, _key, body):
+        sent.append(body)
+        questions = body["questions"]
+        if "operation" in questions:
+            assert set(questions) == {"operation"}
+            return {"model": "test", "usage": {"input_tokens": 10},
+                    "answers": {"operation": choice(questions["operation"]["criteria"], "CLICK")}}
+        assert set(questions) == {"click_target"}
+        return {"model": "test", "usage": {"input_tokens": 5},
+                "answers": {"click_target": choice(questions["click_target"]["criteria"], "button: Go")}}
+
+    monkeypatch.setenv("TYPESAFE_API_KEY", "test")
+    monkeypatch.setenv("JEV_DECISION_SHAPE", "sequential")
+    monkeypatch.setattr(model, "post_json", post)
+    d = model.choose(page(), "Press Go", [])
+    assert len(sent) == 2 and d["requests"] == 2 and d["shape"] == "sequential"
+    assert d["choice"] == "e3" and d["usage"] == {"input_tokens": 15}
+
+
+def test_sequential_shape_makes_one_request_when_no_target_is_needed(monkeypatch):
+    sent = []
+
+    def post(_url, _key, body):
+        sent.append(body)
+        return {"model": "test", "answers": {"operation": choice(body["questions"]["operation"]["criteria"], "DONE")}}
+
+    monkeypatch.setenv("TYPESAFE_API_KEY", "test")
+    monkeypatch.setenv("JEV_DECISION_SHAPE", "sequential")
+    monkeypatch.setattr(model, "post_json", post)
+    assert model.choose(page(), "Anything", [])["choice"] == "DONE"
+    assert len(sent) == 1
 
 
 def test_quoted_task_text_still_uses_the_llm(monkeypatch):
@@ -694,7 +807,8 @@ def test_no_request_offers_more_options_than_a_choice_allows(monkeypatch):
             "model": "test",
             "answers": {
                 "operation": choice(body["questions"]["operation"]["criteria"], "SELECT"),
-                "select_target": choice(list(body["questions"]["select_target"]["criteria"]), "1:1"),
+                "select_target": choice(list(body["questions"]["select_target"]["criteria"]),
+                                        list(body["questions"]["select_target"]["criteria"])[0]),
             },
         }
 
@@ -755,3 +869,4 @@ def test_the_standing_child_takes_a_model_and_a_system_prompt_of_its_own():
 
 def standing_index(command, flag):
     return command.index(flag)
+

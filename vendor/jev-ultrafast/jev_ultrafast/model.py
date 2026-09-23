@@ -9,7 +9,7 @@ import uuid
 
 import httpx
 
-from .questions import NEXT_ACTION, TARGET, TEXT_VALUE
+from .questions import OPERATION, TARGET, TEXT_VALUE
 
 # One client for the process, so HTTP/2 connection reuse survives between
 # decisions. It only helps a process that outlives a single run: a fresh
@@ -150,61 +150,188 @@ def cap_targets(targets):
     return capped, dropped
 
 
-def choose(state, goal, history):
+# Option names Jev can read. TypeSafe: "The option names and their descriptions are both sent
+# to the model, so write descriptions that separate the options from each other"
+# (primitives_choice.md), and "`jev-1.13` will perform better on semantic representations than
+# numeric" (model-jaggedness_jev-1.13.md). The target heads used to be keyed "1", "2", ... "250",
+# which separated nothing. Now each option is named by role and label, "link: Bicycle wheel",
+# with " (2)", " (3)" appended in table order to a name already taken, so the names are unique
+# and the same page always gets the same names. The docs give no length limit for an option
+# name; OPTION_NAME_CHARS keeps a paragraph-long accessible name from costing a paragraph of
+# tokens on every decision. The index stays the internal key: names map back in code.
+OPTION_NAME_CHARS = 80
+
+
+def _short(text, limit=OPTION_NAME_CHARS):
+    text = " ".join(str(text or "").split())
+    return text if len(text) <= limit else text[: limit - 1].rstrip() + "\u2026"
+
+
+def unique_names(bases):
+    """The bases, in order, each made unique by a " (n)" suffix. Deterministic."""
+    taken, out = set(), []
+    for base in bases:
+        name, n = base, 2
+        while name in taken:
+            name = "%s (%d)" % (base, n)
+            n += 1
+        taken.add(name)
+        out.append(name)
+    return out
+
+
+def element_names(elements):
+    """{index: "role: label"} for the element table, unique across the table."""
+    bases = ["%s: %s" % (e.get("role") or "element", _short(e.get("label")) or "(no name)") for e in elements]
+    return dict(zip((e["index"] for e in elements), unique_names(bases)))
+
+
+def target_names(operation, candidates, names):
+    """{option name: target key} for one head. A SELECT option adds the value it picks."""
+    keys = list(candidates)
+    if operation == "SELECT":
+        bases = [
+            "%s \u2192 %s" % (names[k.split(":")[0]], _short(candidates[k]["label"].split(" \u2192 ")[-1], 60))
+            for k in keys
+        ]
+    else:
+        bases = [names[k] for k in keys]
+    return dict(zip(unique_names(bases), keys))
+
+
+# How much of the page's visible text goes into Jev's state on each decision. TypeSafe:
+# "Include only the context relevant to the current questions. This helps the model avoid
+# distractions and context rot" (concepts_how-to-build-with-system-one.md), and "Accuracy
+# falls as the state grows with content unrelated to the decision ... send only the fields the
+# question needs" (model-jaggedness_jev-1.13.md). The docs give no number, so the default is
+# measured: see SPIKE-NOTES.md, "Page text in Jev's state".
+PAGE_TEXT_CHARS_DEFAULT = 6000
+
+
+def page_text_chars():
+    try:
+        value = int(os.environ.get("JEV_PAGE_TEXT_CHARS", ""))
+    except ValueError:
+        return PAGE_TEXT_CHARS_DEFAULT
+    return max(0, value)
+
+
+# "fanout": one request carrying the operation head and every target head, as upstream does
+# ("Asking a question you might not need is close to free", primitives.md). "sequential": the
+# operation first, then only the target head it needs, in a second request ("If a later
+# judgment depends on an earlier answer, make a second request in code", primitives.md). Both
+# ask one judgment per question; they differ only in round trips. Measured in SPIKE-NOTES.md,
+# "One judgment per question".
+DECISION_SHAPE_DEFAULT = "fanout"
+
+
+def decision_shape():
+    value = (os.environ.get("JEV_DECISION_SHAPE") or DECISION_SHAPE_DEFAULT).strip().lower()
+    return value if value in ("fanout", "sequential") else DECISION_SHAPE_DEFAULT
+
+
+OPERATION_LABELS = {
+    "CLICK": "Click a link, button, menu option, autocomplete suggestion, checkbox or calendar day.",
+    "TYPE_TEXT": "Enter or replace text in an editable field. A small LLM will supply the value from the goal.",
+    "SELECT": "Select an observed dropdown value.",
+}
+
+
+def build_questions(state, goal, history):
+    """(body without questions, operation head, {operation: target head}, maps) for one page."""
     elements, targets, controls = action_space(state["actions"])
     targets, omitted_targets = cap_targets(targets)
-    labels = {
-        "CLICK": "Click an element, button, menu option, autocomplete suggestion, or calendar day.",
-        "TYPE_TEXT": "Enter or replace text in an editable field. A small LLM will supply the value from the goal.",
-        "SELECT": "Select an observed dropdown value.",
-    }
-    operations = {key: labels[key] for key in targets}
+    names = element_names(elements)
+    operations = {key: OPERATION_LABELS[key] for key in targets}
     operations.update({key: value["label"] for key, value in controls.items()})
-    operations.update(DONE="Every requirement is visibly satisfied.", BLOCKED="No supported operation can progress.")
-    questions = {
-        "operation": {"type": "choice", "criteria": operations, "instructions": {"goal": goal, "rules": NEXT_ACTION}}
-    }
+    operations.update(
+        DONE="The page shows every requirement of the goal satisfied.",
+        BLOCKED="No offered operation can make progress.",
+    )
+    operation_head = {"type": "choice", "criteria": operations, "instructions": {"goal": goal, "rules": OPERATION}}
+    heads, maps = {}, {}
     for operation, candidates in targets.items():
-        questions[operation.lower() + "_target"] = {
+        named = target_names(operation, candidates, names)
+        maps[operation] = named
+        criteria = {}
+        for name, key in named.items():
+            a = candidates[key]
+            detail = {k: a[k] for k in ("checked", "selected", "expanded") if k in a}
+            value = a.get("current_value", a.get("value", ""))
+            if value and operation != "SELECT":
+                detail["current_value"] = value
+            criteria[name] = detail or None
+        heads[operation] = {
             "type": "choice",
-            "criteria": {
-                index: {
-                    "element": f"[{index}] {a['label']}",
-                    "current_value": a.get("current_value", a.get("value", "")),
-                    **{k: a[k] for k in ("role", "checked", "selected", "expanded") if k in a},
-                }
-                for index, a in candidates.items()
-            },
-            "instructions": {"goal": goal, "operation": operation, "rules": [NEXT_ACTION, TARGET]},
+            "criteria": criteria,
+            "instructions": {"goal": goal, "rules": TARGET.format(operation=operation)},
         }
+    shown = []
+    for e in elements:
+        row = {"name": names[e["index"]], "operations": e["operations"]}
+        row.update({k: e[k] for k in ("value", "checked", "selected", "expanded") if e.get(k) not in (None, "")})
+        if e.get("options"):
+            row["options"] = [o["label"].split(" \u2192 ")[-1] for o in e["options"]]
+        shown.append(row)
+    page = {k: state[k] for k in ("url", "title")}
+    limit = page_text_chars()
+    if limit:
+        page["text"] = (state.get("text") or "")[:limit]
     body = {
         "model": os.environ.get("TYPESAFE_MODEL", "jev-latest"),
         "state": {
-            "page": {k: state[k] for k in ("url", "title", "text")},
-            "elements": elements,
+            "page": page,
+            "elements": shown,
             "recent_actions": [
                 {k: h.get(k) for k in ("action", "kind", "text", "page_changed")} for h in history[-10:]
             ],
         },
-        "questions": questions,
     }
-    started = time.perf_counter()
+    return body, operation_head, heads, (targets, controls, operations, maps, omitted_targets)
+
+
+def _post(body):
     result = post_via_socket(body)
-    transport = "daemon"
-    if result is None:
-        transport = "https"
-        result = post_json("https://api.typesafe.ai/v1/systemone", os.environ["TYPESAFE_API_KEY"], body)
-    operation_answer = validate_choice(result["answers"].get("operation", {}), operations)
+    if result is not None:
+        return result, "daemon"
+    return post_json("https://api.typesafe.ai/v1/systemone", os.environ["TYPESAFE_API_KEY"], body), "https"
+
+
+def choose(state, goal, history):
+    body, operation_head, heads, (targets, controls, operations, maps, omitted_targets) = build_questions(
+        state, goal, history
+    )
+    shape = decision_shape()
+    started = time.perf_counter()
+    requests = []
+    questions = {"operation": operation_head}
+    if shape == "fanout":
+        questions.update({op.lower() + "_target": head for op, head in heads.items()})
+    result, transport = _post({**body, "questions": questions})
+    requests.append(questions)
+    answers = dict(result["answers"])
+    usage = dict(result.get("usage") or {})
+    operation_answer = validate_choice(answers.get("operation", {}), operations)
     operation = operation_answer["choice"]
-    target = None
-    target_answer = None
+    target = target_name = target_answer = None
     probabilities = {}
     if operation in targets:
+        key = operation.lower() + "_target"
+        if shape == "sequential":
+            follow = {key: heads[operation]}
+            second, _ = _post({**body, "questions": follow})
+            requests.append(follow)
+            answers[key] = second["answers"].get(key, {})
+            for k, v in (second.get("usage") or {}).items():
+                if isinstance(v, (int, float)):
+                    usage[k] = usage.get(k, 0) + v
         # Unused target heads cannot cause an action. Validate the head selected by the operation.
-        target_answer = validate_choice(result["answers"].get(operation.lower() + "_target", {}), targets[operation])
-        target = target_answer["choice"]
+        named = maps[operation]
+        target_answer = validate_choice(answers.get(key, {}), named)
+        target_name = target_answer["choice"]
+        target = named[target_name]
         choice = targets[operation][target]["id"]
-        probabilities = {a["id"]: target_answer["probabilities"][index] for index, a in targets[operation].items()}
+        probabilities = {targets[operation][k]["id"]: target_answer["probabilities"][n] for n, k in named.items()}
     else:
         choice = controls[operation]["id"] if operation in controls else operation
         probabilities[choice] = operation_answer["probabilities"][operation]
@@ -212,18 +339,21 @@ def choose(state, goal, history):
         "choice": choice,
         "operation": operation,
         "target": target,
+        "target_name": target_name,
         "confidence": operation_answer["confidence"],
         "probabilities": probabilities,
         "operation_probabilities": operation_answer["probabilities"],
         "target_probabilities": target_answer["probabilities"] if target_answer else {},
         "target_confidence": target_answer["confidence"] if target_answer else None,
-        "raw_answers": result["answers"],
+        "raw_answers": answers,
         "model": result["model"],
-        "usage": result.get("usage", {}),
+        "usage": usage,
         "transport": transport,
+        "shape": shape,
+        "requests": len(requests),
         "latency_ms": round((time.perf_counter() - started) * 1000),
         "omitted_targets": omitted_targets,
-        "request": body,
+        "request": {**body, "questions": {k: v for q in requests for k, v in q.items()}},
     }
 
 
