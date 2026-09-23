@@ -10,13 +10,17 @@ from .questions import MAX_STEPS
 
 
 class Agent:
-    def __init__(self, url, goals, *, record_dir=None, screenshots=False):
+    def __init__(self, url, goals, *, record_dir=None, screenshots=False, rank_goal=None):
         task = goals.strip() if isinstance(goals, str) else "\n".join(goals).strip()
         if not task:
             raise ValueError("Supply a task")
         plan = [task]
         self.pending_text = None
-        self.browser = Browser(url, goal=task)
+        # The goal reaches Browser only so snapshot.js can rank off-viewport candidates by
+        # it. A caller that hands this agent one step of a longer task (a planner naming the
+        # next click) can pass the whole task as `rank_goal`, so the ranking still sees what
+        # the run is for. Nothing else uses it, and unset is the old behaviour exactly.
+        self.browser = Browser(url, goal=(rank_goal or task))
         self.record_dir = Path(record_dir) if record_dir else None
         self.screenshots = screenshots or bool(record_dir)
         try:

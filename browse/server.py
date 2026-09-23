@@ -140,6 +140,18 @@ TOOL = {
                 "default": False,
                 "description": "Write a PNG of the final page and return its path.",
             },
+            "links": {
+                "type": "boolean",
+                "default": False,
+                "description": "Return `links`: the final page's element table, the same "
+                               "on-screen and goal-ranked off-screen candidates Jev chose "
+                               "between. Use it to decide the next step.",
+            },
+            "rank_goal": {
+                "type": "string",
+                "description": "Rank off-screen links against this text instead of `goal`. "
+                               "Give the whole task here when `goal` is only the next step.",
+            },
         },
         "required": ["goal"],
         "additionalProperties": False,
@@ -593,16 +605,20 @@ def parse_arguments(args):
     unknown = sorted(set(args) - set(TOOL["inputSchema"]["properties"]))
     if unknown:
         raise BrowseError("unknown argument(s): %s. `browse` takes goal, start_url, "
-                          "extract and screenshot." % ", ".join(unknown))
+                          "extract, screenshot, links and rank_goal."
+                          % ", ".join(unknown))
     goal = args.get("goal")
     if not isinstance(goal, str) or not goal.strip():
         raise BrowseError("`goal` is required and must be a non-empty string.")
-    for name in ("start_url", "extract"):
+    for name in ("start_url", "extract", "rank_goal"):
         if args.get(name) is not None and not isinstance(args[name], str):
             raise BrowseError("`%s` must be a string." % name)
     screenshot = args.get("screenshot", False)
     if not isinstance(screenshot, bool):
         raise BrowseError("`screenshot` must be true or false.")
+    links = args.get("links", False)
+    if not isinstance(links, bool):
+        raise BrowseError("`links` must be true or false.")
     start_url = (args.get("start_url") or "").strip()
     if not start_url:
         m = _URL_IN_GOAL.search(goal)
@@ -614,7 +630,8 @@ def parse_arguments(args):
         raise BrowseError("`start_url` must be an http:// or https:// URL.")
     return {"goal": goal.strip(), "start_url": start_url,
             "extract": (args.get("extract") or "").strip() or None,
-            "screenshot": screenshot}
+            "screenshot": screenshot, "links": links,
+            "rank_goal": (args.get("rank_goal") or "").strip() or None}
 
 
 def trim_text(text, limit=TEXT_LIMIT_BYTES):
@@ -799,6 +816,8 @@ class Browse:
             out["extracted"] = trim_text(result.get("extracted"))[0]
         if params["screenshot"]:
             out["screenshot_path"] = result.get("screenshot_path")
+        if params["links"]:
+            out["links"] = result.get("links") or []
         if result.get("timing"):
             out["timing"] = result["timing"]
         return json.loads(json.dumps(out).replace(key, "[REDACTED]"))

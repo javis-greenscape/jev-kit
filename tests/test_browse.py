@@ -118,7 +118,7 @@ class TestSchema(unittest.TestCase):
         schema = tool["inputSchema"]
         self.assertEqual(schema["type"], "object")
         self.assertEqual(schema["required"], ["goal"])
-        self.assertEqual(set(schema["properties"]), {"goal", "start_url", "extract", "screenshot"})
+        self.assertEqual(set(schema["properties"]), {"goal", "start_url", "extract", "screenshot", "links", "rank_goal"})
         for name in ("goal", "start_url", "extract"):
             self.assertEqual(schema["properties"][name]["type"], "string", name)
         self.assertEqual(schema["properties"]["screenshot"]["type"], "boolean")
@@ -201,11 +201,23 @@ class TestArguments(unittest.TestCase):
             ({"goal": "g https://x.example", "screenshot": "yes"}, "`screenshot`"),
             ({"goal": "g https://x.example", "extract": 4}, "`extract`"),
             ({"goal": "g https://x.example", "url": "https://x"}, "unknown argument"),
+            ({"goal": "g https://x.example", "links": "yes"}, "`links`"),
+            ({"goal": "g https://x.example", "rank_goal": 7}, "`rank_goal`"),
             ("goal", "must be an object"),
         ):
             with self.assertRaises(server.BrowseError) as caught:
                 server.parse_arguments(args)
             self.assertIn(fragment, str(caught.exception), args)
+
+    def test_links_and_rank_goal_are_off_unless_asked_for(self):
+        p = server.parse_arguments({"goal": "open https://a.example"})
+        self.assertIs(p["links"], False)
+        self.assertIsNone(p["rank_goal"])
+        p = server.parse_arguments({"goal": "click 'Bicycle wheel'",
+                                    "start_url": "https://a.example",
+                                    "links": True, "rank_goal": "  the whole task  "})
+        self.assertIs(p["links"], True)
+        self.assertEqual(p["rank_goal"], "the whole task")
 
     def test_text_is_trimmed_to_8_kb_on_a_character_boundary(self):
         text, truncated = server.trim_text("é" * 5000)
@@ -276,6 +288,24 @@ class TestACall(CallCase):
         self.assertEqual(env["BU_CDP_URL"], "http://127.0.0.1:45678")
         self.assertTrue(env["BU_NAME"].startswith("jevkit-browse-"))
         self.assertNotIn(KEY, json.dumps(request))
+
+    def test_links_reach_the_runner_and_come_back(self):
+        rows = [{"index": "1", "role": "link", "label": "Bicycle wheel"}]
+        with mock.patch.object(self.browse, "ask",
+                               return_value=dict(self.RESULT, links=rows)) as run:
+            out = json.loads(call(self.srv, goal="open https://example.com",
+                                  links=True, rank_goal="the whole task")["content"][0]["text"])
+        self.assertEqual(out["links"], rows)
+        request = run.call_args[0][0]
+        self.assertIs(request["links"], True)
+        self.assertEqual(request["rank_goal"], "the whole task")
+
+    def test_links_are_absent_unless_asked_for(self):
+        with mock.patch.object(self.browse, "ask",
+                               return_value=dict(self.RESULT, links=[{"index": "1"}])) as run:
+            out = json.loads(call(self.srv, goal="open https://example.com")["content"][0]["text"])
+        self.assertNotIn("links", out)
+        self.assertIs(run.call_args[0][0]["links"], False)
 
     def test_extracted_is_absent_unless_asked_for(self):
         with mock.patch.object(self.browse, "ask", return_value=dict(self.RESULT)):

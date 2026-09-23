@@ -13,7 +13,8 @@ every time. Staying up keeps all three warm; the numbers are in
 vendor/jev-ultrafast/SPIKE-NOTES.md, "Warm worker and warm Haiku".
 
 Requests (one JSON object per line):
-  {"op": "browse", "goal", "start_url", "extract"?, "screenshot_path"?}
+  {"op": "browse", "goal", "start_url", "extract"?, "screenshot_path"?,
+   "rank_goal"?, "links"?}
   {"op": "warm"}            start the text model and the harness daemon now
   {"op": "ping"}
   {"op": "stop_daemon"}     stop the browser_harness daemon named by BU_NAME
@@ -67,11 +68,28 @@ def _timing(state, total_ms):
     }
 
 
+LINK_LABEL_CHARS = 120
+
+
+def _links(state):
+    """The final page's element table, the same rows Jev chose between.
+
+    One entry per observed element, in the order snapshot.js offered them: the on-screen
+    candidates first, then the off-viewport links ranked by how much their name looks like
+    the run's `rank_goal`. Nothing is added and nothing is re-sorted here, so a caller that
+    plans the next step reads exactly what the chooser read, not a second opinion about the
+    page. Labels are trimmed because a link's accessible name can be a paragraph."""
+    return [
+        {"index": e["index"], "role": e.get("role"), "label": (e.get("label") or "")[:LINK_LABEL_CHARS]}
+        for e in state.get("elements") or []
+    ]
+
+
 def browse(request):
     from jev_ultrafast import Agent
 
     started = time.perf_counter()
-    with Agent(request["start_url"], request["goal"]) as agent:
+    with Agent(request["start_url"], request["goal"], rank_goal=request.get("rank_goal")) as agent:
         for _state in agent.run():
             pass
         state = agent.snapshot()
@@ -99,6 +117,8 @@ def browse(request):
                 f.write(base64.b64decode(shot["data"]))
             os.chmod(path, 0o600)
             result["screenshot_path"] = path
+        if request.get("links"):
+            result["links"] = _links(state)
         result["timing"] = _timing(state, round((time.perf_counter() - started) * 1000))
         return result
 

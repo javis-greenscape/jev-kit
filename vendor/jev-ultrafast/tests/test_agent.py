@@ -705,3 +705,30 @@ def test_no_request_offers_more_options_than_a_choice_allows(monkeypatch):
     assert len(criteria) == 255
     assert decided["omitted_targets"] == {"SELECT": 145}
     assert decided["choice"] == "e1"
+
+
+# --- a step of a longer task ranks by the whole task ---------------------------
+
+
+def test_a_planners_step_can_rank_off_screen_links_by_the_whole_task(monkeypatch):
+    """Agent(rank_goal=...) is what reaches snapshot.js; the step text does not."""
+    from jev_ultrafast import agent as agent_module
+
+    made = []
+
+    class FakeBrowser:
+        def __init__(self, url, goal=""):
+            made.append(goal)
+
+        def observe(self, screenshot=False):
+            return page()
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(agent_module, "Browser", FakeBrowser)
+    agent_module.Agent("https://example.test/", 'Click the link labelled "Bicycle wheel"',
+                       rank_goal="Starting on the Bicycle article, reach the axle article")
+    agent_module.Agent("https://example.test/", "Reach the axle article")
+    assert made == ["Starting on the Bicycle article, reach the axle article",
+                    "Reach the axle article"]
