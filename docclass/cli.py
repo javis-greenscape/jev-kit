@@ -97,7 +97,7 @@ def print_summary(results):
 
 
 def main(argv=None):
-    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser = argparse.ArgumentParser(description=(__doc__ or "").splitlines()[0])
     parser.add_argument("pdf", help="a text-layer PDF")
     parser.add_argument("--taxonomy", default=None,
                         help="taxonomy JSON (default: docclass/taxonomies/example.json)")
