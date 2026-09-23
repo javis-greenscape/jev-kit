@@ -347,12 +347,16 @@ def key_file(windows=None):
 ENV_FILE = key_file()
 
 
-def get_api_key():
-    """Return the API key string, or None if it cannot be found. Never raises."""
+def get_env_value(name):
+    """Return `name` from the environment, else from the key file, else None.
+
+    The key file is a plain `NAME=value` env file, so anything else a
+    component needs beside the TypeSafe key can live there too and be found
+    by the same resolution order. Never raises."""
     try:
-        key = os.environ.get(ENV_VAR)
-        if key:
-            return key
+        value = os.environ.get(name)
+        if value:
+            return value
     except Exception:
         pass
 
@@ -369,7 +373,7 @@ def get_api_key():
                     continue
                 if line.startswith("export "):
                     line = line[len("export "):].strip()
-                if not line.startswith(ENV_VAR + "="):
+                if not line.startswith(name + "="):
                     continue
                 value = line.split("=", 1)[1].strip()
                 if len(value) >= 2 and value[0] == value[-1] and value[0] in ("'", '"'):
@@ -378,3 +382,8 @@ def get_api_key():
     except Exception:
         return None
     return None
+
+
+def get_api_key():
+    """Return the API key string, or None if it cannot be found. Never raises."""
+    return get_env_value(ENV_VAR)

@@ -1005,3 +1005,154 @@ a wheel actually moved something and dispatches once more if it did not.
 
 `scripts/check_guards.py` gained two live checks (23 total, all passing); `pytest` is 33
 passing; `ruff check .` clean.
+
+## Warm worker, warm Haiku, and a cap on off-screen links (2026-09-23)
+
+The `browse` MCP server started a fresh `browse/runner.py` for every call. That
+process paid for the agent's imports, a cold `browser_harness` daemon and, worst
+of all, a cold text model every single time. The measurements below were taken
+through the MCP server over stdio, several goals per server session, on the
+development box.
+
+### Where 14 seconds went
+
+| setup | wall | typing | Jev decisions |
+|---|---|---|---|
+| as deployed: a fresh runner per call, falling back to `TEXT_MODEL_PROVIDER=claude-cli` | 14.4 s | 7.9 s | 7 x ~700 ms |
+| `claude-standing`, still cold on every call | 9.1 s | 1.2 s | 7 x ~750 ms |
+| `claude-standing`, off-screen links removed from the snapshot | 5.4-6.1 s | 0.8 s | 5-6 x ~500 ms |
+
+A bare HTTPS GET to the decision endpoint takes about 410 ms from this box, and
+TCP to the edge takes 24 ms, so roughly 400 ms of every decision is the network
+and nothing anyone here can remove.
+
+### What was built
+
+- **One long-lived worker.** `browse/server.py` starts `browse/runner.py` once
+  and talks to it in JSON lines for the life of the server. The per-call
+  timeout still kills the worker's whole process group; the next call gets a
+  new worker. A worker that died between calls, or one started against a
+  Chromium that has since been replaced, is replaced too. Its stdout and stderr
+  are drained by reader threads, because nothing calls `communicate()` any more
+  and a full pipe would otherwise wedge the agent.
+- **Warm Haiku by default.** With no `TEXT_MODEL_API_KEY` the server sets
+  `TEXT_MODEL_PROVIDER=claude-standing`, `MAX_THINKING_TOKENS=0` and the trimmed
+  `TEXT_MODEL_CONTEXT` the earlier sections measured as fastest. One standing
+  `claude` child, on the user's ordinary login, for the life of the server.
+- **OpenRouter when a key exists.** `TEXT_MODEL_API_KEY`, from the environment
+  or from the kit's own key file, selects upstream's OpenAI-compatible helper
+  with `inception/mercury-2.5` and reasoning off. No key is required and none
+  was added here.
+- **Decisions through the warm daemon.** `model.py` sends the systemone request
+  over the airlock daemon's socket when the server names one, and falls back to
+  the direct HTTPS call otherwise. Nothing from the kit is imported into the
+  vendored tree: the protocol is one JSON line each way.
+- **A budget for off-screen links.** `JEV_OFFSCREEN_MAX`, read by `browser.py`
+  and rewritten into `snapshot.js`.
+
+### After
+
+Gödel's incompleteness theorems from the Wikipedia main page, the README's own
+example, five calls in one server session:
+
+| | before | after |
+|---|---|---|
+| first call in a session | 14.4 s | 7.2-9.0 s |
+| every call after it | 14.4 s | 4.8-6.1 s |
+| typing | 7.9 s | 0.70-0.86 s |
+| per decision | ~700 ms | ~550 ms |
+
+The first call is still slower because it starts Chromium, the worker and the
+text model, and loads the page with a cold browser cache. `JEV_BROWSE_PREWARM=1`
+does all of that at start-up instead and takes about a second off it. It is off
+by default: a second on the first call is not worth a headless Chromium and a
+standing Haiku child in every session that merely has the server configured.
+
+Upstream reports 2.798 s for this goal. The gap is honest and mostly arithmetic:
+five decisions at ~550 ms is 2.8 s of decision latency on its own, of which
+~400 ms each is this box's network floor, and the typing call adds another 0.8 s
+that upstream's Mercury does in ~350 ms.
+
+### The daemon versus the direct call
+
+The direct path already reuses its connection: `model.CLIENT` is a
+module-level `httpx.Client` with HTTP/2, and now that the worker outlives the
+call, that client does too. So the daemon's warm pool has much less to add than
+it did when every call was a fresh process.
+
+| | first decision of a worker | later decisions (median) |
+|---|---|---|
+| through the airlock daemon | 537, 543, 568 ms | 558 ms |
+| direct HTTPS | 626, 621, 613 ms | 583 ms |
+
+About 70 ms on the first decision and about 25 ms after that. Small, free, and
+it keeps working if the worker ever goes back to being short-lived. Set
+`JEV_SYSTEMONE_SOCKET` to an empty value to send every decision over HTTPS.
+
+### How many off-screen links
+
+`JEV_OFFSCREEN_MAX` swept against two goals. (a) is the Gödel example above.
+(b) starts on a long article and asks for a link far below the fold, which is
+the case commit bbbf8db added off-screen links for at all.
+
+| cap | (b) reached the goal | (b) median wall | (a) median per decision | (a) median wall, warm |
+|---|---|---|---|---|
+| 0 (upstream: viewport only) | 1/3 | 4.2 s | 470 ms | 5.0 s |
+| 20 | 11/13 | 8.4 s | 498 ms | 5.0 s |
+| 40 | 5/13 | 7.0 s | 535 ms | 5.1 s |
+| 60 | 7/10 | 5.9 s | 514 ms | 5.2 s |
+| **100** | **15/15** | **3.7 s** | **552 ms** | **5.1 s** |
+| unlimited (fills the 250) | 13/13 | 4.3 s | 669 ms | 5.8 s |
+
+**The curve is not monotonic, and that is the finding.** A cap of 40 is worse
+than a cap of 20 and far worse than no off-screen links at all. The link the
+goal wants ranks about 51st among off-viewport elements on that page, so a cap
+below that offers the chooser a screenful of the target's neighbours and not
+the target: it clicks a neighbour, or gives up, instead of scrolling as it does
+when nothing off-screen is offered. Above about 60 the target is in the table
+and the run becomes a direct click: three to five steps instead of seven.
+
+**100 is the default.** It is the smallest cap measured that reached the goal
+every time, and it is also the fastest on that page, because offering the right
+link is worth more than the decisions it saves. It costs about 80 ms per
+decision against upstream's viewport-only behaviour and saves about 120 ms
+against filling the whole budget.
+
+### Duplicate decisions: upstream's freshness rule, not ours
+
+Jev chooses `TYPE_TEXT` two to four times before one fill executes, and `DONE`
+twice at the end. Traced sequences on the Gödel goal:
+
+```text
+TYPE_TEXT TYPE_TEXT CLICK DONE DONE
+TYPE_TEXT TYPE_TEXT CLICK CLICK CLICK DONE DONE
+TYPE_TEXT CLICK DONE DONE
+```
+
+`Browser.fresh` compares the scoped guard for a `click` or a `select`, and the
+whole-page `marker` for everything else. A `fill` is everything else, so the
+freshness check that runs after the text model returns compares the page's
+title, visible text and every action's semantics against what was observed
+about a second earlier. On a page that rewrites part of itself while it sits
+there, that comparison fails, `agent.py` catches `StalePage`, re-observes, and
+asks Jev for `TYPE_TEXT` again. The generated value is not regenerated:
+`pending_text` keys on the identical helper input, which is why two `TYPE_TEXT`
+decisions produce one text-model call. `DONE` takes the same whole-page path in
+`agent.py`'s `act`, and the article it has just opened is still settling, so the
+first `DONE` is discarded the same way.
+
+Both are upstream's, and the same sequences appear with `JEV_OFFSCREEN_MAX=0`,
+which removes this project's snapshot patch entirely:
+
+```text
+TYPE_TEXT TYPE_TEXT CLICK DONE WAIT DONE
+TYPE_TEXT TYPE_TEXT CLICK DONE DONE
+TYPE_TEXT TYPE_TEXT CLICK CLICK DONE DONE
+```
+
+So it is not ours and it has been left alone. The obvious change would be to
+give `fill` the same scoped guard `click` gets, but that widens what the
+executor will type into after the page moved, which is a safety decision
+upstream made deliberately and not one to take in a vendored patch. The cost is
+one extra decision, about 550 ms, twice a run. It is visible in the `timing.ops`
+list every call now returns.

@@ -167,7 +167,8 @@ class TestTheReadLoop(unittest.TestCase):
                  json.dumps(rpc("tools/list", 2))]
         done = subprocess.run([sys.executable, str(REPO_ROOT / "browse" / "server.py")],
                               input="\n".join(lines) + "\n", capture_output=True,
-                              text=True, timeout=30)
+                              text=True, timeout=30,
+                              env=dict(os.environ, JEV_BROWSE_PREWARM="0"))
         self.assertEqual(done.returncode, 0, done.stderr)
         out = [json.loads(x) for x in done.stdout.splitlines()]
         self.assertEqual([r["id"] for r in out], [1, 2])
@@ -246,7 +247,7 @@ class CallCase(unittest.TestCase):
 
 class TestACall(CallCase):
     def test_the_result_has_the_documented_fields(self):
-        with mock.patch.object(server, "run_runner", return_value=dict(self.RESULT)) as run:
+        with mock.patch.object(self.browse, "ask", return_value=dict(self.RESULT)) as run:
             result = call(self.srv, goal="open https://example.com and report the heading",
                           extract="h1")
         self.assertFalse(result["isError"])
@@ -268,7 +269,7 @@ class TestACall(CallCase):
         self.assertGreater(timeout, 80)
 
     def test_the_key_travels_in_the_environment_and_nowhere_else(self):
-        with mock.patch.object(server, "run_runner", return_value=dict(self.RESULT)) as run:
+        with mock.patch.object(self.browse, "ask", return_value=dict(self.RESULT)) as run:
             call(self.srv, goal="open https://example.com")
         request, env, _clone, _timeout = run.call_args[0]
         self.assertEqual(env["TYPESAFE_API_KEY"], KEY)
@@ -277,7 +278,7 @@ class TestACall(CallCase):
         self.assertNotIn(KEY, json.dumps(request))
 
     def test_extracted_is_absent_unless_asked_for(self):
-        with mock.patch.object(server, "run_runner", return_value=dict(self.RESULT)):
+        with mock.patch.object(self.browse, "ask", return_value=dict(self.RESULT)):
             out = json.loads(call(self.srv, goal="open https://example.com")["content"][0]["text"])
         self.assertNotIn("extracted", out)
 
@@ -285,7 +286,7 @@ class TestACall(CallCase):
         def runner(request, env, clone, timeout):
             return dict(self.RESULT, screenshot_path=request["screenshot_path"])
 
-        with mock.patch.object(server, "run_runner", side_effect=runner):
+        with mock.patch.object(self.browse, "ask", side_effect=runner):
             out = json.loads(call(self.srv, goal="open https://example.com",
                                   screenshot=True)["content"][0]["text"])
         path = Path(out["screenshot_path"])
@@ -300,18 +301,18 @@ class TestACall(CallCase):
                              Path.home() / ".local" / "state" / "jev-kit" / "browse")
 
     def test_long_text_is_trimmed_and_flagged(self):
-        with mock.patch.object(server, "run_runner",
+        with mock.patch.object(self.browse, "ask",
                                return_value=dict(self.RESULT, text="x" * 20000)):
             out = json.loads(call(self.srv, goal="open https://example.com")["content"][0]["text"])
         self.assertEqual(len(out["text"]), 8192)
         self.assertTrue(out["text_truncated"])
 
     def test_the_key_is_scrubbed_from_whatever_comes_back(self):
-        with mock.patch.object(server, "run_runner",
+        with mock.patch.object(self.browse, "ask",
                                return_value=dict(self.RESULT, text="leak %s here" % KEY)):
             result = call(self.srv, goal="open https://example.com")
         self.assertNotIn(KEY, json.dumps(result))
-        with mock.patch.object(server, "run_runner",
+        with mock.patch.object(self.browse, "ask",
                                side_effect=server.BrowseError("HTTP 401 for %s" % KEY)):
             result = call(self.srv, goal="open https://example.com")
         self.assertTrue(result["isError"])
@@ -322,7 +323,7 @@ class TestACall(CallCase):
 class TestShutdown(CallCase):
     def shut_down_after(self, calls, owned):
         self.browse.chromium.owned.return_value = owned
-        with mock.patch.object(server, "run_runner", return_value=dict(self.RESULT)) as run:
+        with mock.patch.object(self.browse, "ask", return_value=dict(self.RESULT)) as run:
             for _ in range(calls):
                 call(self.srv, goal="open https://example.com")
             run.reset_mock()
@@ -345,10 +346,10 @@ class TestShutdown(CallCase):
 
     def test_a_call_that_failed_in_the_runner_still_counts(self):
         self.browse.chromium.owned.return_value = False
-        with mock.patch.object(server, "run_runner",
+        with mock.patch.object(self.browse, "ask",
                                side_effect=server.BrowseError("the agent fell over")):
             self.assertTrue(call(self.srv, goal="open https://example.com")["isError"])
-        with mock.patch.object(server, "run_runner") as run:
+        with mock.patch.object(self.browse, "ask") as run:
             self.browse.shutdown()
         self.assert_one_stop(run)
 
@@ -359,7 +360,7 @@ class TestShutdown(CallCase):
 
     def test_a_stop_that_fails_still_closes_the_browser(self):
         self.browse.daemon_used = True
-        with mock.patch.object(server, "run_runner", side_effect=OSError("gone")):
+        with mock.patch.object(self.browse, "ask", side_effect=OSError("gone")):
             self.browse.shutdown()
         self.browse.chromium.close.assert_called_once_with()
 
@@ -367,7 +368,7 @@ class TestShutdown(CallCase):
 class TestErrorPaths(CallCase):
     def test_a_missing_source_tree_names_the_vendored_copy(self):
         with mock.patch.dict(os.environ, {"JEV_ULTRAFAST_DIR": str(Path(self.tmp) / "absent")}), \
-             mock.patch.object(server, "run_runner") as run:
+             mock.patch.object(self.browse, "ask") as run:
             result = call(self.srv, goal="open https://example.com")
         self.assertTrue(result["isError"])
         text = result["content"][0]["text"]
@@ -419,15 +420,14 @@ class TestErrorPaths(CallCase):
         with mock.patch.object(server, "runner_command", return_value=["x"]), \
              mock.patch.object(server.subprocess, "Popen", fake_popen):
             with self.assertRaises(server.BrowseError):
-                server.run_runner({"op": "browse"}, {"PYTHONPATH": "/keep"},
-                                  self.clone, 5)
+                server.Worker(self.clone, {"PYTHONPATH": "/keep"}, None).start()
         self.assertEqual(captured["env"]["PYTHONPATH"],
                          str(self.clone) + os.pathsep + "/keep")
 
     def test_a_missing_key_names_the_key_file(self):
         for missing in (None, ""):
             with mock.patch.object(server.keyfile, "get_api_key", return_value=missing), \
-                 mock.patch.object(server, "run_runner") as run:
+                 mock.patch.object(self.browse, "ask") as run:
                 result = call(self.srv, goal="open https://example.com")
             self.assertTrue(result["isError"])
             self.assertIn("~/.config/jev-kit/env", result["content"][0]["text"])
@@ -439,7 +439,7 @@ class TestErrorPaths(CallCase):
         self.assertIs(server.keyfile, __import__("airlock.keyfile", fromlist=["x"]))
 
     def test_a_timeout_is_an_error_and_restarts_the_browser(self):
-        with mock.patch.object(server, "run_runner",
+        with mock.patch.object(self.browse, "ask",
                                side_effect=server.BrowseTimeout("timed out after 90 s")):
             result = call(self.srv, goal="open https://example.com")
         self.assertTrue(result["isError"])
@@ -454,7 +454,7 @@ class TestErrorPaths(CallCase):
     def test_a_chromium_failure_is_an_error_result(self):
         self.browse.chromium.ensure.side_effect = server.BrowseError(
             "no Chromium binary found")
-        with mock.patch.object(server, "run_runner") as run:
+        with mock.patch.object(self.browse, "ask") as run:
             result = call(self.srv, goal="open https://example.com")
         self.assertTrue(result["isError"])
         run.assert_not_called()
@@ -465,24 +465,52 @@ class TestErrorPaths(CallCase):
         self.assertIn("start_url", result["content"][0]["text"])
 
 
-@unittest.skipIf(os.name == "nt", "process groups are POSIX here")
-class TestTheChildProcess(unittest.TestCase):
-    """run_runner against a one-line stand-in for browse/runner.py."""
+ECHO_WORKER = (
+    "import json, sys\n"
+    "for line in sys.stdin:\n"
+    "    print(json.dumps({'ok': json.loads(line)['op']}), flush=True)\n"
+)
 
-    def _run(self, code, timeout=10):
+
+@unittest.skipIf(os.name == "nt", "process groups are POSIX here")
+class TestTheWorkerProcess(unittest.TestCase):
+    """Worker against a few-line stand-in for browse/runner.py."""
+
+    def worker(self, code):
         with mock.patch.object(server, "runner_command",
                                return_value=[sys.executable, "-c", code]):
-            return server.run_runner({"op": "browse"}, dict(os.environ), Path("."), timeout)
+            w = server.Worker(Path("."), dict(os.environ), None).start()
+        self.addCleanup(w.stop)
+        return w
 
-    def test_the_last_line_of_stdout_is_the_result(self):
-        out = self._run("import sys, json; json.load(sys.stdin); print('noise'); "
-                        "print(json.dumps({'status': 'done'}))")
-        self.assertEqual(out, {"status": "done"})
+    def _run(self, code, timeout=10):
+        return self.worker(code).ask({"op": "browse"}, timeout)
 
-    def test_an_error_result_is_raised_with_its_message(self):
+    def test_one_json_line_per_request_and_noise_is_ignored(self):
+        w = self.worker("import sys, json\n"
+                        "for line in sys.stdin:\n"
+                        "    json.loads(line); print('noise', flush=True)\n"
+                        "    print(json.dumps({'status': 'done'}), flush=True)\n")
+        self.assertEqual(w.ask({"op": "browse"}, 10), {"status": "done"})
+        self.assertEqual(w.ask({"op": "browse"}, 10), {"status": "done"})
+        self.assertEqual(w.calls, 2)
+
+    def test_one_worker_serves_every_call(self):
+        w = self.worker(ECHO_WORKER)
+        pid = w.proc.pid
+        for _ in range(3):
+            w.ask({"op": "browse"}, 10)
+        self.assertEqual(w.proc.pid, pid)
+
+    def test_an_error_result_is_raised_with_its_message_and_keeps_the_worker(self):
+        w = self.worker("import sys, json\n"
+                        "for line in sys.stdin:\n"
+                        "    json.loads(line)\n"
+                        "    print(json.dumps({'error': 'KeyError: x'}), flush=True)\n")
         with self.assertRaises(server.BrowseError) as caught:
-            self._run("import json, sys; print(json.dumps({'error': 'KeyError: x'})); sys.exit(1)")
+            w.ask({"op": "browse"}, 10)
         self.assertIn("KeyError: x", str(caught.exception))
+        self.assertTrue(w.alive(), "a failed call is not a dead worker")
 
     def test_a_crash_with_no_result_reports_the_stderr_tail(self):
         with self.assertRaises(server.BrowseError) as caught:
@@ -494,12 +522,16 @@ class TestTheChildProcess(unittest.TestCase):
     def test_a_hung_agent_is_killed_at_the_timeout(self):
         marker = os.path.join(tempfile.mkdtemp(), "pid")
         self.addCleanup(__import__("shutil").rmtree, os.path.dirname(marker), True)
-        code = ("import os, time; open(%r, 'w').write(str(os.getpid())); time.sleep(60)" % marker)
+        code = ("import os, sys, time\n"
+                "for line in sys.stdin:\n"
+                "    open(%r, 'w').write(str(os.getpid())); time.sleep(60)\n" % marker)
+        w = self.worker(code)
         started = time.monotonic()
         with self.assertRaises(server.BrowseTimeout) as caught:
-            self._run(code, timeout=1.0)
+            w.ask({"op": "browse"}, 1.0)
         self.assertLess(time.monotonic() - started, 10)
         self.assertIn("JEV_BROWSE_TIMEOUT", str(caught.exception))
+        self.assertFalse(w.alive())
         pid = int(read(marker))
         with self.assertRaises(OSError):
             os.kill(pid, 0)
@@ -509,6 +541,94 @@ class TestTheChildProcess(unittest.TestCase):
             with self.assertRaises(server.BrowseError) as caught:
                 server.runner_command(Path(tempfile.gettempdir()) / "no-such-clone")
         self.assertIn("browser/install.sh", str(caught.exception))
+
+
+@unittest.skipIf(os.name == "nt", "process groups are POSIX here")
+class TestTheWorkerLifecycle(CallCase):
+    """Browse.ask: one worker for the server, replaced when it has to be."""
+
+    def setUp(self):
+        super().setUp()
+        self.started = []
+
+        class FakeWorker:
+            def __init__(worker, clone, env, cdp_url):
+                worker.clone, worker.env, worker.cdp_url = clone, env, cdp_url
+                worker.dead = False
+                worker.asked = []
+                worker.stopped = 0
+                self.started.append(worker)
+
+            def start(worker):
+                return worker
+
+            def alive(worker):
+                return not worker.dead
+
+            def ask(worker, request, timeout_s):
+                worker.asked.append(request)
+                return dict(TestACall.RESULT)
+
+            def stop(worker):
+                worker.stopped += 1
+                worker.dead = True
+
+        p = mock.patch.object(server, "Worker", FakeWorker)
+        p.start()
+        self.addCleanup(p.stop)
+
+    def test_one_worker_serves_every_call(self):
+        for _ in range(3):
+            call(self.srv, goal="open https://example.com")
+        self.assertEqual(len(self.started), 1)
+        self.assertEqual(len(self.started[0].asked), 3)
+
+    def test_a_dead_worker_is_replaced(self):
+        call(self.srv, goal="open https://example.com")
+        self.started[0].dead = True
+        call(self.srv, goal="open https://example.com")
+        self.assertEqual(len(self.started), 2)
+        self.assertEqual(self.started[0].stopped, 1)
+
+    def test_a_new_chromium_gets_a_new_worker(self):
+        call(self.srv, goal="open https://example.com")
+        self.browse.chromium.ensure.return_value = "http://127.0.0.1:45679"
+        call(self.srv, goal="open https://example.com")
+        self.assertEqual([w.cdp_url for w in self.started],
+                         ["http://127.0.0.1:45678", "http://127.0.0.1:45679"])
+
+    def test_shutdown_stops_the_worker_and_the_daemon(self):
+        call(self.srv, goal="open https://example.com")
+        self.browse.shutdown()
+        self.assertEqual(self.started[0].asked[-1], {"op": "stop_daemon"})
+        self.assertEqual(self.started[0].stopped, 1)
+        self.assertEqual(len(self.started), 1, "stopping is not worth a new worker")
+        self.browse.chromium.close.assert_called_once_with()
+
+    def test_the_text_model_defaults_to_the_warm_claude_child(self):
+        with mock.patch.dict(os.environ), \
+             mock.patch.object(server.keyfile, "get_env_value", return_value=None):
+            for var in ("TEXT_MODEL_PROVIDER", "TEXT_MODEL_API_KEY",
+                        "MAX_THINKING_TOKENS", "TEXT_MODEL_CONTEXT"):
+                os.environ.pop(var, None)
+            env = self.browse.child_env(KEY, "http://127.0.0.1:1")
+        self.assertEqual(env["TEXT_MODEL_PROVIDER"], "claude-standing")
+        self.assertEqual(env["MAX_THINKING_TOKENS"], "0")
+        self.assertEqual(env["TEXT_MODEL_CONTEXT"], "trimmed")
+        self.assertNotIn("TEXT_MODEL_API_KEY", env)
+
+    def test_a_text_model_key_selects_the_openai_compatible_helper(self):
+        with mock.patch.object(server.keyfile, "get_env_value", return_value="sk-test"):
+            env = server.text_model_env({})
+        self.assertNotIn("TEXT_MODEL_PROVIDER", env)
+        self.assertEqual(env["TEXT_MODEL_API_KEY"], "sk-test")
+        self.assertEqual(env["TEXT_MODEL_BASE_URL"], "https://openrouter.ai/api/v1")
+        self.assertEqual(env["TEXT_MODEL"], "inception/mercury-2.5")
+        self.assertEqual(env["TEXT_MODEL_REASONING"], "none")
+
+    def test_a_named_provider_is_left_alone(self):
+        env = server.text_model_env({"TEXT_MODEL_PROVIDER": "claude-cli"})
+        self.assertEqual(env, {"TEXT_MODEL_PROVIDER": "claude-cli"})
 
 
 class TestChromium(unittest.TestCase):

@@ -10,10 +10,23 @@ it: faster and cheaper browsing. It is not a security control.
 The transport is MCP over stdio: JSON-RPC 2.0, one message per line, and the
 methods a client needs for one tool (`initialize`, `notifications/initialized`,
 `ping`, `tools/list`, `tools/call`). Standard library only, because this file
-is launched by whatever `python3` the MCP client finds. The agent itself runs
-in a child process on the vendored project's own environment (browse/runner.py),
-which is also what makes the per-call timeout a hard one: the child's whole
-process group is killed when the time is up.
+is launched by whatever `python3` the MCP client finds.
+
+The agent itself runs in one long-lived worker process on the vendored
+project's own environment (browse/runner.py), talked to in JSON lines. It used
+to be a fresh process per call, and that process paid for the agent's imports,
+a cold browser_harness daemon and a cold text model every single time. One
+worker keeps all three warm and every call after the first reuses them. The
+per-call timeout is still a hard one: the worker's whole process group is
+killed when the time is up, and the next call gets a new worker.
+
+Typing into a field needs a text model, and this server picks one rather than
+leaving it to chance. A `TEXT_MODEL_API_KEY`, in the environment or in the
+kit's key file, selects upstream's OpenAI-compatible helper (OpenRouter and
+`inception/mercury-2.5` with reasoning off). With no key it is a warm Haiku
+through the user's own `claude` login: one standing child for the life of this
+server, thinking off, the trimmed field context. No key is required and none
+is added.
 
 This process owns the Chromium lifecycle, and only its own:
 
@@ -56,10 +69,19 @@ Environment:
                        whose AppArmor denies user namespaces to an unprofiled
                        binary (Ubuntu 23.10+), Chromium refuses to start, the
                        error says so, and a person decides
+  JEV_BROWSE_PREWARM   set to 1 to start Chromium, the worker and the text
+                       model at start-up instead of on the first call
+  JEV_OFFSCREEN_MAX    how many off-viewport links a page snapshot may offer
+                       (default 100; 0 is upstream's viewport-only behaviour)
+  JEV_SYSTEMONE_SOCKET the airlock daemon's socket, for Jev's own decisions.
+                       Resolved for you; an empty value sends every decision
+                       straight over HTTPS instead
 """
+import collections
 import glob
 import json
 import os
+import queue
 import re
 import shutil
 import signal
@@ -67,6 +89,7 @@ import socket
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import urllib.request
 from pathlib import Path
@@ -235,7 +258,7 @@ def runner_command(clone):
     )
 
 
-# --- the child process -------------------------------------------------------
+# --- the worker process ------------------------------------------------------
 
 def _kill_group(proc):
     try:
@@ -252,48 +275,143 @@ def _kill_group(proc):
         pass
 
 
-def run_runner(request, env, clone, timeout_s):
-    """Run browse/runner.py inside the clone and return the dict it prints.
-    Raises BrowseError on a timeout, a crash, or output that is not JSON."""
-    # The shared venv carries the dependencies, not jev_ultrafast itself, so
-    # the child is told where the source is. cwd is not enough: sys.path[0] is
-    # runner.py's own directory, which is this repo's browse/.
-    env = dict(env)
-    existing = env.get("PYTHONPATH")
-    env["PYTHONPATH"] = str(clone) + (os.pathsep + existing if existing else "")
-    try:
-        proc = subprocess.Popen(
-            runner_command(clone), cwd=str(clone), env=env,
-            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-            text=True, start_new_session=True,
-        )
-    except OSError as exc:
-        raise BrowseError("could not start the browser agent: %s" % exc)
-    try:
-        out, err = proc.communicate(json.dumps(request), timeout=timeout_s)
-    except subprocess.TimeoutExpired:
-        _kill_group(proc)
-        raise BrowseTimeout(
-            "timed out after %.0f s (JEV_BROWSE_TIMEOUT). The agent was stopped; "
-            "try a narrower goal or a start_url closer to it." % timeout_s
-        )
-    except BaseException:
-        # A signal arriving mid-call must not leave the agent running.
-        _kill_group(proc)
-        raise
-    try:
-        result = json.loads(out.strip().splitlines()[-1])
-        if not isinstance(result, dict):
-            raise ValueError("not an object")
-    except Exception:
-        tail = (err or out or "").strip().splitlines()[-3:]
-        raise BrowseError(
-            "the browser agent exited with status %s and no result. %s"
-            % (proc.returncode, " | ".join(tail))
-        )
-    if result.get("error"):
-        raise BrowseError(str(result["error"]))
-    return result
+class Worker:
+    """One long-lived browse/runner.py child, talked to in JSON lines.
+
+    It used to be a fresh process per call. That paid for the agent's imports,
+    a cold browser_harness daemon and, worst of all, a cold text model on every
+    single call. One worker for the life of the server keeps all three warm.
+
+    What a per-call process gave for free has to be kept by hand here:
+
+      * the per-call timeout still kills the whole process group, and the
+        worker is then gone, so the next call starts a clean one;
+      * stdout and stderr are drained by reader threads, because nobody is
+        waiting on communicate() to empty the pipes for us;
+      * a worker that died between calls is simply replaced.
+    """
+
+    STDERR_TAIL = 40
+
+    def __init__(self, clone, env, cdp_url):
+        self.clone = clone
+        self.cdp_url = cdp_url
+        self.proc = None
+        self.calls = 0
+        self._lines = queue.Queue()
+        self._stderr = collections.deque(maxlen=self.STDERR_TAIL)
+        # The shared venv carries the dependencies, not jev_ultrafast itself,
+        # so the child is told where the source is. cwd is not enough:
+        # sys.path[0] is runner.py's own directory, which is this repo's
+        # browse/.
+        self.env = dict(env)
+        existing = self.env.get("PYTHONPATH")
+        self.env["PYTHONPATH"] = str(clone) + (os.pathsep + existing if existing else "")
+
+    def start(self):
+        try:
+            self.proc = subprocess.Popen(
+                runner_command(self.clone), cwd=str(self.clone), env=self.env,
+                stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                text=True, bufsize=1, start_new_session=True,
+            )
+        except OSError as exc:
+            raise BrowseError("could not start the browser agent: %s" % exc)
+        threading.Thread(target=self._read_stdout, daemon=True).start()
+        threading.Thread(target=self._read_stderr, daemon=True).start()
+        return self
+
+    def _read_stdout(self):
+        try:
+            for line in self.proc.stdout:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    message = json.loads(line)
+                except ValueError:
+                    # Not ours. Anything the agent prints is supposed to go to
+                    # stderr; a stray line must not be mistaken for a result.
+                    self._stderr.append(line)
+                    continue
+                if isinstance(message, dict):
+                    self._lines.put(message)
+        except Exception:
+            pass
+        finally:
+            self._lines.put(None)  # EOF: the worker is gone
+
+    def _read_stderr(self):
+        try:
+            for line in self.proc.stderr:
+                self._stderr.append(line.rstrip("\n"))
+        except Exception:
+            pass
+
+    def alive(self):
+        return self.proc is not None and self.proc.poll() is None
+
+    def tail(self, lines=3):
+        return " | ".join(list(self._stderr)[-lines:])
+
+    def ask(self, request, timeout_s):
+        """One request in, one result dict out. Raises BrowseError or
+        BrowseTimeout, and the worker is dead by the time either is raised."""
+        if not self.alive():
+            raise BrowseError("the browser agent is not running. %s" % self.tail())
+        try:
+            self.proc.stdin.write(json.dumps(request) + "\n")
+            self.proc.stdin.flush()
+        except (BrokenPipeError, OSError) as exc:
+            self.stop()
+            raise BrowseError("the browser agent stopped listening (%s). %s"
+                              % (exc, self.tail()))
+        try:
+            message = self._lines.get(timeout=max(timeout_s, 0.01))
+        except queue.Empty:
+            self.stop()
+            raise BrowseTimeout(
+                "timed out after %.0f s (JEV_BROWSE_TIMEOUT). The agent was stopped; "
+                "try a narrower goal or a start_url closer to it." % timeout_s
+            )
+        if message is None:
+            returncode = self.proc.poll()
+            self.stop()
+            raise BrowseError("the browser agent exited with status %s and no result. %s"
+                              % (returncode, self.tail()))
+        self.calls += 1
+        if message.get("error"):
+            raise BrowseError(str(message["error"]))
+        return message
+
+    def stop(self):
+        proc, self.proc = self.proc, None
+        if proc is None:
+            return
+        try:
+            if proc.stdin and not proc.stdin.closed:
+                proc.stdin.close()
+        except Exception:
+            pass
+        if proc.poll() is None:
+            try:
+                if hasattr(os, "killpg"):
+                    os.killpg(proc.pid, signal.SIGTERM)
+                else:
+                    proc.terminate()
+                proc.wait(timeout=5)
+            except Exception:
+                _kill_group(proc)
+        for pipe in (proc.stdout, proc.stderr):
+            try:
+                if pipe is not None and not pipe.closed:
+                    pipe.close()
+            except Exception:
+                pass
+        try:
+            proc.wait(timeout=5)
+        except Exception:
+            pass
 
 
 # --- Chromium ----------------------------------------------------------------
@@ -506,11 +624,58 @@ def trim_text(text, limit=TEXT_LIMIT_BYTES):
     return raw[:limit].decode("utf-8", errors="ignore"), True
 
 
+def text_model_env(env):
+    """Decide how TYPE_TEXT gets its value, and say so in the environment.
+
+    Two supported ways, and the choice is made here rather than in the agent
+    so that one place explains it:
+
+      * `TEXT_MODEL_API_KEY`, from the environment or from the kit's own key
+        file, means the OpenAI-compatible helper upstream ships with. The
+        defaults are upstream's documented ones: OpenRouter and
+        `inception/mercury-2.5` with reasoning off.
+      * Otherwise a warm Haiku through the user's normal `claude` login: one
+        standing child for the life of this server, thinking off, the trimmed
+        field context. No key, nothing to configure, and it is the default.
+
+    An explicit `TEXT_MODEL_PROVIDER` in the environment is left alone: a
+    person who named a provider gets that provider."""
+    if env.get("TEXT_MODEL_PROVIDER"):
+        return env
+    key = env.get("TEXT_MODEL_API_KEY") or keyfile.get_env_value("TEXT_MODEL_API_KEY")
+    if key:
+        env["TEXT_MODEL_API_KEY"] = key
+        env.setdefault("TEXT_MODEL_BASE_URL", "https://openrouter.ai/api/v1")
+        env.setdefault("TEXT_MODEL", "inception/mercury-2.5")
+        env.setdefault("TEXT_MODEL_REASONING", "none")
+        return env
+    env["TEXT_MODEL_PROVIDER"] = "claude-standing"
+    # Both measured in the spike, both the default there too. Set explicitly
+    # so the worker's configuration is legible in its own environment.
+    env.setdefault("MAX_THINKING_TOKENS", "0")
+    env.setdefault("TEXT_MODEL_CONTEXT", "trimmed")
+    return env
+
+
+def prewarm_wanted():
+    """Whether to warm the whole chain at start-up instead of on first use.
+
+    Off by default, and that is a measurement rather than caution. Warming
+    buys about a second on the first call and nothing after it, and it costs
+    a headless Chromium and a standing Haiku child in every session that
+    merely has this server configured. A session that is definitely going to
+    browse sets `JEV_BROWSE_PREWARM=1` and gets that second back."""
+    return (os.environ.get("JEV_BROWSE_PREWARM") or "").strip().lower() in \
+        ("1", "yes", "on", "true")
+
+
 class Browse:
     def __init__(self):
         self.chromium = Chromium()
         self.calls = 0
         self.daemon_used = False
+        self.worker = None
+        self.lock = threading.RLock()
 
     def daemon_name(self):
         # browser_harness keeps one daemon per BU_NAME. A name of our own
@@ -524,7 +689,69 @@ class Browse:
         env["BU_CDP_URL"] = cdp_url
         env.pop("BU_CDP_WS", None)
         env["BU_NAME"] = self.daemon_name()
-        return env
+        # Jev's own decisions can go through airlock's warm daemon, which
+        # already holds pooled keep-alive connections to the same endpoint.
+        # Resolving the path here keeps the vendored agent free of any import
+        # from this kit. An empty value in the environment turns it off and
+        # sends every decision straight over HTTPS.
+        if "JEV_SYSTEMONE_SOCKET" not in env:
+            try:
+                env["JEV_SYSTEMONE_SOCKET"] = paths.runtime_socket()
+            except Exception:
+                pass
+        return text_model_env(env)
+
+    def ensure_chromium(self):
+        """`Chromium.ensure()` under this server's lock.
+
+        The background prewarm made this necessary: two threads in `ensure()`
+        at once each started a browser, and only the second one was ever
+        tracked or closed. One lock, one browser."""
+        with self.lock:
+            return self.chromium.ensure()
+
+    # --- the worker ----------------------------------------------------------
+
+    def ask(self, request, env, clone, timeout_s):
+        """Send one request to the worker, starting or replacing it first.
+
+        The seam every call goes through. A worker that died, or one started
+        against a Chromium that has since been restarted, is replaced rather
+        than reused."""
+        with self.lock:
+            worker, wanted_cdp = self.worker, env.get("BU_CDP_URL")
+            # A request with no browser in it (stop_daemon) takes whatever
+            # worker is up; a browse call needs one on the right Chromium.
+            if worker is not None and (
+                not worker.alive() or worker.clone != clone
+                or (wanted_cdp is not None and worker.cdp_url != wanted_cdp)
+            ):
+                worker.stop()
+                self.worker = worker = None
+            if worker is None:
+                log("starting the browser agent worker")
+                self.worker = worker = Worker(clone, env, env.get("BU_CDP_URL")).start()
+            try:
+                return worker.ask(request, timeout_s)
+            finally:
+                if not worker.alive():
+                    self.worker = None
+
+    def prewarm(self):
+        """Pay the cold starts before the first call asks for them.
+
+        Chromium, the worker process, the agent's imports, the harness daemon
+        and the text model's own child. Never raises: a prewarm that fails
+        just leaves the first real call to do the work, exactly as before."""
+        try:
+            clone = resolve_clone()
+            key = resolve_key()
+            cdp_url = self.ensure_chromium()
+            self.daemon_used = True
+            result = self.ask({"op": "warm"}, self.child_env(key, cdp_url), clone, 60)
+            log("prewarmed: %s" % ", ".join(result.get("warmed") or ["nothing"]))
+        except Exception as exc:
+            log("prewarm skipped: %s" % exc)
 
     def call(self, args):
         started = time.monotonic()
@@ -533,7 +760,7 @@ class Browse:
         clone = resolve_clone()
         key = resolve_key()
         try:
-            cdp_url = self.chromium.ensure()
+            cdp_url = self.ensure_chromium()
             request = dict(params, op="browse")
             if params["screenshot"]:
                 directory = state_dir()
@@ -546,10 +773,10 @@ class Browse:
             if remaining <= 0:
                 raise BrowseTimeout("timed out after %.0f s (JEV_BROWSE_TIMEOUT) before "
                                     "the agent could start." % call_timeout_s())
-            # The daemon starts on the runner's first use, so a call that
+            # The daemon starts on the worker's first use, so a call that
             # raises from here on still leaves one to stop.
             self.daemon_used = True
-            result = run_runner(request, self.child_env(key, cdp_url), clone, remaining)
+            result = self.ask(request, self.child_env(key, cdp_url), clone, remaining)
         except BrowseTimeout:
             # The killed agent leaves its tab behind. A browser we own is
             # cheaper to restart than to clean; one we do not own is left be.
@@ -572,6 +799,8 @@ class Browse:
             out["extracted"] = trim_text(result.get("extracted"))[0]
         if params["screenshot"]:
             out["screenshot_path"] = result.get("screenshot_path")
+        if result.get("timing"):
+            out["timing"] = result["timing"]
         return json.loads(json.dumps(out).replace(key, "[REDACTED]"))
 
     def shutdown(self):
@@ -582,9 +811,13 @@ class Browse:
             try:
                 clone = resolve_clone()
                 env = dict(os.environ, BU_NAME=self.daemon_name())
-                run_runner({"op": "stop_daemon"}, env, clone, 10)
+                self.ask({"op": "stop_daemon"}, env, clone, 10)
             except Exception:
                 pass
+        with self.lock:
+            worker, self.worker = self.worker, None
+        if worker is not None:
+            worker.stop()
         self.chromium.close()
 
 
@@ -605,6 +838,19 @@ def tool_result(text, is_error=False):
 class Server:
     def __init__(self, browse=None):
         self.browse = browse or Browse()
+        self.prewarming = None
+
+    def start_prewarm(self):
+        """Warm the whole chain in the background while the client finishes
+        its handshake. The first `browse` call is otherwise the one that pays
+        for Chromium, the worker's imports, the harness daemon and the text
+        model's cold start, all at once."""
+        if self.prewarming is not None or not prewarm_wanted():
+            return
+        if not hasattr(self.browse, "prewarm"):
+            return
+        self.prewarming = threading.Thread(target=self.browse.prewarm, daemon=True)
+        self.prewarming.start()
 
     def handle(self, msg):
         """One JSON-RPC message in, one response out, or None for a
@@ -625,6 +871,7 @@ class Server:
             if method == "initialize":
                 wanted = params.get("protocolVersion")
                 version = wanted if wanted in PROTOCOL_VERSIONS else PROTOCOL_VERSIONS[0]
+                self.start_prewarm()
                 return _result(msg_id, {
                     "protocolVersion": version,
                     "capabilities": {"tools": {}},

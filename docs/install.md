@@ -64,6 +64,20 @@ that lets `R11-browse-via-jev` stand aside when the kit's own `browse` tool
 has given up. Without it, a session whose `browse` call fails has no browser
 at all. The same re-run of the wire step adds it to an older install.
 
+The **`browse` tool needs no second key**. Jev decides every step and that
+needs the TypeSafe key; writing text into a field needs a model too, and with
+nothing configured that is a warm Haiku through your ordinary `claude` login,
+started and kept by the `browse` server itself. There is nothing to set up.
+
+If you already have an OpenRouter key, `browse` will use it instead: put a
+`TEXT_MODEL_API_KEY=...` line in the same key file as the TypeSafe key
+(`~/.config/jev-kit/env`, mode 600), or set it in the server's `env` block.
+That selects upstream's OpenAI-compatible helper with `inception/mercury-2.5`
+and reasoning off. Measured on the development box, writing one field value:
+warm Haiku 0.70-0.86 s, and upstream reports Mercury at roughly 0.35 s for the
+same job. Worth using if you have one; not worth getting if you do not.
+[browse/README.md](../browse/README.md#typing-into-a-field) has the rest.
+
 Nothing in this repository writes outside `$HOME`, and nothing runs `sudo`. The
 one thing an installer will not do for you is install a system package
 (`plocate`); it tells you the command and stops.
