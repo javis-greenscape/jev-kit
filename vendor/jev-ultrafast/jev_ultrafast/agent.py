@@ -17,7 +17,7 @@ from .questions import MAX_STEPS
 # asked again, once. The second answer stands, whatever its confidence, so the gate costs at
 # most one extra decision per page and can never loop. The defaults are chosen from recorded
 # confidences, see SPIKE-NOTES.md, "Confidence gate on DONE and BLOCKED".
-STOP_CONFIDENCE_DEFAULTS = {"DONE": 0.5, "BLOCKED": 0.5}
+STOP_CONFIDENCE_DEFAULTS = {"DONE": 0.9, "BLOCKED": 0.5}
 
 
 def stop_threshold(operation):

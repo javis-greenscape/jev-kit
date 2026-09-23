@@ -1196,3 +1196,33 @@ all, and a second bad answer is raised as before.
 All of it is unit-tested offline. The two pure JavaScript helpers are fenced in
 `snapshot.js` and run directly under `node` from `tests/test_agent.py`, so the
 ordering and the fragment rule are checked without a browser.
+
+## Doc alignment: option names, page text, one judgment, confidence (2026-09-23)
+
+TypeSafe's own documentation is saved under `docs/jev-reference/typesafe-docs/` and read in
+`docs/jev-reference/USING-JEV.md`. Four of the mismatches listed there changed the requests
+this agent sends; this section records the measurements behind the defaults.
+
+### Page text in Jev's state
+
+The docs ask for less context but give no number: "Include only the context relevant to the
+current questions" (`concepts_how-to-build-with-system-one.md`). Measured on the Wikipedia
+suite's A1, A6 and B1, jev arm, n=2, warm `browse` server, 2026-09-23:
+
+| `JEV_PAGE_TEXT_CHARS` | Group A passes | B1 passes | decisions | median Jev ms | median wall s |
+|---|---|---|---|---|---|
+| 0 | 4/4 | 0/2 | 26 | 515 | 3.75 |
+| 1500 | 4/4 | 0/2 | 24 | 536 | 4.24 |
+| 6000 (old) | 4/4 | 0/2 | 23 | 525 | 3.80 |
+
+The three settings do not separate on this subset: same passes, Jev latency within noise.
+The default is 1,500. With the numbers tied, the docs' guidance decides the direction, and
+keeping some text leaves DONE something on the page to judge by; 0 removes that entirely.
+
+### Confidence gate on DONE and BLOCKED
+
+`confidence.md` gives 0.5 as an example floor and says thresholds "depend on your domain".
+The recorded operation confidences settle DONE: across the 24 DONE decisions in the three
+runs above, every one that ended a passing run was between 0.93 and 0.98. A smoke run of the
+planner, where one step's agent said DONE on the wrong page, recorded 0.49 and then 0.65.
+DONE's threshold is 0.9. No BLOCKED was recorded, so BLOCKED keeps the documented 0.5.

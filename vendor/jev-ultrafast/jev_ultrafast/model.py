@@ -205,7 +205,7 @@ def target_names(operation, candidates, names):
 # falls as the state grows with content unrelated to the decision ... send only the fields the
 # question needs" (model-jaggedness_jev-1.13.md). The docs give no number, so the default is
 # measured: see SPIKE-NOTES.md, "Page text in Jev's state".
-PAGE_TEXT_CHARS_DEFAULT = 6000
+PAGE_TEXT_CHARS_DEFAULT = 1500
 
 
 def page_text_chars():
