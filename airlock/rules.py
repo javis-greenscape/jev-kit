@@ -82,9 +82,6 @@ class Match:
         self.ask = ask
         self.extra = extra or {}
 
-    def as_dict(self):
-        return {"detail": self.detail, "suggestion": self.suggestion, "ask": self.ask, "extra": self.extra}
-
 
 class Rule:
     __slots__ = (
