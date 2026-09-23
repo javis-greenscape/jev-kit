@@ -267,8 +267,8 @@ They also warn against agent loops in general:
 A planner naming the next link and Jev executing it is a supported arrangement in the docs'
 own terms: code owns the control flow and Jev makes one narrow decision. It is not a
 recommended one, because nothing in the documentation recommends it at all. That reading is
-why the planner in this repo lives in the benchmark rather than in the shipped `browse`
-server. See [Where the planner lives](#where-the-planner-lives).
+why the planner in this repo was measured before it shipped, and ships as an opt-in. See
+[Where the planner lives](#where-the-planner-lives).
 
 ## 7. Published latency, accuracy and the conditions behind them
 
@@ -383,7 +383,7 @@ dropped. Tests in `vendor/jev-ultrafast/tests/test_agent.py`.
 **Does it explain our Wikipedia failures?** No. Those pages have no `<select>`. This is a
 latent crash, not the cause of a wrong click.
 
-### M2. Choice options are named by number, not by meaning
+### M2. Choice options were named by number, not by meaning *(fixed in this branch)*
 
 > "The option names and their descriptions are both sent to the model, so write descriptions
 > that separate the options from each other." — `primitives_choice.md`
@@ -411,7 +411,12 @@ list are all "picked a neighbouring row". **Not fixed here.** Changing the optio
 the `probabilities` keys, `validate_choice`, and the index→action mapping, and it needs an A/B
 sweep to justify, not an assertion. Reported, not built.
 
-### M3. The state carries the page's body text on every decision
+**Now:** each option is named `role: label` (`link: Bicycle wheel`), a repeated name gets
+` (2)`, ` (3)` in table order, names are capped at 80 characters, and they map back to the
+element in code (`model.element_names`, `target_names`). The state's element table carries the
+same names instead of indices.
+
+### M3. The state carried 6,000 characters of body text on every decision *(fixed in this branch)*
 
 > "Accuracy falls as the state grows with content unrelated to the decision. Unrelated detail
 > acts as a distractor." … "Jev suffers from context rot, so unrelated material in the `state`
@@ -429,7 +434,10 @@ to Jev's own state.
 a measurement, not a defect. Page text is what lets DONE be judged at all, so removing it
 blindly would trade one failure mode for another. Reported.
 
-### M4. One question hides eight judgments
+**Now:** `JEV_PAGE_TEXT_CHARS`, default 1,500. The docs give no number, and 0, 1,500 and
+6,000 tied on a measured subset; see SPIKE-NOTES.md, "Page text in Jev's state".
+
+### M4. One question hid eight judgments *(fixed in this branch)*
 
 > "Ask for a judgment a knowledgeable person makes in a second given the right context.
 > … 'Analyze this message and determine the best course of action' is not." — `primitives.md`
@@ -448,7 +456,12 @@ decision made inside that rulebook. Splitting it (a Noul for "the task's final p
 Noul for "the next thing the goal asks for is off screen", combined in code) is the documented
 shape. **Not fixed here**: it is a redesign of the policy, not a small change. Reported.
 
-### M5. `confidence` comes back on every decision and gates nothing
+**Now:** the rulebook is split into `OPERATION` (which kind of step) and `TARGET` (which
+element, for one named operation), and each head gets only its own. `JEV_DECISION_SHAPE`
+chooses one request with speculative target heads (`fanout`, the default) or the target asked
+after the operation (`sequential`); the sweep comparing them is in the README.
+
+### M5. `confidence` came back on every decision and gated nothing *(fixed in this branch)*
 
 > "**Low confidence:** Do not act. Route to a human, request clarification, or fall back to a
 > different system." … "Different actions within the same system should be gated at different
@@ -463,6 +476,10 @@ low-stakes-looking decision the docs would have us gate hardest. **Not fixed her
 fallback needs a threshold, and a threshold picked without measurement is a guess. Reported,
 with the note that this is the cheapest of the four to try: the number is already in the
 response.
+
+**Now:** a DONE below 0.9 or a BLOCKED below 0.5 re-observes the page and asks once more;
+the second answer stands. 0.9 is set from recorded DONE confidences (SPIKE-NOTES.md,
+"Confidence gate on DONE and BLOCKED"), 0.5 is the documented floor.
 
 ### M6. The element table is re-indexed on every observation
 
@@ -485,22 +502,19 @@ because any fix to M2 should not make it worse.
 
 ## Where the planner lives
 
-The fast planner built alongside this document is **an arm of the benchmark**
-(`vendor/jev-ultrafast/bench/planner_arm.py`), not an option on the `browse` tool. Three
-reasons, in order of weight:
+The planner started as an arm of the benchmark, on the reasoning that a shape the vendor does
+not describe should be measured before it ships. It has been measured (README, "Measured
+results"), and it now ships as `browse`'s opt-in `plan: true`
+(`vendor/jev-ultrafast/jev_ultrafast/planner.py`). The earlier objections are answered in how
+it is offered rather than by dropping it:
 
-1. Nothing in TypeSafe's documentation recommends a planner in front of Jev. Section 6 above is
-   the whole of what the docs say about pairing, and it is about coding agents, not planners. A
-   shape the vendor does not describe should be measured before it is shipped.
-2. `browse`'s contract today is "Jev chooses each click and keystroke" (`browse/server.py`'s own
-   tool description). A `plan: true` that quietly puts a Claude child in the loop changes what
-   the tool is, what it costs and what it depends on. Every install would need a `claude`
-   login to use the option.
-3. The benchmark is where the claim can be falsified. If the planner arm beats `jev` on pass
-   rate at a latency Jonathan will accept, promoting it into `browse` is a small, evidenced
-   change. If it does not, nothing was shipped.
+1. It stays in the docs' own terms: code owns the loop, and Jev makes one narrow decision per
+   step. The planner never touches the browser.
+2. It is opt-in. Plain `browse` is still "Jev chooses each click and keystroke", and is still
+   the default. The tool description and R11's text say when to plan (open-ended tasks), that
+   it is slower, and that it bills the user's own `claude` login.
+3. The benchmark runs the arm through the tool itself, so the numbers describe what a caller
+   gets.
 
-What *did* go into `browse` is the part that is useful either way and cannot be derived from
-outside. `links` returns the element table Jev chose between. `rank_goal` ranks the off-screen
-candidates against the whole task, for when `goal` is only one step of it. Both default to off
-and neither changes an existing call.
+The planner's `FIND <words>` verb answers the failure the first measurement showed: a link far
+below the fold never reached the ranked candidates, and the planner had no way to ask for more.
