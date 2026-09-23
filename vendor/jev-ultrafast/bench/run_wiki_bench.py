@@ -65,9 +65,18 @@ from pathlib import Path
 BENCH_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(BENCH_DIR))
 
+import planner_arm  # noqa: E402
 from wiki_tasks import TASKS, check, fetch_page_text  # noqa: E402
 
-ARMS = ("jev", "sonnet-playwright", "sonnet-plans-jev")
+ARMS = ("jev", "sonnet-playwright", "sonnet-plans-jev",
+        "haiku-plans-jev", "sonnet-low-plans-jev")
+# The two fast-planner arms in front of `browse`. Same division of labour as sonnet-plans-jev
+# without a Claude Code session in the middle: one warm `claude -p` child, thinking off, low
+# effort, no tools, asked for one line per turn. See bench/planner_arm.py.
+PLANNER_ARMS = {"haiku-plans-jev": "haiku", "sonnet-low-plans-jev": "sonnet"}
+# What one `browse` call inside a planner turn is allowed. The turn loop owns the run budget;
+# this stops a single stuck call from eating all of it.
+PLANNER_CALL_BUDGET_S = 45.0
 RUN_BUDGET_S = 180.0
 KILL_GRACE_S = 20.0
 DEFAULT_BROWSE_SERVER = Path.home() / ".local/share/airlock/current/browse/server.py"
@@ -124,9 +133,11 @@ class JevSession:
     (task, rep) - the same shape a real MCP client uses.
     """
 
-    def __init__(self, log_path):
+    def __init__(self, log_path, timeout_s=RUN_BUDGET_S, arm="jev"):
+        self.timeout_s = timeout_s
+        self.arm = arm
         server = Path(os.environ.get("JEV_BROWSE_SERVER") or DEFAULT_BROWSE_SERVER)
-        env = dict(os.environ, JEV_BROWSE_TIMEOUT=str(int(RUN_BUDGET_S)))
+        env = dict(os.environ, JEV_BROWSE_TIMEOUT=str(int(timeout_s)))
         self.proc = subprocess.Popen(
             [sys.executable, str(server)],
             stdin=subprocess.PIPE,
@@ -157,37 +168,44 @@ class JevSession:
         self.proc.stdin.write(json.dumps(payload) + "\n")
         self.proc.stdin.flush()
 
-    def ask(self, task):
-        row = {"arm": "jev", "task_id": task["id"], "group": task["group"]}
-        row["cold_start"] = not self._first_call_done
-        self._first_call_done = True
-        started = time.perf_counter()
+    def call(self, arguments, deadline):
+        """One `browse` tool call: the parsed result, {"_error": ...}, or None on no reply.
+
+        The planner loop drives the same server through this, and `ask()` below is the jev
+        arm's single call expressed in the same terms."""
         call_id = self._id()
         self._send({
             "jsonrpc": "2.0", "id": call_id, "method": "tools/call",
-            "params": {"name": "browse", "arguments": {
-                "goal": task["goal"],
-                "start_url": task["start_url"],
-                "extract": task["extract"],
-            }},
+            "params": {"name": "browse", "arguments": arguments},
         })
-        deadline = time.monotonic() + RUN_BUDGET_S + KILL_GRACE_S
         reply = read_json_line(self.proc, call_id, deadline)
-        row["wall_s"] = round(time.perf_counter() - started, 2)
         if reply is None:
-            row.update(passed=False, reason="no reply within the %.0fs budget" % RUN_BUDGET_S,
-                       steps=None, final_url=None)
-            return row
+            return None
         result = reply.get("result") or {}
         text = (result.get("content") or [{}])[0].get("text", "")
         if result.get("isError"):
-            row.update(passed=False, reason="browse returned an error: " + text[:300],
+            return {"_error": text[:300]}
+        try:
+            return json.loads(text)
+        except json.JSONDecodeError:
+            return {"_error": "browse returned text that is not JSON: " + text[:300]}
+
+    def ask(self, task):
+        row = {"arm": self.arm, "task_id": task["id"], "group": task["group"]}
+        row["cold_start"] = not self._first_call_done
+        self._first_call_done = True
+        started = time.perf_counter()
+        payload = self.call(
+            {"goal": task["goal"], "start_url": task["start_url"], "extract": task["extract"]},
+            time.monotonic() + self.timeout_s + KILL_GRACE_S,
+        )
+        row["wall_s"] = round(time.perf_counter() - started, 2)
+        if payload is None:
+            row.update(passed=False, reason="no reply within the %.0fs budget" % self.timeout_s,
                        steps=None, final_url=None)
             return row
-        try:
-            payload = json.loads(text)
-        except json.JSONDecodeError:
-            row.update(passed=False, reason="browse returned text that is not JSON: " + text[:300],
+        if payload.get("_error"):
+            row.update(passed=False, reason="browse returned an error: " + payload["_error"],
                        steps=None, final_url=None)
             return row
         answer = (payload.get("extracted") or "") + "\n" + (payload.get("text") or "")
@@ -457,6 +475,27 @@ def run_sonnet_plans_jev(task, mcp_config, settings_file, log_path):
     return row
 
 
+# --- arms: a fast planner in front of browse, with no Claude Code session --------
+
+
+def run_planner(task, planner, session, arm, log_path):
+    """One planner run, scored exactly as the jev arm is: off the page, not off the model."""
+    lines = []
+    row = planner_arm.run(task, planner, session, arm, RUN_BUDGET_S, log=lines.append)
+    with open(log_path, "a") as fh:
+        fh.write("\n=== %s %s ===\n%s\n" % (arm, task["id"], "\n".join(lines)))
+    payload = row.pop("payload", None) or {}
+    answer = (payload.get("extracted") or "") + "\n" + (payload.get("text") or "")
+    passed, reason = check(task["id"], payload.get("final_url"), answer)
+    row.update(
+        passed=passed,
+        reason=reason if passed else "%s (%s)" % (reason, row.get("stopped")),
+        status=payload.get("status"),
+        extracted=(payload.get("extracted") or "")[:600],
+    )
+    return row
+
+
 # --- the sweep ----------------------------------------------------------------
 
 
@@ -472,7 +511,8 @@ def summarise(rows):
         lines.append("")
         lines.append("| arm | pass rate | median s (passes) | p90 s (passes) | median cost USD |")
         lines.append("|---|---|---|---|---|")
-        for arm in ARMS:
+        present = [a for a in ARMS if any(r["arm"] == a for r in group_rows)]
+        for arm in present:
             mine = [r for r in group_rows if r["arm"] == arm]
             if not mine:
                 continue
@@ -486,16 +526,47 @@ def summarise(rows):
                          % (arm, len(passes), len(mine), 100.0 * len(passes) / len(mine),
                             median, p90, cost))
         lines.append("")
-        lines.append("| task | " + " | ".join(ARMS) + " |")
-        lines.append("|---" * (len(ARMS) + 1) + "|")
+        lines.append("| task | " + " | ".join(present) + " |")
+        lines.append("|---" * (len(present) + 1) + "|")
         for task in TASKS:
             if task["group"] != group:
                 continue
             cells = []
-            for arm in ARMS:
+            for arm in present:
                 mine = [r for r in group_rows if r["arm"] == arm and r["task_id"] == task["id"]]
                 cells.append("%d/%d" % (sum(1 for r in mine if r.get("passed")), len(mine)))
             lines.append("| %s | %s |" % (task["id"], " | ".join(cells)))
+        lines.append("")
+    planners = [r for r in rows if r["arm"] in PLANNER_ARMS]
+    if planners:
+        lines.append("### The planner arms: where their wall time went")
+        lines.append("")
+        lines.append("| arm | group | runs | median turns | median planner s | median browse s |")
+        lines.append("|---|---|---|---|---|---|")
+        for arm in PLANNER_ARMS:
+            for group in ("A", "B"):
+                mine = [r for r in planners if r["arm"] == arm and r.get("group") == group]
+                if not mine:
+                    continue
+                lines.append(
+                    "| %s | %s | %d | %.0f | %.1f | %.1f |"
+                    % (arm, group, len(mine),
+                       statistics.median([r.get("turns") or 0 for r in mine]),
+                       statistics.median([r.get("planner_s") or 0.0 for r in mine]),
+                       statistics.median([r.get("browse_s") or 0.0 for r in mine])))
+        lines.append("")
+        lines.append("| arm | group | median planner input tok | median planner output tok |")
+        lines.append("|---|---|---|---|")
+        for arm in PLANNER_ARMS:
+            for group in ("A", "B"):
+                mine = [r for r in planners if r["arm"] == arm and r.get("group") == group
+                        and r.get("tokens")]
+                if not mine:
+                    continue
+                lines.append("| %s | %s | %.0f | %.0f |" % (
+                    arm, group,
+                    statistics.median([(r["tokens"].get("input") or 0) for r in mine]),
+                    statistics.median([(r["tokens"].get("output") or 0) for r in mine])))
         lines.append("")
     plans = [r for r in rows if r["arm"] == "sonnet-plans-jev"]
     if plans:
@@ -526,6 +597,9 @@ def main():
     parser.add_argument("--reps", type=int, default=3)
     parser.add_argument("--tasks", default="", help="comma-separated task ids, default all")
     parser.add_argument("--arms", default=",".join(ARMS))
+    parser.add_argument("--also", default="",
+                        help="comma-separated result .jsonl files whose rows are folded into "
+                             "the summary without being rerun")
     args = parser.parse_args()
 
     wanted = [t for t in TASKS if not args.tasks or t["id"] in args.tasks.split(",")]
@@ -553,12 +627,27 @@ def main():
     jev_log = workdir / "browse.log"
     sonnet_log = workdir / "sonnet.log"
     plans_log = workdir / "plans-jev.log"
+    planner_log = workdir / "fast-planner.log"
 
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     results_path = BENCH_DIR / ("results-wiki-%s.jsonl" % stamp)
     rows = []
 
     jev_session = JevSession(jev_log) if "jev" in arms else None
+    # The planner arms share one `browse` server of their own, with a per-call timeout well
+    # inside the run budget so that one stuck call cannot spend the whole of it. A planner
+    # child per arm, warmed before its first task, and retired between tasks.
+    planner_arms = [a for a in arms if a in PLANNER_ARMS]
+    planner_session = planners = None
+    if planner_arms:
+        from jev_ultrafast.text_model_claude_standing import StandingTextModel
+
+        planner_session = JevSession(planner_log, PLANNER_CALL_BUDGET_S, "planner")
+        planners = {}
+        for arm in planner_arms:
+            planners[arm] = StandingTextModel(model=PLANNER_ARMS[arm],
+                                              system_prompt=planner_arm.SYSTEM_PROMPT)
+            planners[arm].warm()
     try:
         with open(results_path, "w") as fh:
             for task in wanted:
@@ -567,6 +656,12 @@ def main():
                         log("--- %s rep %d arm %s ---" % (task["id"], rep, arm))
                         if arm == "jev":
                             row = jev_session.ask(task)
+                        elif arm in PLANNER_ARMS:
+                            row = run_planner(task, planners[arm], planner_session, arm,
+                                              planner_log)
+                            # A fresh conversation per run: the child keeps every earlier turn
+                            # in context, and one task's hops are noise in the next one's.
+                            planners[arm].new_session()
                         elif arm == "sonnet-plans-jev":
                             row = run_sonnet_plans_jev(task, browse_mcp_config, settings_file, plans_log)
                         else:
@@ -583,6 +678,10 @@ def main():
     finally:
         if jev_session is not None:
             jev_session.close()
+        if planner_session is not None:
+            planner_session.close()
+        for planner in (planners or {}).values():
+            planner.close()
 
     after = chromium_pids()
     strays = after - before
@@ -603,8 +702,27 @@ def main():
                 pass
     log("chromium pids at exit: %d" % len(chromium_pids()))
 
-    print(summarise(rows))
+    # Rows carried over from an earlier sweep, folded into the summary and never rerun. The
+    # file they came from is on every one of them, so a table can say which arms were measured
+    # in this run and which were read back.
+    reused = []
+    for name in [n.strip() for n in args.also.split(",") if n.strip()]:
+        path = Path(name)
+        if not path.is_absolute():
+            path = BENCH_DIR / path
+        with open(path) as fh:
+            for line in fh:
+                line = line.strip()
+                if not line:
+                    continue
+                row = json.loads(line)
+                row["reused_from"] = path.name
+                reused.append(row)
+        log("folded %d earlier rows in from %s" % (len(reused), path))
+    print(summarise(rows + reused))
     print("\nwrote %d rows to %s" % (len(rows), results_path))
+    if reused:
+        print("reused %d rows from %s" % (len(reused), args.also))
     print("logs: %s" % workdir)
 
 
