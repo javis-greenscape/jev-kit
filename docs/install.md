@@ -57,6 +57,13 @@ that predates it, re-run the wire step:
 install/install.sh --guard --session-check --wire ~/.claude/settings.json
 ```
 
+The **browse unlock** rides with the guard the same way, and is on by default
+(`install/wire.sh --no-browse-unlock` leaves it out). It is a `PostToolUse`
+hook on the single tool name `mcp__browse__browse`, and it is the only thing
+that lets `R11-browse-via-jev` stand aside when the kit's own `browse` tool
+has given up. Without it, a session whose `browse` call fails has no browser
+at all. The same re-run of the wire step adds it to an older install.
+
 Nothing in this repository writes outside `$HOME`, and nothing runs `sudo`. The
 one thing an installer will not do for you is install a system package
 (`plocate`); it tells you the command and stops.
@@ -288,10 +295,12 @@ Do **not** do any of these without asking first:
 - **Enabling `enforce` on a machine that is not yours.** A deny blocks
   somebody else's tool call. Shadow first, for long enough that the log says
   something.
-- **Installing `--browser`, `--review` or `--belay`** on a machine where
-  cloning third-party repositories needs approval. Each clones a pinned
-  external repository; `--belay` is in the default set, so use explicit
-  component flags if that matters.
+- **Installing `--review` or `--belay`** on a machine where cloning
+  third-party repositories needs approval. Each clones a pinned external
+  repository; `--belay` is in the default set, so use explicit component flags
+  if that matters. `--browser` no longer clones anything: the browser agent is
+  vendored at `vendor/jev-ultrafast` and that flag only syncs its Python
+  dependencies with `uv`.
 - **Rewriting or deleting an existing `settings.json` hook entry** that is not
   airlock's.
 

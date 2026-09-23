@@ -1,33 +1,41 @@
 #!/usr/bin/env bash
-# Clone browser-use/jev-ultrafast at a pinned commit and apply our work on top
-# as patches.
+# Sync the Python environment for the vendored browser agent.
 #
-# This directory deliberately does NOT contain a copy of upstream. Upstream is
-# an active project; carrying a fork of it here would mean carrying every
-# future merge conflict as well. What is ours -- the headless-CDP attach, the
-# Claude text-model adapters, the thinking-off/trimmed-context measurements and
-# the Jev-versus-Claude benchmark -- is six `git format-patch` files under
-# patches/, produced from the commit named below. Re-pinning to a newer
-# upstream is then a matter of changing UPSTREAM_COMMIT and re-running.
+# Upstream browser-use/jev-ultrafast now lives in this repository, at
+# vendor/jev-ultrafast, added with `git subtree` from the pin recorded in
+# browser/README.md. Our own work sits on top of it as ordinary commits, so
+# there is nothing left to clone and nothing left to patch: a fresh checkout
+# already has the agent. What it does not have is the agent's dependencies,
+# and that is all this script does now.
+#
+# The environment is deliberately NOT a .venv inside vendor/jev-ultrafast. A
+# deployed release is an immutable `git archive` export that install/deploy.sh
+# prunes, so a venv inside one would be built again on every deploy and thrown
+# away again. One venv under $AIRLOCK_HOME is shared by the checkout and by
+# every release, and only the project's dependencies go into it: jev_ultrafast
+# itself is imported from whichever tree browse/server.py resolved.
+#
+# Nothing here touches ~/code/jev-ultrafast. An older hand-made clone is
+# somebody's working tree and stays exactly as it is.
 set -uo pipefail
 
-UPSTREAM_URL="https://github.com/browser-use/jev-ultrafast"
-UPSTREAM_COMMIT="1231850"
-
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PATCH_DIR="$SCRIPT_DIR/patches"
-DEST="${AIRLOCK_BROWSER_DIR:-$HOME/code/jev-ultrafast}"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
+REPO_ROOT="$(dirname "$SCRIPT_DIR")"
+PROJECT="${JEV_ULTRAFAST_DIR:-$REPO_ROOT/vendor/jev-ultrafast}"
+AIRLOCK_HOME="${AIRLOCK_HOME:-$HOME/.local/share/airlock}"
+VENV="${JEV_ULTRAFAST_VENV:-$AIRLOCK_HOME/jev-ultrafast-venv}"
 
 usage() {
   cat >&2 <<EOF
-usage: $0 [--dest <dir>] [--no-sync]
+usage: $0 [--venv <dir>] [--no-sync]
 
-  --dest <dir>   where to clone (default: \$AIRLOCK_BROWSER_DIR, else
-                 \$HOME/code/jev-ultrafast)
-  --no-sync      clone and patch, but do not run 'uv sync'
+  --venv <dir>   the environment to sync (default: \$JEV_ULTRAFAST_VENV, else
+                 \$AIRLOCK_HOME/jev-ultrafast-venv)
+  --no-sync      report what would be synced and stop
 
-Clones $UPSTREAM_URL at $UPSTREAM_COMMIT and applies browser/patches/*.patch
-onto a branch called 'claude-text-model'.
+Syncs the dependencies of the vendored agent at $PROJECT.
+Nothing is cloned and no patch is applied: the agent is part of this
+repository. See browser/README.md for how to pull a newer upstream.
 EOF
   exit 2
 }
@@ -35,72 +43,62 @@ EOF
 SYNC=1
 while [ "$#" -gt 0 ]; do
   case "$1" in
-    --dest) DEST="${2:-}"; [ -n "$DEST" ] || usage; shift 2 ;;
+    --venv) VENV="${2:-}"; [ -n "$VENV" ] || usage; shift 2 ;;
     --no-sync) SYNC=0; shift ;;
     -h|--help) usage ;;
     *) usage ;;
   esac
 done
 
-for tool in git; do
-  command -v "$tool" >/dev/null 2>&1 || { echo "browser: '$tool' not found" >&2; exit 1; }
-done
-
-if [ -e "$DEST" ]; then
-  if [ -d "$DEST/.git" ]; then
-    echo "browser: $DEST already exists and is a git repo."
-    echo "  Leaving it alone. Remove it, or pass --dest <somewhere-else>, to"
-    echo "  install a fresh copy. Nothing here overwrites a working tree."
-    exit 0
-  fi
-  echo "browser: $DEST exists but is not a git repo; refusing to touch it." >&2
+if [ ! -f "$PROJECT/jev_ultrafast/agent.py" ]; then
+  echo "browser: no vendored agent at $PROJECT" >&2
+  echo "  Expected vendor/jev-ultrafast in the jev-kit checkout ($REPO_ROOT)." >&2
+  echo "  Set JEV_ULTRAFAST_DIR if yours lives somewhere else." >&2
   exit 1
 fi
 
-echo "browser: cloning $UPSTREAM_URL -> $DEST"
-mkdir -p "$(dirname "$DEST")"
-git clone "$UPSTREAM_URL" "$DEST" || { echo "browser: clone failed" >&2; exit 1; }
+echo "browser: vendored agent at $PROJECT"
+echo "browser: environment at $VENV"
 
-echo "browser: checking out the pinned commit $UPSTREAM_COMMIT"
-git -C "$DEST" checkout -q "$UPSTREAM_COMMIT" || {
-  echo "browser: commit $UPSTREAM_COMMIT not found in the clone." >&2
-  echo "  Upstream may have rewritten history. Re-pin UPSTREAM_COMMIT in this" >&2
-  echo "  script and regenerate the patches before trying again." >&2
-  exit 1
-}
-git -C "$DEST" switch -c claude-text-model
+if [ "$SYNC" != "1" ]; then
+  echo "browser: --no-sync, so nothing was installed."
+  exit 0
+fi
 
-echo "browser: applying $(ls -1 "$PATCH_DIR"/*.patch | wc -l) patches"
-if ! git -C "$DEST" am --keep-non-patch "$PATCH_DIR"/*.patch; then
-  echo >&2
-  echo "browser: a patch did not apply. The clone is left mid-'git am' so you" >&2
-  echo "  can look at it:  git -C $DEST am --show-current-patch=diff" >&2
-  echo "  Abandon with:    git -C $DEST am --abort" >&2
+if ! command -v uv >/dev/null 2>&1; then
+  echo "browser: 'uv' is not installed, so dependencies were not synced." >&2
+  echo "  Install uv (https://docs.astral.sh/uv/), then run me again." >&2
   exit 1
 fi
-echo "browser: patches applied; branch 'claude-text-model' is at $(git -C "$DEST" rev-parse --short HEAD)"
 
-if [ "$SYNC" = "1" ]; then
-  if command -v uv >/dev/null 2>&1; then
-    echo "browser: uv sync (nice'd; this box has 4 shared vCPUs)"
-    ( cd "$DEST" && nice -n 10 uv sync )
-  else
-    echo "browser: 'uv' is not installed, so dependencies were not synced." >&2
-    echo "  Install uv, then run:  (cd $DEST && uv sync)" >&2
-  fi
+# --no-install-project: only the dependencies go in. Installing the project
+# itself would bake one release's absolute path into the environment, and the
+# next deploy would leave it pointing at a pruned directory.
+echo "browser: uv sync (nice'd; this box has 4 shared vCPUs)"
+mkdir -p "$(dirname "$VENV")"
+if ! ( cd "$PROJECT" && UV_PROJECT_ENVIRONMENT="$VENV" nice -n 10 uv sync --no-install-project ); then
+  echo "browser: uv sync failed." >&2
+  exit 1
+fi
+
+# The lock the environment was built from, so install/deploy.sh can tell
+# whether a newer release needs a re-sync without running uv every time.
+if [ -f "$PROJECT/uv.lock" ]; then
+  cp "$PROJECT/uv.lock" "$VENV/.jev-kit-uv.lock"
 fi
 
 cat <<EOF
 
-Installed at $DEST on branch claude-text-model.
+The agent's dependencies are in $VENV.
+browse/server.py finds both on its own; JEV_ULTRAFAST_DIR and
+JEV_ULTRAFAST_VENV override them.
 
-Next, launch headless Chromium and point the harness at it -- see
-browser/README.md. Short version:
+To drive it by hand, launch headless Chromium and point the harness at it:
 
-    node "$DEST/scripts/launch_chromium.js" &      # needs NODE_PATH if
-                                                   # playwright is global
+    node "$PROJECT/scripts/launch_chromium.js" &      # needs NODE_PATH if
+                                                      # playwright is global
     export BU_CDP_URL=http://127.0.0.1:9333
-    cd "$DEST" && uv run python examples/run.py
+    PYTHONPATH="$PROJECT" "$VENV/bin/python" "$PROJECT/examples/run.py"
 
 One Chromium at a time on this box, and close it when you are done
 (\`pgrep -a chrom\` should come back empty).

@@ -15,12 +15,13 @@ has that half.
 
 ## Install
 
-The server drives the pinned clone that [browser/](../browser/README.md)
-makes, so that comes first.
+The agent it drives is vendored at `vendor/jev-ultrafast`, so a checkout
+already has it. What it still needs is that project's Python environment,
+which [browser/](../browser/README.md) syncs.
 
 ```bash
-browser/install.sh        # the jev-ultrafast clone, once
-browse/install.sh         # checks the clone, runs a real handshake, prints the block
+browser/install.sh        # the agent's dependencies, once
+browse/install.sh         # checks both, runs a real handshake, prints the block
 ```
 
 `install/install.sh --browse-mcp` runs the second one, and `--all` includes it.
@@ -43,7 +44,7 @@ one for you to add under `mcpServers`, with the absolute path on your machine:
 ```
 
 `install/doctor.sh` runs the server through `initialize` and `tools/list` over
-a real pipe and reports PASS. With no clone it reports a skip.
+a real pipe and reports PASS. With no agent environment it reports a skip.
 
 ## The tool
 
@@ -95,24 +96,35 @@ It includes starting Chromium.
 `server.py` is standard library only. It speaks JSON-RPC 2.0 over stdio:
 `initialize`, `notifications/initialized`, `ping`, `tools/list`, `tools/call`.
 
-The agent itself runs in a child process, `runner.py`, inside the clone's own
-environment. It uses the clone's `.venv` when `uv sync` has made one, and `uv
-run` when it has not. A separate process is what makes the timeout a hard one,
-because the whole process group is killed when the time is up.
+The agent itself runs in a child process, `runner.py`, on the vendored
+project's own environment. That environment sits at
+`$AIRLOCK_HOME/jev-ultrafast-venv`, outside any release, and holds the
+dependencies only; `jev_ultrafast` is imported from whichever source tree the
+server resolved, which the child is told through `PYTHONPATH`. A `.venv` inside
+the source tree is used if one is there, and `uv run` is the last resort. A
+separate process is what makes the timeout a hard one, because the whole
+process group is killed when the time is up.
 
-The server owns the Chromium lifecycle.
+The server owns the Chromium lifecycle, and only its own.
 
-- If something answers at `BU_CDP_URL` (default `http://127.0.0.1:9333`), it
-  attaches to that and never closes it. This is how you hand it a browser that
-  is already logged in.
-- Otherwise it starts a headless Chromium on a free port. Every call this
-  server process serves reuses it, and it closes when the server exits.
-- One Chromium at a time. If `pgrep -a chrom` shows a Chromium this server did
-  not start, and `BU_CDP_URL` does not answer, the call is refused.
+- If you set `BU_CDP_URL` and something answers there, it attaches to that and
+  never closes it. This is how you hand it a browser that is already logged
+  in. Unset means unset: the old `http://127.0.0.1:9333` default is not probed
+  any more, because whatever answers there is somebody else's browser unless
+  you said otherwise.
+- Otherwise it starts a headless Chromium of its own on a free port, with its
+  own temporary profile. Every call this server process serves reuses it, and
+  it closes when the server exits. If it has died since, the next call starts
+  a fresh one and removes the dead one's profile directory.
+- Other Chromiums on the box are ignored. A Playwright MCP browser, a second
+  Claude session running its own copy of this server, an ordinary desktop
+  Chrome: none of them is attached to, none is killed, and none stops a call.
+  Until 2026-09-23 any one of them made every call fail, which taught agents
+  to go back to Playwright.
 
-Typing into a field needs a text model, which the agent reads from the clone's
-`.env`. With none configured the runner falls back to the `claude-cli` adapter
-that the patches add.
+Typing into a field needs a text model, which the agent reads from
+`vendor/jev-ultrafast/.env`. With none configured the runner falls back to the
+`claude-cli` adapter this project added on top of upstream.
 
 ## When it fails
 
@@ -121,12 +133,28 @@ back as an `isError` result, and the read loop keeps going.
 
 | What went wrong | What the message names |
 |---|---|
-| No clone | `browser/install.sh` and `JEV_ULTRAFAST_DIR` |
+| No agent source | `vendor/jev-ultrafast` and `JEV_ULTRAFAST_DIR` |
 | No TypeSafe key | `~/.config/jev-kit/env` |
 | The call ran past `JEV_BROWSE_TIMEOUT` (default 90 s) | the timeout. The agent is killed, and a Chromium this server owns is restarted. |
-| A foreign Chromium is running | its pid and `BU_CDP_URL` |
+| No Chromium binary anywhere | `npx playwright install chromium` and `JEV_BROWSE_CHROMIUM` |
 | Chromium has no usable sandbox | `JEV_BROWSE_NO_SANDBOX`, see below |
 | A bad argument | the argument |
+
+### `blocked` hands the browser back
+
+`status: blocked` means Jev gave up on the goal. It chooses one action at a
+time, out of what it can see in the viewport, so a task that needs several
+hops is beyond it. A goal written as explicit steps gets further than a goal
+written as an outcome. "Open the article, click the link to X, then click the
+link to Y, scroll if the link is not in view" is the shape that works.
+
+When it is beyond `browse` anyway, airlock notices. A PostToolUse hook,
+`hooks/airlock_browse_unlock.py`, records a `blocked` result and an errored
+call alike, and `R11-browse-via-jev` then warns instead of denying Playwright
+MCP for the next thirty minutes of that session. There is nothing to do by
+hand: try `browse` first, and a failure hands the browser back.
+[docs/rules.md](../docs/rules.md#when-browse-gives-up-r11-stands-aside) has
+the detail, including what a subagent shares with its parent.
 
 Key resolution is the same as everywhere else in the kit, and the order is
 written down once, in the module docstring of `airlock/keyfile.py`. The child
@@ -151,8 +179,9 @@ AppArmor profile for the binary.
 
 | Variable | Default | |
 |---|---|---|
-| `JEV_ULTRAFAST_DIR` | `~/code/jev-ultrafast` | The clone. `AIRLOCK_BROWSER_DIR`, which `browser/install.sh` reads, is honoured after it. |
-| `BU_CDP_URL` | `http://127.0.0.1:9333` | A Chromium to attach to. |
+| `JEV_ULTRAFAST_DIR` | `vendor/jev-ultrafast` beside the server | The agent's source. Resolved from `server.py`, so a deployed release finds its own copy. `AIRLOCK_BROWSER_DIR` is honoured after it. |
+| `JEV_ULTRAFAST_VENV` | `$AIRLOCK_HOME/jev-ultrafast-venv` | The agent's Python environment. Outside the release on purpose, so a deploy does not rebuild it. |
+| `BU_CDP_URL` | unset | A Chromium to attach to instead of starting one. Only an explicit value counts. |
 | `JEV_BROWSE_TIMEOUT` | `90` | Seconds allowed for a call. |
 | `JEV_BROWSE_CHROMIUM` | newest in the Playwright cache, then `PATH` | The binary to start. |
 | `JEV_BROWSE_NO_SANDBOX` | unset | `1` adds `--no-sandbox`. Read the section above first. |
@@ -160,7 +189,7 @@ AppArmor profile for the binary.
 ## What leaves the machine
 
 The same as the browser agent. The goal and the observed page state go to
-TypeSafe for each decision. Field text goes to whichever text model the clone
+TypeSafe for each decision. Field text goes to whichever text model the agent
 is configured with. The page text and the screenshot stay on the machine.
 
 Native Windows is not supported, because the browser agent is not ported
@@ -169,5 +198,5 @@ there.
 ## Tests
 
 `tests/test_browse.py` covers the framing, the handshake, the schema and every
-failure in the table above. The jev-ultrafast call is mocked. No test touches
+failure in the table above. The call into the vendored agent is mocked. No test touches
 the network or starts a browser.

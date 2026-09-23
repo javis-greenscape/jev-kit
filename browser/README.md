@@ -1,21 +1,25 @@
-# browser: a Jev-decided browser agent, pinned and patched
+# browser: the Jev-decided browser agent, vendored
 
-This directory is **not** a copy of upstream. It is an installer that clones
-[browser-use/jev-ultrafast](https://github.com/browser-use/jev-ultrafast) at a
-pinned commit and applies our own work on top as patches.
+The agent itself lives at [`vendor/jev-ultrafast`](../vendor/jev-ultrafast),
+part of this repository. This directory is what sets it up: one script that
+syncs its Python environment. Nothing is cloned and no patch is applied any
+more, so a fresh checkout already has the agent.
 
 | | |
 |---|---|
-| Upstream | `https://github.com/browser-use/jev-ultrafast` |
+| Upstream | [browser-use/jev-ultrafast](https://github.com/browser-use/jev-ultrafast), MIT |
+| Vendored at | `vendor/jev-ultrafast`, added with `git subtree` |
 | Pinned commit | `1231850` |
-| Our work | six patches in `patches/`, applied onto a branch `claude-text-model` |
+| Our work | seven commits on top of that pin, in this repository's history |
+| Upstream licence | `vendor/jev-ultrafast/LICENSE`, and [`NOTICE`](../NOTICE) |
 
-Why not a fork in-tree: upstream is active, and a vendored copy means carrying
-every future merge conflict here. A pin plus patches makes "move to a newer
-upstream" an explicit act: change `UPSTREAM_COMMIT` in `install.sh`, re-apply,
-regenerate the patches. The alternative is a drift nobody notices.
+It used to be a clone plus six `git format-patch` files, kept that way to make
+future upstream merges easy. `git subtree` keeps that and drops the rest: a new
+user gets the agent with the repository, our changes are ordinary commits
+rather than patch files to regenerate, and `git subtree pull` still merges a
+newer upstream.
 
-A session drives this clone through the `browse` MCP tool in
+A session drives it through the `browse` MCP tool in
 [browse/](../browse/README.md), and the guard routes browsing there. Airlock's
 `R11-browse-via-jev` rule matches a Playwright MCP browsing call by its tool
 name and denies it with the usage of `browse`. It is on by default and code
@@ -26,14 +30,43 @@ has the detail and the off switch.
 ## Install
 
 ```bash
-browser/install.sh                      # clones to $HOME/code/jev-ultrafast
-browser/install.sh --dest /path/to/dir  # or wherever
+browser/install.sh                    # sync the agent's dependencies
+browser/install.sh --venv /some/dir   # or into an environment of your choosing
 ```
 
-Needs `git`, and `uv` if you want dependencies synced (pass `--no-sync` if
-not). It refuses to touch a destination that already exists.
+Needs `uv`. It syncs the dependencies into
+`$AIRLOCK_HOME/jev-ultrafast-venv`, not into a `.venv` beside the source. A
+deployed release is an immutable export that `install/deploy.sh` prunes, so a
+venv inside one would be rebuilt on every deploy and thrown away again. One
+environment outside the releases is shared by the checkout and by every
+release, and `install/deploy.sh` re-syncs it only when `uv.lock` changes. The
+project itself is not installed into it: `browse/server.py` points the child at
+whichever source tree it resolved, through `PYTHONPATH`.
 
-## What our patches add
+An older hand-made clone at `~/code/jev-ultrafast` is left exactly as it is.
+Nothing here touches it, and `JEV_ULTRAFAST_DIR` is how you point `browse` at
+one if you want to.
+
+## Pulling a newer upstream
+
+```bash
+git subtree pull --prefix vendor/jev-ultrafast \
+  https://github.com/browser-use/jev-ultrafast <commit> --squash
+```
+
+Our seven commits already sit on top of the pin, so a pull is a merge and
+whatever conflicts is a conflict you resolve once rather than a patch to
+rewrite. Afterwards: update the pin in this file and in [`NOTICE`](../NOTICE),
+run the vendored project's own tests, and run the `browse` suite.
+
+```bash
+PYTHONPATH=vendor/jev-ultrafast \
+  "$HOME/.local/share/airlock/jev-ultrafast-venv/bin/python" \
+  -m pytest vendor/jev-ultrafast        # 33 tests
+python3 -m unittest tests.test_browse   # the kit's own side
+```
+
+## What our commits add
 
 1. **Headless CDP attach** (`BU_CDP_URL`), so the harness drives a Chromium
    we launched rather than launching its own.
@@ -45,10 +78,14 @@ not). It refuses to touch a destination that already exists.
 4. **Claude as a pluggable decision-maker**, so Jev, Haiku and Sonnet can be
    benchmarked against each other with everything else held identical.
 5. **The benchmark itself**, including the plain-Playwright-MCP arm.
+6. **Off-screen links**, offered to the chooser and scrolled into view before
+   a click, and the first scroll after a navigation no longer dropped. A long
+   article stopped being a dead end: a two-hop Wikipedia link-navigation task
+   went from blocked to done in 7.2 s.
 
 ## Measured results
 
-From the upstream clone's own `SPIKE-NOTES.md`, measured on this box on
+From the vendored project's own `SPIKE-NOTES.md`, measured on this box on
 **2026-09-19**. Three goals, three arms, three repetitions each: 27 runs,
 strictly sequential, arms interleaved, one shared headless Chromium.
 **n=3 per cell, so read every cell as directional rather than significant.**
@@ -142,16 +179,17 @@ and only Chromium (Firefox and WebKit were removed on purpose). Run **one
 instance at a time** and close it afterwards.
 
 ```bash
-# If playwright is installed globally rather than in the clone, node needs
+# If playwright is installed globally rather than beside the agent, node needs
 # to be told where to find it:
 export NODE_PATH=$HOME/.npm-global/lib/node_modules
 
-node "$HOME/code/jev-ultrafast/scripts/launch_chromium.js" &
+node vendor/jev-ultrafast/scripts/launch_chromium.js &
 CHROMIUM_PID=$!
 
 export BU_CDP_URL=http://127.0.0.1:9333
-cd "$HOME/code/jev-ultrafast"
-uv run python examples/run.py
+PYTHONPATH=vendor/jev-ultrafast \
+  "$HOME/.local/share/airlock/jev-ultrafast-venv/bin/python" \
+  vendor/jev-ultrafast/examples/run.py
 
 kill "$CHROMIUM_PID"
 pgrep -a chrom    # should print nothing
@@ -164,14 +202,9 @@ attaches over CDP and opens its own tab per run.
 Check `free -h` before launching: a Chromium plus the harness wants a couple
 of gigabytes, and this box swaps rather than fails.
 
-## Regenerating the patches
+## Adding more of our own work
 
-After committing more work onto `claude-text-model` in the clone:
-
-```bash
-git -C "$HOME/code/jev-ultrafast" format-patch 1231850..claude-text-model \
-  -o browser/patches
-```
-
-The patches carry no absolute path to any particular user's home directory or
-Claude account tree; keep it that way if you regenerate them.
+Commit it to this repository like anything else. It lands on top of the pin by
+construction, and `git subtree pull` merges upstream around it. Keep absolute
+paths to a particular user's home directory or Claude account tree out of it,
+the same rule the patch files used to carry.

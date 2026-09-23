@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """A stdio MCP server with one tool, `browse`.
 
-`browse` hands a goal to the Jev-decided browser agent (the jev-ultrafast
-clone that browser/install.sh pins) and returns what the page says afterwards.
+`browse` hands a goal to the Jev-decided browser agent (jev-ultrafast, vendored
+at vendor/jev-ultrafast) and returns what the page says afterwards.
 Jev chooses each step, so the calling session pays for one tool call rather
 than a navigate / snapshot / click loop of its own. That is the whole point of
 it: faster and cheaper browsing. It is not a security control.
@@ -11,23 +11,29 @@ The transport is MCP over stdio: JSON-RPC 2.0, one message per line, and the
 methods a client needs for one tool (`initialize`, `notifications/initialized`,
 `ping`, `tools/list`, `tools/call`). Standard library only, because this file
 is launched by whatever `python3` the MCP client finds. The agent itself runs
-in a child process inside the clone's own environment (browse/runner.py), which
-is also what makes the per-call timeout a hard one: the child's whole process
-group is killed when the time is up.
+in a child process on the vendored project's own environment (browse/runner.py),
+which is also what makes the per-call timeout a hard one: the child's whole
+process group is killed when the time is up.
 
-This process owns the Chromium lifecycle:
+This process owns the Chromium lifecycle, and only its own:
 
-  * If something already answers at `BU_CDP_URL` (default
-    http://127.0.0.1:9333) it is used as it is and never closed from here.
-  * Otherwise a headless Chromium is started on a free port, reused by every
-    call this process serves, and closed when the process exits.
-  * One Chromium at a time on the box. If `pgrep -a chrom` shows one this
-    process did not start, and `BU_CDP_URL` does not answer, the call is
-    refused with a message rather than starting a second browser.
+  * If `BU_CDP_URL` is set in the environment and answers, that browser is
+    used as it is and never closed from here. Somebody chose it deliberately.
+  * Otherwise a headless Chromium of this server's own is started on a free
+    port with its own temporary profile, reused by every call this process
+    serves, and closed when the process exits. If it has died since, a fresh
+    one is started and the dead one's profile directory is removed, so
+    neither browsers nor profiles pile up.
+  * Other Chromiums on the box are ignored. A Playwright MCP browser, another
+    Claude session's own `browse` server, an ordinary desktop Chrome: this
+    process never attaches to one, never kills one, and never refuses to work
+    because one exists. The default `http://127.0.0.1:9333` is not probed for
+    the same reason: whatever answers there is somebody else's browser unless
+    a person said otherwise by setting `BU_CDP_URL`.
 
 Everything fails closed with a message and never hangs. A bad request, a
-missing clone, a missing key, a timeout and a crash in the agent all come back
-as an `isError` result. Nothing here raises out of the read loop.
+missing source tree, a missing key, a timeout and a crash in the agent all come
+back as an `isError` result. Nothing here raises out of the read loop.
 
 The TypeSafe key is resolved exactly as the rest of the kit resolves it
 (airlock/keyfile.py, whose module docstring is where the order is written
@@ -35,9 +41,13 @@ down). It reaches the child in its environment, never on a command line, and
 it is scrubbed from any text this server returns.
 
 Environment:
-  JEV_ULTRAFAST_DIR    the clone (then AIRLOCK_BROWSER_DIR, which is what
-                       browser/install.sh reads; default ~/code/jev-ultrafast)
-  BU_CDP_URL           a Chromium to attach to instead of starting one
+  JEV_ULTRAFAST_DIR    the agent's source tree (then AIRLOCK_BROWSER_DIR;
+                       default vendor/jev-ultrafast beside this file)
+  JEV_ULTRAFAST_VENV   the Python environment for it (default
+                       $AIRLOCK_HOME/jev-ultrafast-venv)
+  BU_CDP_URL           a Chromium to attach to instead of starting one. Only
+                       an explicitly set value is honoured; unset means start
+                       our own, never probe the old default
   JEV_BROWSE_TIMEOUT   seconds allowed per call (default 90)
   JEV_BROWSE_CHROMIUM  the Chromium binary to start, if the Playwright cache
                        and PATH are not where it lives
@@ -64,14 +74,13 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT))
 
-from airlock import keyfile
+from airlock import keyfile, paths  # noqa: E402
 
 SERVER_NAME = "jev-kit-browse"
 SERVER_VERSION = "0.1.0"
 PROTOCOL_VERSIONS = ("2025-06-18", "2025-03-26", "2024-11-05")
 
 RUNNER = Path(__file__).resolve().with_name("runner.py")
-DEFAULT_CDP_URL = "http://127.0.0.1:9333"
 DEFAULT_TIMEOUT_S = 90.0
 CHROMIUM_START_S = 15.0
 TEXT_LIMIT_BYTES = 8 * 1024
@@ -135,19 +144,42 @@ def log(message):
 # --- configuration -----------------------------------------------------------
 
 def clone_dir():
+    """The jev-ultrafast source tree.
+
+    The default is the copy vendored in this same tree, found relative to this
+    file rather than to a working directory. That resolves to the checkout when
+    the server is run from one, and to $AIRLOCK_HOME/releases/<sha>/vendor/
+    jev-ultrafast when install/deploy.sh exported it, because a release is a
+    plain `git archive` of the commit and carries vendor/ with it."""
     for var in ("JEV_ULTRAFAST_DIR", "AIRLOCK_BROWSER_DIR"):
         value = os.environ.get(var)
         if value:
             return Path(os.path.expanduser(value))
-    return Path.home() / "code" / "jev-ultrafast"
+    return REPO_ROOT / "vendor" / "jev-ultrafast"
+
+
+def venv_dir():
+    """Where the vendored project's dependencies live.
+
+    Outside the release on purpose. A release is an immutable export and
+    deploy.sh prunes old ones, so a .venv inside vendor/jev-ultrafast would be
+    re-synced on every deploy and thrown away again. One venv under
+    $AIRLOCK_HOME is synced when uv.lock changes and shared by every release
+    and by the checkout. It holds the third-party dependencies only; the
+    project itself is imported from whichever tree clone_dir() resolved."""
+    value = os.environ.get("JEV_ULTRAFAST_VENV")
+    if value:
+        return Path(os.path.expanduser(value))
+    return paths.install_home() / "jev-ultrafast-venv"
 
 
 def resolve_clone():
     clone = clone_dir()
     if not (clone / "jev_ultrafast" / "agent.py").is_file():
         raise BrowseError(
-            "the jev-ultrafast clone was not found at %s. Run browser/install.sh "
-            "in the jev-kit checkout (%s), or point JEV_ULTRAFAST_DIR at the clone."
+            "the jev-ultrafast source was not found at %s. It is vendored at "
+            "vendor/jev-ultrafast in the jev-kit checkout (%s); point "
+            "JEV_ULTRAFAST_DIR at a copy if yours lives elsewhere."
             % (clone, REPO_ROOT)
         )
     return clone
@@ -181,19 +213,25 @@ def state_dir():
 
 
 def runner_command(clone):
-    """The clone's own interpreter when `uv sync` has made one, else `uv run`.
-    The venv is preferred because it starts faster and never touches the
-    network; `uv run` is what makes a clone that was never synced work."""
-    for rel in (".venv/bin/python", ".venv/Scripts/python.exe"):
-        python = clone / rel
+    """The interpreter that runs browse/runner.py.
+
+    The shared venv first, because it survives a deploy and starts faster than
+    anything that touches the network. A .venv inside the tree next, so a
+    JEV_ULTRAFAST_DIR pointed at somebody's own synced clone still works. `uv
+    run` last, which makes a tree that was never synced work at all."""
+    candidates = []
+    for base in (venv_dir(), clone / ".venv"):
+        candidates += [base / "bin" / "python", base / "Scripts" / "python.exe"]
+    for python in candidates:
         if python.is_file():
             return [str(python), str(RUNNER)]
     uv = shutil.which("uv")
     if uv:
         return [uv, "run", "--project", str(clone), "python", str(RUNNER)]
     raise BrowseError(
-        "%s has no .venv and `uv` is not on PATH. Run `uv sync` in the clone, "
-        "or install uv (https://docs.astral.sh/uv/)." % clone
+        "no Python environment for the browser agent: neither %s nor %s/.venv "
+        "exists and `uv` is not on PATH. Run browser/install.sh, or install uv "
+        "(https://docs.astral.sh/uv/)." % (venv_dir(), clone)
     )
 
 
@@ -217,6 +255,12 @@ def _kill_group(proc):
 def run_runner(request, env, clone, timeout_s):
     """Run browse/runner.py inside the clone and return the dict it prints.
     Raises BrowseError on a timeout, a crash, or output that is not JSON."""
+    # The shared venv carries the dependencies, not jev_ultrafast itself, so
+    # the child is told where the source is. cwd is not enough: sys.path[0] is
+    # runner.py's own directory, which is this repo's browse/.
+    env = dict(env)
+    existing = env.get("PYTHONPATH")
+    env["PYTHONPATH"] = str(clone) + (os.pathsep + existing if existing else "")
     try:
         proc = subprocess.Popen(
             runner_command(clone), cwd=str(clone), env=env,
@@ -334,21 +378,28 @@ class Chromium:
         return rows
 
     def ensure(self):
-        """The CDP URL to attach to, starting Chromium if nothing answers."""
+        """The CDP URL to use, starting this server's own Chromium if needed.
+
+        Never attaches to, and never kills, a browser this process did not
+        start. The one exception is an explicitly set `BU_CDP_URL`, which is a
+        person naming a browser to share."""
         if self.owned() and cdp_answers(self.url):
             return self.url
+        if self.proc is not None:
+            # Ours, but gone or unreachable. close() reaps it and removes its
+            # profile directory, so a restart cannot leave either behind.
+            log("this server's Chromium is no longer answering; starting a fresh one")
         self.close()
-        configured = os.environ.get("BU_CDP_URL") or DEFAULT_CDP_URL
-        if cdp_answers(configured):
+        configured = os.environ.get("BU_CDP_URL")
+        if configured and cdp_answers(configured):
             return configured
+        # Anything else running is somebody else's: a Playwright MCP browser,
+        # another session's browse server, a desktop Chrome. Noted, then
+        # ignored. The old refusal made every call fail whenever one existed.
         foreign = self._foreign()
         if foreign:
-            raise BrowseError(
-                "a Chromium this server did not start is already running (pid %s) and "
-                "nothing answers at BU_CDP_URL (%s). One Chromium at a time on this box: "
-                "close it, or set BU_CDP_URL to its --remote-debugging-port."
-                % (", ".join(str(p) for p, _ in foreign[:5]), configured)
-            )
+            log("%d other Chromium process(es) on this box; starting our own anyway"
+                % len(foreign))
         binary = find_chromium()
         if not binary or not os.path.isfile(binary):
             raise BrowseError(

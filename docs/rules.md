@@ -32,6 +32,13 @@ ten minutes, a hard budget, and fail-open on any error. Where Jev is involved,
 a deny also needs a confidence of at least 0.8 and a margin of at least 0.4
 over the runner-up.
 
+`R11-browse-via-jev` is the exception, and the only one. It ignores the stamp
+and the loop allowance both, for the reason its own section below gives. The
+budget and the fail-open still apply to it. It has one door, and only the
+`browse` tool itself opens it: a `browse` call that comes back `blocked`, or
+errors, turns this rule into a warn for the next thirty minutes of that
+session.
+
 A deny is also softened to a warn when the user's own recent words asked for the
 thing. That check reads only what the person typed, never a tool result or a
 fetched page, and it can only ever soften: no answer to it can make the guard
@@ -155,7 +162,7 @@ two rungs.
 ## `R11-browse-via-jev`: a Playwright MCP call is pointed at `browse`
 
 The kit ships a Jev-decided `browse` MCP tool ([browse/](../browse/README.md)),
-which drives the jev-ultrafast clone that `browser/` pins. On the same nine
+which drives the jev-ultrafast agent vendored at `vendor/jev-ultrafast`. On the same nine
 goals the Jev-decided agent reaches everything Sonnet reaches for roughly
 1/233rd of the Claude spend per run. This rule tells an agent that reaches for
 Playwright MCP to use `browse` instead. It is on by default.
@@ -191,12 +198,67 @@ The deny names the tool and gives its usage in one line:
 browse(goal="open https://example.com and report the main heading", extract="h1")
 ```
 
-There are three ways past it. An `[airlock-ok: <reason>]` stamp gets one call
-through. An MCP call has no `description` field, so for an `mcp__` tool the
-stamp is read from any top-level text field, such as `element` on a click.
-Loop protection works as it does for every rule: the identical call repeated
-within ten minutes is allowed. And `{"R11-browse-via-jev": "off"}` in
-`~/.config/airlock/rules.json` turns the rule off.
+The deny also spells out how to write a goal Jev can follow. Jev picks one
+action at a time, out of what it can see on the page, so a goal written as
+steps works and a goal written as an outcome does not. "Open the article,
+click the link to X, then click the link to Y, scroll if the link is not in
+view" is the shape that gets there.
+
+There is no per-call way past it. This is the one rule that ignores both
+safety nets every other deny keeps. An `[airlock-ok: <reason>]` stamp is
+logged as `override_refused` and the call is denied anyway, and the identical
+call repeated inside the loop window is denied again rather than allowed. The
+match carries `strict` in its `extra`, which is where `airlock/enforce.py`
+reads that from; no other rule sets it.
+
+Both nets were closed because both were measured being used to stay on
+Playwright. A subagent given a plain click-through-Wikipedia task wrote
+`[airlock-ok: ...]` into the `element` field of a click, and when that stopped
+working it sent the same call twice. An MCP call has no `description` field,
+so the stamp is harvested from any top-level text field, which puts it well
+within reach of a model composing the call. Neither escape carried a person's
+say-so, which is the only thing they exist for.
+
+### When `browse` gives up, R11 stands aside
+
+Strictness is only fair while the alternative works. Jev's chooser sees one
+step at a time and only inside the viewport, so a task that needs several hops
+is out of its reach. Measured on 2026-09-23: `browse` came back `blocked` on
+a two-hop Wikipedia link-navigation task. A strict rule on top of that
+leaves the session with no browser at all, which is a worse outcome than the
+spend it was avoiding.
+
+So `browse` failing is what opens the door, and nothing else does.
+
+- A **PostToolUse hook**, `hooks/airlock_browse_unlock.py`, is registered
+  against the one tool name `mcp__browse__browse`. It reads the response and
+  writes a small per-session row when the status is `blocked`, or when the
+  call itself errored. A `done` result writes nothing. A response it cannot
+  parse writes nothing either, and it never prints a word or blocks anything.
+- The row lives in `~/.local/state/airlock/browse_unlock.json`, handled by
+  `airlock/browse_state.py`. Same lock, same 700/600 permissions and the same
+  `platform_compat` calls as the loop-protection file beside it. It expires
+  after **thirty minutes**, and every write prunes what has expired.
+- While a row is unexpired, R11 warns instead of denying. The log row carries
+  `unlocked_by: "browse_blocked"` and `browse_status`, so a warn earned this
+  way is never confused with the rule simply not firing.
+- Anything that goes wrong reading the file means no unlock. The rule stays
+  strict, which is the failure direction that cannot be abused.
+
+The unlock belongs to the session, not to the call. Stamps and repeats still
+do nothing on their own.
+
+**A subagent's hook payload carries the parent session's `session_id`.**
+Measured on this box: a subagent's tool calls log the same id as the session
+that dispatched them. So an unlock a subagent earns is shared with the parent
+and its siblings. That is accepted rather than worked around. The id in the
+payload is the only handle a hook gets, and `browse` giving up says something
+about the task, not about which agent asked.
+
+An agent that genuinely needs Playwright for something `browse` cannot express
+at all, for per-frame timing, raw CDP or a scripted measurement, stops and
+asks. Turning the rule off is the user's call, and they make it by putting
+`{"R11-browse-via-jev": "off"}` in `~/.config/airlock/rules.json`.
 
 This is a cost steer, not a security control. It removes nothing: the
 Playwright MCP servers stay registered.

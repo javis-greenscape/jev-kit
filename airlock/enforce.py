@@ -266,17 +266,41 @@ def _agent_rewrite_text(entry, target):
     )
 
 
-def _rule_deny_reason(rule_id, detail, suggestion, action="deny"):
+def _rule_deny_reason(rule_id, detail, suggestion, action="deny", strict=False):
     lead = "NEEDS APPROVAL" if action == "ask" else "BLOCKED"
-    return (
-        "%s (airlock %s): %s\n%s\n"
-        "Wrong call? Add `[airlock-ok: <reason>]` to this call's description to override."
-        % (lead, rule_id, detail, suggestion)
-    )
+    text = "%s (airlock %s): %s\n%s" % (lead, rule_id, detail, suggestion)
+    if strict:
+        # The stamp would be refused, so offering it here would be a lie and,
+        # worse, a hint. A strict rule's own suggestion says what to do.
+        return text
+    return (text + "\nWrong call? Add `[airlock-ok: <reason>]` to this call's "
+            "description to override.")
 
 
 def _rule_warn_text(rule_id, detail, suggestion):
     return "airlock %s: %s\n%s" % (rule_id, detail, suggestion)
+
+
+def _browse_unlock_warn_text(rule_id, detail, row):
+    """R11 standing aside because `browse` already gave up in this session.
+
+    Says WHICH failure opened the door and how long it stays open, so the
+    session can tell this apart from the rule simply not firing."""
+    row = row or {}
+    how = ("`browse` came back blocked" if row.get("status") == "blocked"
+           else "a `browse` call errored")
+    goal = row.get("goal")
+    line = "%s in this session" % how
+    if goal:
+        line += " on: %s" % (goal if len(goal) <= 120 else goal[:117] + "...")
+    return (
+        "airlock %s: %s\n"
+        "%s, so Playwright MCP is allowed for 30 minutes from then. Nothing "
+        "was blocked and this call ran as you wrote it.\n"
+        "Go back to `browse` for the next piece of browsing: this door is "
+        "open because that one failed, not because Playwright is the default "
+        "again." % (rule_id, detail, line)
+    )
 
 
 def effective_block_action(action):
@@ -477,6 +501,34 @@ def _run_rule(ctx, rule, match, eff, base, override_reason, b_ms, session_id, mo
         advice.append(_rule_warn_text(rule.id, match.detail, match.suggestion))
         return False
 
+    # The `browse` unlock, before anything else in the deny path: when the
+    # kit's own browser tool has already given up in this session, R11 has
+    # nothing left to steer anyone towards, and a strict deny would leave the
+    # session with no browser at all. A PostToolUse hook
+    # (hooks/airlock_browse_unlock.py) writes the row; airlock/browse_state.py
+    # holds it for 30 minutes. Only `browse` failing opens this -- a stamp and
+    # a repeat still do nothing, which is the rest of `strict` untouched.
+    #
+    # Checked before the `mode != enforce` return so a shadow-mode row says
+    # `unlocked_by` too, rather than reporting a would-be deny that would not
+    # have happened.
+    if match.extra.get("unlock_on_browse_blocked"):
+        row = None
+        try:
+            from . import browse_state
+            row = browse_state.recent_give_up(session_id)
+        except Exception:
+            row = None
+        if row is not None:
+            entry["unlocked_by"] = "browse_blocked"
+            entry["browse_status"] = row.get("status")
+            entry["action"] = "warn"
+            entry["enforced"] = False
+            entry["warned"] = True
+            log.append(entry)
+            advice.append(_browse_unlock_warn_text(rule.id, match.detail, row))
+            return False
+
     # deny (or ask). Softening comes first: an explicit override stamp and a
     # user_requested hit are both "the human already said so", and neither
     # should cost a state write or an emitted block.
@@ -495,15 +547,28 @@ def _run_rule(ctx, rule, match, eff, base, override_reason, b_ms, session_id, mo
             advice.append(_rule_warn_text(rule.id, match.detail, match.suggestion))
             return False
 
+    # A `strict` match closes both per-call ways past a deny: the
+    # `[airlock-ok: ...]` stamp and the loop allowance. Only R11 sets it, and
+    # only because both were measured being used to keep browsing on Playwright
+    # (airlock/rules.py, prefilter_browser_driving). Every other rule keeps
+    # both, unchanged.
+    strict = bool(match.extra.get("strict"))
+
     if override_reason is not None:
-        entry["override"] = True
-        entry["override_reason"] = override_reason[:300]
-        entry["enforced"] = False
-        log.append(entry)
-        return False
+        if strict:
+            # Logged, not honoured, so report.py's override count still means
+            # "a stamp was written" and this one is visibly not a way out.
+            entry["override_refused"] = True
+            entry["override_reason"] = override_reason[:300]
+        else:
+            entry["override"] = True
+            entry["override_reason"] = override_reason[:300]
+            entry["enforced"] = False
+            log.append(entry)
+            return False
 
     key = (rule.id, (ctx.get("command") or json.dumps(ctx.get("tool_input"), default=str, sort_keys=True)).strip())
-    if state_mod.was_recently_denied(session_id, key, LOOP_WINDOW_S):
+    if not strict and state_mod.was_recently_denied(session_id, key, LOOP_WINDOW_S):
         entry["enforced"] = False
         entry["loop_allow"] = True
         log.append(entry)
@@ -519,11 +584,15 @@ def _run_rule(ctx, rule, match, eff, base, override_reason, b_ms, session_id, mo
     if emitted != eff:
         entry["downgraded_from"] = eff
     entry["action"] = emitted
+    # A strict rule still records the denial. The state write is harmless:
+    # nothing reads it for this rule any more, since the loop check above is
+    # skipped, and keeping it means tuning and any future reader still see one
+    # row per denied call whatever the rule.
     state_mod.record_denial(session_id, key)
     entry["enforced"] = True
     entry["loop_allow"] = False
     log.append(entry)
-    reason = _rule_deny_reason(rule.id, match.detail, match.suggestion, emitted)
+    reason = _rule_deny_reason(rule.id, match.detail, match.suggestion, emitted, strict)
     if emitted == "ask":
         emit_ask(reason)
     else:
