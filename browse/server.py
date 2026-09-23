@@ -76,6 +76,18 @@ Environment:
   JEV_SYSTEMONE_SOCKET the airlock daemon's socket, for Jev's own decisions.
                        Resolved for you; an empty value sends every decision
                        straight over HTTPS instead
+  JEV_PLANNER_MODEL    the planner for plan=true when the call names none:
+                       sonnet (default) or haiku
+  JEV_PAGE_TEXT_CHARS, JEV_DECISION_SHAPE, JEV_DONE_CONFIDENCE,
+  JEV_BLOCKED_CONFIDENCE
+                       how Jev's own questions are asked; see
+                       vendor/jev-ultrafast/jev_ultrafast/model.py and agent.py
+
+Plan mode (plan=true) puts a warm `claude -p` child in front of Jev for an
+open-ended task: it names one step per turn and the agent executes it
+(vendor/jev-ultrafast/jev_ultrafast/planner.py). The child is started on the
+first planned call, never before, and kept warm for the life of the worker. It
+runs on the user's own `claude` login and is billed there.
 """
 import collections
 import glob
@@ -105,6 +117,12 @@ PROTOCOL_VERSIONS = ("2025-06-18", "2025-03-26", "2024-11-05")
 
 RUNNER = Path(__file__).resolve().with_name("runner.py")
 DEFAULT_TIMEOUT_S = 90.0
+# A planned task is several agent runs and planner turns; the Wikipedia benchmark gives each
+# run 180 s and the slowest planned passes took about 60.
+PLAN_TIMEOUT_S = 180.0
+# What the planner loop keeps back from the per-call timeout, so it stops on its own and
+# returns the page it reached instead of being killed with nothing.
+PLAN_MARGIN_S = 8.0
 CHROMIUM_START_S = 15.0
 TEXT_LIMIT_BYTES = 8 * 1024
 
@@ -117,7 +135,14 @@ TOOL = {
         "text (visible page text, trimmed to 8 KB), plus extracted and "
         "screenshot_path when asked for. Use this instead of driving "
         "Playwright MCP tools step by step. Example: goal=\"open "
-        "https://example.com and report the main heading\", extract=\"h1\"."
+        "https://example.com and report the main heading\", extract=\"h1\". "
+        "Plain `browse` is the default and the fastest: use it when the goal "
+        "spells out the steps (open X, click Y, then click Z). For an "
+        "open-ended task whose route you cannot spell out, set plan=true: a "
+        "warm Claude planner (Sonnet at low effort by default, "
+        "plan_model=\"haiku\" for the cheaper one) names each step and Jev "
+        "executes it. Plan mode is slower (about 12-26 s a task) and bills "
+        "the planner to the user's own claude login (a few cents a task)."
     ),
     "inputSchema": {
         "type": "object",
@@ -151,6 +176,19 @@ TOOL = {
                 "type": "string",
                 "description": "Rank off-screen links against this text instead of `goal`. "
                                "Give the whole task here when `goal` is only the next step.",
+            },
+            "plan": {
+                "type": "boolean",
+                "default": False,
+                "description": "Put a warm Claude planner in front of Jev for an open-ended "
+                               "task. Slower and billed to the user's claude login; leave it "
+                               "off when the goal already names the steps.",
+            },
+            "plan_model": {
+                "type": "string",
+                "enum": ["sonnet", "haiku"],
+                "description": "The planner's model when plan=true. Default sonnet (low "
+                               "effort, thinking off), or JEV_PLANNER_MODEL.",
             },
         },
         "required": ["goal"],
@@ -234,12 +272,13 @@ def resolve_key():
     return key
 
 
-def call_timeout_s():
+def call_timeout_s(plan=False):
+    default = PLAN_TIMEOUT_S if plan else DEFAULT_TIMEOUT_S
     try:
         value = float(os.environ.get("JEV_BROWSE_TIMEOUT", ""))
     except ValueError:
-        return DEFAULT_TIMEOUT_S
-    return value if value > 0 else DEFAULT_TIMEOUT_S
+        return default
+    return value if value > 0 else default
 
 
 def state_dir():
@@ -605,7 +644,7 @@ def parse_arguments(args):
     unknown = sorted(set(args) - set(TOOL["inputSchema"]["properties"]))
     if unknown:
         raise BrowseError("unknown argument(s): %s. `browse` takes goal, start_url, "
-                          "extract, screenshot, links and rank_goal."
+                          "extract, screenshot, links, rank_goal, plan and plan_model."
                           % ", ".join(unknown))
     goal = args.get("goal")
     if not isinstance(goal, str) or not goal.strip():
@@ -619,6 +658,12 @@ def parse_arguments(args):
     links = args.get("links", False)
     if not isinstance(links, bool):
         raise BrowseError("`links` must be true or false.")
+    plan = args.get("plan", False)
+    if not isinstance(plan, bool):
+        raise BrowseError("`plan` must be true or false.")
+    plan_model = args.get("plan_model")
+    if plan_model is not None and plan_model not in ("sonnet", "haiku"):
+        raise BrowseError("`plan_model` must be \"sonnet\" or \"haiku\".")
     start_url = (args.get("start_url") or "").strip()
     if not start_url:
         m = _URL_IN_GOAL.search(goal)
@@ -631,7 +676,8 @@ def parse_arguments(args):
     return {"goal": goal.strip(), "start_url": start_url,
             "extract": (args.get("extract") or "").strip() or None,
             "screenshot": screenshot, "links": links,
-            "rank_goal": (args.get("rank_goal") or "").strip() or None}
+            "rank_goal": (args.get("rank_goal") or "").strip() or None,
+            "plan": plan, "plan_model": plan_model}
 
 
 def trim_text(text, limit=TEXT_LIMIT_BYTES):
@@ -772,13 +818,13 @@ class Browse:
 
     def call(self, args):
         started = time.monotonic()
-        deadline = started + call_timeout_s()
         params = parse_arguments(args)
+        deadline = started + call_timeout_s(params["plan"])
         clone = resolve_clone()
         key = resolve_key()
         try:
             cdp_url = self.ensure_chromium()
-            request = dict(params, op="browse")
+            request = dict(params, op="plan" if params["plan"] else "browse")
             if params["screenshot"]:
                 directory = state_dir()
                 directory.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -789,7 +835,9 @@ class Browse:
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 raise BrowseTimeout("timed out after %.0f s (JEV_BROWSE_TIMEOUT) before "
-                                    "the agent could start." % call_timeout_s())
+                                    "the agent could start." % call_timeout_s(params["plan"]))
+            if params["plan"]:
+                request["budget_s"] = max(remaining - PLAN_MARGIN_S, 1.0)
             # The daemon starts on the worker's first use, so a call that
             # raises from here on still leaves one to stop.
             self.daemon_used = True
@@ -818,6 +866,8 @@ class Browse:
             out["screenshot_path"] = result.get("screenshot_path")
         if params["links"]:
             out["links"] = result.get("links") or []
+        if result.get("plan"):
+            out["plan"] = result["plan"]
         if result.get("timing"):
             out["timing"] = result["timing"]
         return json.loads(json.dumps(out).replace(key, "[REDACTED]"))

@@ -1613,6 +1613,11 @@ R11_SUGGESTION = (
     '"open <url>, click X, then click Y, scroll if the link is not in view". '
     "Jev picks one action at a time out of what it can see, so a goal spelled "
     "out that way is one it can follow and a vague one is not.\n"
+    "Cannot spell the route out (an open-ended task: find a fact, follow "
+    "whatever leads there)? Add plan=true. A warm Claude planner, Sonnet at "
+    "low effort by default or plan_model=\"haiku\", names each step and Jev "
+    "executes it. It is slower and billed to the user's claude login, so plain "
+    "`browse` stays the choice for spelled-out steps.\n"
     "If `browse` comes back `blocked`, or the call errors, Playwright MCP is "
     "yours for the next 30 minutes of this session -- this rule warns instead "
     "of blocking, automatically, no stamp needed. Try `browse` first and that "

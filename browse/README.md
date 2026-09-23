@@ -54,6 +54,10 @@ a real pipe and reports PASS. With no agent environment it reports a skip.
 | `start_url` | string | Where to start. Optional when the goal contains an `http(s)` URL. |
 | `extract` | string | A CSS selector. The text of every match comes back as `extracted`. |
 | `screenshot` | boolean, default false | Write a PNG of the final page and return its path. |
+| `links` | boolean, default false | Return `links`, the final page's element table: the same candidates Jev chose between. |
+| `rank_goal` | string | Rank off-screen links against this text instead of `goal`. |
+| `plan` | boolean, default false | Put a warm Claude planner in front of Jev. For open-ended tasks only; see [Plan mode](#plan-mode). |
+| `plan_model` | `sonnet` or `haiku` | The planner's model. Default `sonnet`, or `JEV_PLANNER_MODEL`. |
 
 The result is JSON text:
 
@@ -66,7 +70,8 @@ The result is JSON text:
 | `text` | Visible text of the final page, trimmed to 8 KB. `text_truncated` is set when it was cut. |
 | `extracted` | Text at `extract`, only when you gave one. |
 | `screenshot_path` | Only when asked for. A PNG under `$XDG_STATE_HOME/jev-kit/browse/`, else `~/.local/state/jev-kit/browse/`. |
-| `timing` | Where the time went: `decisions`, `ops`, `jev_ms`, `text_ms`, `agent_ms`, `total_ms`, `jev_transport`. |
+| `timing` | Where the time went: `decisions`, `ops`, `jev_ms`, `confidence`, `rechecks`, `text_ms`, `agent_ms`, `total_ms`, `jev_transport`. |
+| `plan` | Only with `plan: true`: the planner's `model`, `turns`, `finds`, `transcript`, `planner_ms`, `browse_ms`, `tokens` and `cost_usd`. |
 
 `timing.ops` is one entry per decision Jev made, not per action executed, so a
 decision the executor threw away because the page moved under it shows up there
@@ -218,6 +223,43 @@ Chromium itself, so this is no worse than the Playwright MCP server beside it.
 It is still your decision and it is never the default. The better fix is an
 AppArmor profile for the binary.
 
+## Plan mode
+
+Plain `browse` is the default, and it is the right call whenever the goal can
+spell out the steps: "open X, click Y, then click Z". Jev picks one action at a
+time out of what it can see, and it is fast at that.
+
+It is not built to work out a route. For an open-ended task, "find the year the
+author of X was born", set `plan: true`. A planner, one warm `claude -p` child
+with thinking off and `--effort low`, reads the page's element labels and names
+one step per turn:
+
+```text
+CLICK <label>          the Jev agent executes it on the current page
+TYPE <field> = <text>
+FIND <words>           every element on the page matching the words, however far down
+DONE <answer or ok>
+```
+
+The planner is Sonnet by default. `plan_model: "haiku"` (or
+`JEV_PLANNER_MODEL=haiku`) is cheaper and does as well on spelled-out hops, and
+much worse on open-ended ones; the numbers are in the main
+[README](../README.md).
+
+What it costs:
+
+- **Money.** The planner runs on the user's own `claude` login and is billed
+  there, a few cents a task. Plain `browse` spends nothing on Claude.
+- **Time.** Every turn is a planner answer plus an agent run. Expect tens of
+  seconds a task, not the few seconds a spelled-out goal takes.
+- **A process.** The child starts on the first planned call, never before, and
+  stays warm for the life of the worker. A session that never plans never
+  starts one.
+
+`JEV_BROWSE_TIMEOUT` defaults to 180 seconds for a planned call instead of 90,
+and the loop stops itself a few seconds early so the page it reached still
+comes back.
+
 ## Settings
 
 | Variable | Default | |
@@ -233,6 +275,10 @@ AppArmor profile for the binary.
 | `TEXT_MODEL_PROVIDER` | chosen for you | Set by hand to override the choice above. |
 | `JEV_OFFSCREEN_MAX` | `100` | How many off-viewport links a snapshot may offer. `0` is upstream's viewport-only behaviour, `-1` fills the budget. |
 | `JEV_SYSTEMONE_SOCKET` | the airlock daemon's socket | An empty value sends every decision straight over HTTPS. |
+| `JEV_PLANNER_MODEL` | `sonnet` | The planner for `plan: true` when the call names none. |
+| `JEV_PAGE_TEXT_CHARS` | see model.py | Characters of page text in Jev's state per decision. |
+| `JEV_DECISION_SHAPE` | see model.py | `fanout`: operation and targets in one request. `sequential`: the target asked after the operation. |
+| `JEV_DONE_CONFIDENCE`, `JEV_BLOCKED_CONFIDENCE` | see agent.py | Below this, a DONE or BLOCKED is looked at again once before it ends the run. |
 
 ### Links below the fold
 

@@ -15,6 +15,10 @@ vendor/jev-ultrafast/SPIKE-NOTES.md, "Warm worker and warm Haiku".
 Requests (one JSON object per line):
   {"op": "browse", "goal", "start_url", "extract"?, "screenshot_path"?,
    "rank_goal"?, "links"?}
+  {"op": "plan", "goal", "start_url", "extract"?, "screenshot_path"?, "links"?,
+   "plan_model"?, "budget_s"?}
+                            a warm Claude planner names each step, the agent runs it
+                            (jev_ultrafast/planner.py)
   {"op": "warm"}            start the text model and the harness daemon now
   {"op": "ping"}
   {"op": "stop_daemon"}     stop the browser_harness daemon named by BU_NAME
@@ -62,6 +66,10 @@ def _timing(state, total_ms):
         "ops": [d.get("operation") for d in decisions],
         "jev_ms": [d.get("latency_ms") for d in decisions],
         "text_ms": [t.get("latency_ms") for t in text_calls],
+        # The operation head's confidence per decision, for tuning the DONE/BLOCKED gate
+        # (jev_ultrafast/agent.py) from recorded runs rather than from a guess.
+        "confidence": [d.get("confidence") for d in decisions],
+        "rechecks": state.get("rechecks") or [],
         "total_ms": total_ms,
         "agent_ms": state.get("elapsed_ms"),
         "jev_transport": sorted({d.get("transport") for d in decisions if d.get("transport")}),
@@ -85,42 +93,126 @@ def _links(state):
     ]
 
 
-def browse(request):
+def _read(browser, request, elements):
+    """The page as the caller sees it: url, title, text, and whatever else was asked for."""
+    result = {
+        "final_url": _evaluate(browser, "location.href"),
+        "title": _evaluate(browser, "document.title"),
+        "text": _evaluate(browser, "document.body ? document.body.innerText : ''"),
+    }
+    selector = request.get("extract")
+    if selector:
+        result["extracted"] = _evaluate(
+            browser,
+            "(() => { try { return [...document.querySelectorAll(%s)]"
+            ".map(e => (e.innerText || e.textContent || '').trim()).join('\\n'); }"
+            " catch (e) { return 'invalid selector: ' + e.message; } })()"
+            % json.dumps(selector),
+        )
+    path = request.get("screenshot_path")
+    if path:
+        shot = browser.call("Page.captureScreenshot", format="png")
+        with open(path, "wb") as f:
+            f.write(base64.b64decode(shot["data"]))
+        os.chmod(path, 0o600)
+        result["screenshot_path"] = path
+    if request.get("links"):
+        result["links"] = _links({"elements": elements})
+    return result
+
+
+def _agent_step(request, goal, start_url, rank_goal):
+    """Run the Jev agent for one goal from start_url; the page it ends on, plus its state."""
     from jev_ultrafast import Agent
 
-    started = time.perf_counter()
-    with Agent(request["start_url"], request["goal"], rank_goal=request.get("rank_goal")) as agent:
+    with Agent(start_url, goal, rank_goal=rank_goal) as agent:
         for _state in agent.run():
             pass
         state = agent.snapshot()
-        browser = agent.browser
-        result = {
-            "status": state["status"],
-            "steps": len(state["decisions"]),
-            "final_url": _evaluate(browser, "location.href"),
-            "title": _evaluate(browser, "document.title"),
-            "text": _evaluate(browser, "document.body ? document.body.innerText : ''"),
-        }
-        selector = request.get("extract")
-        if selector:
-            result["extracted"] = _evaluate(
-                browser,
-                "(() => { try { return [...document.querySelectorAll(%s)]"
-                ".map(e => (e.innerText || e.textContent || '').trim()).join('\\n'); }"
-                " catch (e) { return 'invalid selector: ' + e.message; } })()"
-                % json.dumps(selector),
-            )
-        path = request.get("screenshot_path")
-        if path:
-            shot = browser.call("Page.captureScreenshot", format="png")
-            with open(path, "wb") as f:
-                f.write(base64.b64decode(shot["data"]))
-            os.chmod(path, 0o600)
-            result["screenshot_path"] = path
-        if request.get("links"):
-            result["links"] = _links(state)
-        result["timing"] = _timing(state, round((time.perf_counter() - started) * 1000))
-        return result
+        result = _read(agent.browser, request, state.get("elements"))
+    result["status"] = state["status"]
+    result["steps"] = len(state["decisions"])
+    return result, state
+
+
+def browse(request):
+    started = time.perf_counter()
+    result, state = _agent_step(request, request["goal"], request["start_url"], request.get("rank_goal"))
+    result["timing"] = _timing(state, round((time.perf_counter() - started) * 1000))
+    return result
+
+
+def _look(request, url, rank_goal, screenshot=False):
+    """The page at `url` with its element table ranked by `rank_goal`, nothing clicked."""
+    from jev_ultrafast.browser import Browser
+    from jev_ultrafast.model import action_space
+
+    browser = Browser(url, goal=rank_goal)
+    try:
+        page = browser.observe(screenshot=False)
+        elements = action_space(page["actions"])[0]
+        wanted = dict(request, links=True)
+        if not screenshot:
+            wanted["screenshot_path"] = None
+        return _read(browser, wanted, elements)
+    finally:
+        browser.close()
+
+
+# One warm planner child per model, for the life of this worker. Started on the first `plan`
+# request, never before: a session that never plans never pays for a Claude child.
+_PLANNERS = {}
+
+
+def planner_for(model):
+    from jev_ultrafast import planner as plan
+    from jev_ultrafast.text_model_claude_standing import StandingTextModel
+
+    model = model or os.environ.get("JEV_PLANNER_MODEL") or plan.DEFAULT_MODEL
+    if model not in _PLANNERS:
+        _PLANNERS[model] = StandingTextModel(model=model, system_prompt=plan.SYSTEM_PROMPT)
+    return _PLANNERS[model]
+
+
+def plan(request):
+    from jev_ultrafast import planner as plan_module
+
+    started = time.perf_counter()
+    planner = planner_for(request.get("plan_model"))
+    budget_s = float(request.get("budget_s") or 170)
+    states = []
+
+    def step(goal, url, rank_goal, _deadline):
+        page, state = _agent_step(dict(request, links=True, screenshot_path=None), goal, url, rank_goal)
+        states.append(state)
+        return page
+
+    try:
+        outcome = plan_module.run(request["goal"], request["start_url"], planner, step,
+                                  lambda url, rank: _look(request, url, rank), budget_s)
+    finally:
+        # A fresh conversation for the next task, started now in the background so the next
+        # call still finds a warm child: one task's hops are noise in the next one's context.
+        planner.new_session()
+    # Every step already read its page with the caller's `extract`, so the last one is the
+    # answer. Only a screenshot needs the final page opened once more.
+    final = dict(outcome["page"])
+    for key in ("status", "steps"):
+        final.pop(key, None)
+    if request.get("screenshot_path"):
+        final.update(_look(request, final.get("final_url") or request["start_url"], request["goal"],
+                           screenshot=True))
+    if not request.get("links"):
+        final.pop("links", None)
+    decisions = [d for s in states for d in (s.get("decisions") or [])]
+    final["status"] = "done" if outcome["plan"]["stopped"] == "planner said DONE" else "blocked"
+    final["steps"] = len(decisions)
+    final["plan"] = outcome["plan"]
+    final["timing"] = _timing({"decisions": decisions,
+                               "text_calls": [t for s in states for t in (s.get("text_calls") or [])],
+                               "rechecks": [r for s in states for r in (s.get("rechecks") or [])]},
+                              round((time.perf_counter() - started) * 1000))
+    return final
 
 
 def warm():
@@ -172,6 +264,8 @@ def handle(request):
     op = request.get("op")
     if op == "browse":
         return browse(request)
+    if op == "plan":
+        return plan(request)
     if op == "warm":
         return warm()
     if op == "ping":

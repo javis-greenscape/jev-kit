@@ -118,7 +118,13 @@ class TestSchema(unittest.TestCase):
         schema = tool["inputSchema"]
         self.assertEqual(schema["type"], "object")
         self.assertEqual(schema["required"], ["goal"])
-        self.assertEqual(set(schema["properties"]), {"goal", "start_url", "extract", "screenshot", "links", "rank_goal"})
+        self.assertEqual(set(schema["properties"]), {"goal", "start_url", "extract", "screenshot", "links", "rank_goal",
+                          "plan", "plan_model"})
+        self.assertIs(schema["properties"]["plan"]["default"], False)
+        self.assertEqual(schema["properties"]["plan_model"]["enum"], ["sonnet", "haiku"])
+        # The description says when to plan and what it costs, not only that it exists.
+        self.assertIn("open-ended", tool["description"])
+        self.assertIn("claude login", tool["description"])
         for name in ("goal", "start_url", "extract"):
             self.assertEqual(schema["properties"][name]["type"], "string", name)
         self.assertEqual(schema["properties"]["screenshot"]["type"], "boolean")
@@ -203,6 +209,8 @@ class TestArguments(unittest.TestCase):
             ({"goal": "g https://x.example", "url": "https://x"}, "unknown argument"),
             ({"goal": "g https://x.example", "links": "yes"}, "`links`"),
             ({"goal": "g https://x.example", "rank_goal": 7}, "`rank_goal`"),
+            ({"goal": "g https://x.example", "plan": "yes"}, "`plan`"),
+            ({"goal": "g https://x.example", "plan": True, "plan_model": "opus"}, "`plan_model`"),
             ("goal", "must be an object"),
         ):
             with self.assertRaises(server.BrowseError) as caught:
@@ -299,6 +307,30 @@ class TestACall(CallCase):
         request = run.call_args[0][0]
         self.assertIs(request["links"], True)
         self.assertEqual(request["rank_goal"], "the whole task")
+
+    def test_plan_mode_sends_the_plan_op_with_a_budget_inside_the_timeout(self):
+        plan = {"model": "sonnet", "turns": 3, "cost_usd": 0.04}
+        with mock.patch.dict(os.environ, {"JEV_BROWSE_TIMEOUT": ""}), \
+                mock.patch.object(self.browse, "ask",
+                                  return_value=dict(self.RESULT, plan=plan)) as run:
+            out = json.loads(call(self.srv, goal="find when the author of X was born",
+                                  start_url="https://example.com", plan=True,
+                                  plan_model="haiku")["content"][0]["text"])
+        self.assertEqual(out["plan"], plan)
+        request, _env, _clone, timeout = run.call_args[0]
+        self.assertEqual(request["op"], "plan")
+        self.assertEqual(request["plan_model"], "haiku")
+        self.assertGreater(timeout, 170)
+        self.assertLess(request["budget_s"], timeout - 5)
+
+    def test_plain_browse_is_the_default_and_never_plans(self):
+        with mock.patch.object(self.browse, "ask", return_value=dict(self.RESULT)) as run:
+            out = json.loads(call(self.srv, goal="open https://example.com")["content"][0]["text"])
+        request = run.call_args[0][0]
+        self.assertEqual(request["op"], "browse")
+        self.assertIs(request["plan"], False)
+        self.assertNotIn("budget_s", request)
+        self.assertNotIn("plan", out)
 
     def test_links_are_absent_unless_asked_for(self):
         with mock.patch.object(self.browse, "ask",
@@ -776,3 +808,80 @@ class TestChromium(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestRunnerPlan(unittest.TestCase):
+    """browse/runner.py's plan op, with the agent, the page reads and the planner faked."""
+
+    def setUp(self):
+        vendor = str(Path(__file__).resolve().parent.parent / "vendor" / "jev-ultrafast")
+        # The package's __init__ imports the browser stack; the planner module needs none of
+        # it, so the package is stood in by a bare one pointing at the same directory.
+        package = type(sys)("jev_ultrafast")
+        package.__path__ = [os.path.join(vendor, "jev_ultrafast")]
+        patcher = mock.patch.dict(sys.modules, {"jev_ultrafast": package})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        from browse import runner
+        self.runner = runner
+
+    def test_plan_runs_each_step_through_the_agent_and_reports_the_planner(self):
+        runner = self.runner
+        answers = ["CLICK Bicycle wheel", "DONE ok"]
+        asked = []
+
+        class Planner:
+            model = "haiku"
+            sessions = 0
+
+            def ask(self, prompt, timeout=None):
+                asked.append(json.loads(prompt))
+                return {"result": answers.pop(0), "total_cost_usd": 0.002}
+
+            def new_session(self):
+                Planner.sessions += 1
+
+        start = {"final_url": "https://w/start", "title": "S", "text": "", "links": [
+            {"index": "1", "role": "link", "label": "Bicycle wheel"}]}
+        end = {"final_url": "https://w/Bicycle_wheel", "title": "Bicycle wheel", "text": "t",
+               "extracted": "Bicycle wheel", "links": []}
+        state = {"decisions": [{"operation": "CLICK", "latency_ms": 500, "confidence": 0.9}],
+                 "text_calls": []}
+        planner = Planner()
+        with mock.patch.object(runner, "planner_for", return_value=planner) as chosen, \
+                mock.patch.object(runner, "_look", return_value=start), \
+                mock.patch.object(runner, "_agent_step", return_value=(dict(end, status="done", steps=1),
+                                                                        state)) as step:
+            out = runner.handle({"op": "plan", "goal": "Open Bicycle wheel", "start_url": "https://w/start",
+                                 "extract": "h1", "plan_model": "haiku", "budget_s": 60})
+        chosen.assert_called_once_with("haiku")
+        self.assertEqual(step.call_args[0][1], 'Click the element labelled "Bicycle wheel".')
+        self.assertEqual(asked[0]["elements"], ["link Bicycle wheel"])
+        self.assertEqual(out["final_url"], "https://w/Bicycle_wheel")
+        self.assertEqual(out["extracted"], "Bicycle wheel")
+        self.assertEqual(out["status"], "done")
+        self.assertEqual(out["steps"], 1)
+        self.assertNotIn("links", out)
+        self.assertEqual(out["plan"]["turns"], 2)
+        self.assertEqual(out["timing"]["confidence"], [0.9])
+        # A fresh planner conversation for the next task, whatever happened in this one.
+        self.assertEqual(Planner.sessions, 1)
+
+    def test_the_default_planner_is_sonnet_and_can_be_overridden(self):
+        runner = self.runner
+        made = []
+
+        class Model:
+            def __init__(self, model=None, system_prompt=None):
+                made.append(model)
+
+        fake = type(sys)("jev_ultrafast.text_model_claude_standing")
+        fake.StandingTextModel = Model
+        with mock.patch.dict(sys.modules, {"jev_ultrafast.text_model_claude_standing": fake}), \
+                mock.patch.dict(runner._PLANNERS, clear=True), \
+                mock.patch.dict(os.environ, {"JEV_PLANNER_MODEL": ""}):
+            runner.planner_for(None)
+            with mock.patch.dict(os.environ, {"JEV_PLANNER_MODEL": "haiku"}):
+                runner.planner_for(None)
+            runner.planner_for(None)  # kept warm: not built twice
+        self.assertEqual(made, ["sonnet", "haiku"])
