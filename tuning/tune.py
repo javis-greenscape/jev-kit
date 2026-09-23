@@ -931,7 +931,7 @@ def apply_criteria_replacement(source, replacements):
     def offset(lineno, col):
         """Absolute character offset into `source` for a 1-indexed line and
         0-indexed column, as ast gives them."""
-        return sum(len(l) for l in lines[: lineno - 1]) + col
+        return sum(len(line) for line in lines[: lineno - 1]) + col
 
     # Replace furthest-in-the-file first so earlier offsets stay valid.
     targets.sort(key=lambda t: (t[0].lineno, t[0].col_offset), reverse=True)

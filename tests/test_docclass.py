@@ -19,6 +19,7 @@ import tests  # noqa: F401, I001 -- MUST be the first import. `python3 -m unitte
 
 import json
 import unittest
+from unittest import mock
 
 from docclass import classify as dc
 
@@ -227,6 +228,17 @@ class TestCli(unittest.TestCase):
         from docclass import cli
         with self.assertRaises(dc.ClassificationError):
             cli.page_texts("/nonexistent/nothing.pdf")
+
+    def test_main_builds_its_parser_when___doc___is_none(self):
+        # __doc__ is None under python -OO (docstrings stripped). The parser
+        # description reads `__doc__` before argparse ever sees `--help`, so
+        # a naive `(__doc__ or "").splitlines()[0]` still raises IndexError
+        # on an empty docstring -- `"".splitlines()` is `[]`, not `[""]`.
+        from docclass import cli
+        with mock.patch.object(cli, "__doc__", None):
+            with self.assertRaises(SystemExit) as ctx:
+                cli.main(["--help"])
+        self.assertEqual(ctx.exception.code, 0)
 
 
 if __name__ == "__main__":
