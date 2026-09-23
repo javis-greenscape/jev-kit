@@ -1196,3 +1196,25 @@ def test_a_replacement_that_loses_the_race_is_stopped(monkeypatch):
     model.new_session()
     assert model._next is waiting
     assert spawned[0].terminated
+
+
+@pytest.mark.parametrize("answer", ["CLICK X", "DONE ok"])
+def test_a_slow_answer_that_leaves_no_time_starts_no_browser_work(monkeypatch, answer):
+    clock = [1000.0]
+    monkeypatch.setattr(plan.time, "monotonic", lambda: clock[0])
+    start = {"final_url": "https://w/start", "title": "Start", "text": "", "links": []}
+
+    class SlowPlanner(FakePlanner):
+        def ask(self, prompt, timeout=None):
+            clock[0] += 58  # the answer took almost all of a 60 s budget
+            return super().ask(prompt, timeout)
+
+    def step(*_args):
+        raise AssertionError("a step started after the budget ran out")
+
+    def verify(_task):
+        raise AssertionError("a DONE check started after the budget ran out")
+
+    out = plan.run("t", "https://w/start", SlowPlanner([answer]), step, lambda *_: start, 60, verify=verify)
+    assert out["page"] is start
+    assert out["plan"]["stopped"] == "ran out of the 60s budget after 1 turn(s)"

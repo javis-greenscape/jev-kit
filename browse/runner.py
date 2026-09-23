@@ -121,16 +121,18 @@ def _read(browser, request, elements):
     return result
 
 
-def _agent_step(request, goal, start_url, rank_goal, browser=None):
+def _agent_step(request, goal, start_url, rank_goal, browser=None, deadline=None):
     """Run the Jev agent for one goal; the page it ends on, plus its state.
 
     With `browser`, the agent runs in that tab as it stands and leaves it open: the caller
-    owns it. Without, the agent opens start_url in a tab of its own and closes it."""
+    owns it. Without, the agent opens start_url in a tab of its own and closes it. With
+    `deadline` (a time.monotonic() value), the agent stops between actions once it passes."""
     from jev_ultrafast import Agent
 
     with Agent(start_url, goal, rank_goal=rank_goal, browser=browser) as agent:
         for _state in agent.run():
-            pass
+            if deadline is not None and time.monotonic() >= deadline:
+                break
         state = agent.snapshot()
         result = _read(agent.browser, request, state.get("elements"))
     result["status"] = state["status"]
@@ -198,9 +200,9 @@ def plan(request):
     states, checks = [], []
     browser = None
 
-    def step(goal, _url, rank_goal, _deadline):
+    def step(goal, _url, rank_goal, deadline):
         page, state = _agent_step(dict(request, links=True, screenshot_path=None), goal, None, rank_goal,
-                                  browser=browser)
+                                  browser=browser, deadline=deadline)
         states.append(state)
         return page
 

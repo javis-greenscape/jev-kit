@@ -33,6 +33,8 @@ import re
 import time
 
 MAX_TURNS = 12
+# The least time left that still starts a DONE check or a browser step.
+MIN_ACTION_S = 5
 PLANNER_TIMEOUT_S = 30.0
 ELEMENTS_SHOWN = 120
 PAGE_TEXT_SHOWN = 700
@@ -230,6 +232,9 @@ def run(task, start_url, planner, step, look, budget_s, log=lambda _m: None, ver
             break
         planner_ms += (time.perf_counter() - t0) * 1000
         turns = turn
+        # A slow answer can use most of what was left. Browser work started after the budget
+        # is gone runs past the worker's own timeout, which kills the call and its last page.
+        late = deadline - time.monotonic() < MIN_ACTION_S
         for key, value in _usage(event).items():
             if value:
                 tokens[key] = tokens.get(key, 0) + value
@@ -241,6 +246,9 @@ def run(task, start_url, planner, step, look, budget_s, log=lambda _m: None, ver
         found = found_query = None
         if verb is None:
             stopped = "the planner answered with nothing usable: %r" % said[:120]
+            break
+        if late:
+            stopped = "ran out of the %.0fs budget after %d turn(s)" % (budget_s, turn)
             break
         if verb == "DONE":
             if verify is None:
