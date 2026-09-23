@@ -197,82 +197,109 @@ Seven commits of ours sit on top of that pin, in this repository's history:
    click, and the first scroll after a navigation no longer dropped. A two-hop
    Wikipedia link-navigation task went from blocked to done in 7.2 s.
 
-### Sonnet against Jev on a Wikipedia suite
+### Three ways to do a Wikipedia suite
 
-Eight tasks, three runs of each per arm, on 23 September 2026, both arms on
-`claude-sonnet-5`. This is measured against release `854442a` (PR #11): one
-warm worker and one warm Haiku for the life of `browse`'s server, rather than
-a cold start on every call.
+Eight tasks, three runs of each per arm, on 23 September 2026, both Claude arms
+on `claude-sonnet-5`, and Jev's typing helper on the `claude` CLI's `haiku`
+alias. This is
+measured against release `16c46df`: the warm worker and warm Haiku of PR #11,
+plus the goal-ranked off-screen links, the labelled same-page fragments and the
+single retry of PR #12. Earlier runs in this README predate those fixes.
 
-One arm is Jev through this kit's own `browse` server, called over one MCP
-session held open for the whole sweep, the way a real client reuses it. The
-other is `claude -p --model sonnet` holding the Playwright MCP server and
-nothing else, with this account's hooks switched off for that child process.
-Both arms get identical goal text and the same 180 second budget, and the two
-run one after another rather than at once. Tasks, checks and runner are in
-[vendor/jev-ultrafast/bench](vendor/jev-ultrafast/bench); the raw rows for
-this run are in `results-wiki-20260923T105722Z.jsonl` beside them.
+Three arms, one after another rather than at once, each on the same goal text
+and the same 180 second budget:
 
-**Group A is navigation with every hop named**, ending "Stop when the X
-article is open". This is what `browse`'s Jev chooser is built for: it picks
-one on-screen action per step, does not plan, and cannot itself return an
-answer (`vendor/jev-ultrafast/README.md`). Passing means the final URL is the
-target article.
+- **jev** is Jev alone through this kit's own `browse` server, called over one
+  MCP session held open for the whole sweep, the way a real client reuses it.
+- **sonnet + Playwright MCP** is `claude -p --model sonnet` holding the
+  Playwright MCP server and nothing else, driving the page a click at a time.
+- **sonnet planning, `browse` executing** is the shape the kit is actually for:
+  the same isolated Sonnet session with `browse` as its only tool. Claude works
+  out the route and hands `browse` one or two explicit steps at a time;
+  `browse` executes them and reports where it ended.
 
-The fact is read off that final page by the scorer itself, the same way for
-both arms: `browse`'s own returned text for jev, an independent fetch of the
-final URL for sonnet. Neither arm is ever asked for the fact in its own
-words.
+Tasks, checks and runner are in
+[vendor/jev-ultrafast/bench](vendor/jev-ultrafast/bench); the raw rows are in
+`results-wiki-20260923T113839Z.jsonl` beside them.
+
+**Group A is navigation with every hop named**, ending "Stop when the X article
+is open". This is what `browse`'s Jev chooser is built for: it picks one
+on-screen action per step, does not plan, and cannot itself return an answer.
+Passing means the final URL is the target article. The fact is read off that
+final page by the scorer, the same way for every arm, and no arm is ever asked
+for it in its own words.
 
 | arm | pass rate | median s (passes) | p90 s (passes) | median cost USD |
 |---|---|---|---|---|
-| jev via `browse` | 5/18 (28%) | 6.4 | 8.1 | not reported by `browse` |
-| sonnet + Playwright MCP | 18/18 (100%) | 27.2 | 41.3 | $0.106 |
+| jev via `browse` | 12/18 (67%) | 6.9 | 8.3 | not reported by `browse` |
+| sonnet + Playwright MCP | 17/18 (94%) | 26.0 | 42.8 | $0.099 |
+| sonnet planning, `browse` executing | 12/18 (67%) | 34.4 | 150.7 | $0.080 |
 
-| task | jev | sonnet |
-|---|---|---|
-| A1 chlorophyll, two link hops to Chlorophyll a | 3/3 | 3/3 |
-| A2 chess loser, his birth city, its founding year (1703) | 0/3 | 3/3 |
-| A3 Python's creator, the company he joined, its founding year (1975) | 0/3 | 3/3 |
-| A4 Feynman's doctoral advisor, his birth year (1911) | 0/3 | 3/3 |
-| A5 search Kilimanjaro, first to the summit, his nationality (German) | 2/3 | 3/3 |
-| A6 bicycle wheel, two link hops to Axle | 0/3 | 3/3 |
+| task | jev | sonnet + Playwright | sonnet plans, `browse` executes |
+|---|---|---|---|
+| A1 chlorophyll, two link hops to Chlorophyll a | 3/3 | 3/3 | 3/3 |
+| A2 chess loser, his birth city, its founding year (1703) | 0/3 | 2/3 | 2/3 |
+| A3 Python's creator, the company he joined, its founding year (1975) | 3/3 | 3/3 | 2/3 |
+| A4 Feynman's doctoral advisor, his birth year (1911) | 0/3 | 3/3 | 0/3 |
+| A5 search Kilimanjaro, first to the summit, his nationality (German) | 3/3 | 3/3 | 2/3 |
+| A6 bicycle wheel, two link hops to Axle | 3/3 | 3/3 | 3/3 |
 
-**Group B is the old open-ended pair, kept only as a labelled contrast** - a
-start article and a goal article with no hops named. This is not what `browse`
-is built for, and it shows: Jev never leaves the start page.
+**Group B is the old open-ended pair, kept only as a labelled contrast**: a
+start article and a goal article with no hops named, which is not what `browse`
+is built for.
 
 | arm | pass rate | median s (passes) | p90 s (passes) | median cost USD |
 |---|---|---|---|---|
 | jev via `browse` | 0/6 (0%) | n/a | n/a | not reported by `browse` |
-| sonnet + Playwright MCP | 6/6 (100%) | 48.8 | 64.9 | $0.244 |
+| sonnet + Playwright MCP | 6/6 (100%) | 47.1 | 52.7 | $0.182 |
+| sonnet planning, `browse` executing | 1/6 (17%) | 65.5 | 65.5 | $0.138 |
 
-| task | jev | sonnet |
-|---|---|---|
-| B1 open-ended link race to Ancient Rome | 0/3 | 3/3 |
-| B2 open-ended link race to Quantum mechanics | 0/3 | 3/3 |
+| task | jev | sonnet + Playwright | sonnet plans, `browse` executes |
+|---|---|---|---|
+| B1 open-ended link race to Ancient Rome | 0/3 | 3/3 | 0/3 |
+| B2 open-ended link race to Quantum mechanics | 0/3 | 3/3 | 1/3 |
 
-Jev's warm-path timing comes from `browse`'s own `timing` block. The sweep's
-first call paid the one-time cold start: 6.7 s wall, against a 2.8 s warm
-median after it. Every call after that first one logged 73 decisions at a
-median 578 ms each, and the sweep's two typing calls logged a 956 ms median.
+Jev's timing comes from `browse`'s own `timing` block. The sweep's first call
+paid the one-time cold start at 7.5 s, against a 4.8 s warm median after it.
+Across the sweep it logged 112 decisions at a 584 ms median and three typing
+calls at a 741 ms median.
 
-Sonnet spent $3.65 total across its 24 runs.
+The third arm's wall time splits as follows. On Group A it made a median of 4
+`browse` calls, spending a median 25.7 s inside the tool and 55.8 s outside it;
+on Group B, 7 calls, 38.3 s inside and 141.7 s outside.
 
-The old suite's headline 5/18 was never Jev's real hit rate on the job it is
-built for. Group A - the six tasks comparable to the old W3-W6, with hops
-named - still scores Jev 5/18, and Sonnet still 18/18. The wording change
-alone did not move either number.
+The time outside is Claude planning plus the `browse` server's own start-up.
+This arm pays that start-up on every run, because it starts a server of its
+own. The jev arm pays it once for the whole sweep.
 
-What moved is where the old suite's misses came from. Two of its six tasks
-(now Group B) were open-ended link races, where Jev is 0/6. The old sweep
-also ran the pre-PR-11 `browse`, which paid a cold start on every call rather
-than the warm path measured here.
+Ten of the third arm's 24 runs hit the 180 second budget, and a run killed at
+the budget never emits its session JSON, so it reports no cost at all. Its
+$1.46 is therefore the spend of the 14 runs that finished, not of all 24. The
+Playwright arm finished every run and spent $3.33.
 
-Jev's failures on Group A keep the same shape they had before: `browse`
-reports `status: "blocked"` after two to five steps, usually still on the
-page it started. The exception is A3, where it lands on an in-page anchor
-(`#Microsoft`) instead of following the link across pages.
+**Read the three arms as the trade they are.**
+
+Jev is about four times faster than the Playwright arm on the tasks it is
+built for, and five times faster than the third arm, and it costs nothing in
+Claude tokens. That holds only where the hops are named.
+
+Sonnet on Playwright is the most reliable and the most expensive. It is also
+the only arm that handles the open-ended group at all.
+
+Sonnet planning with `browse` executing matches Jev's hit rate on Group A, and
+its cost per finished run is the lowest of the two Claude arms. It is slower
+than either, though, and its tail is long. Reach for it when a route needs
+planning and each step is still a plain click.
+
+Jev's own Group A rate moved from 5/18 to 12/18 with the PR #12 fixes, on the
+same tasks and the same wording. A3 went from 0/3 to 3/3 once a
+table-of-contents entry stopped reading like the article link. A6 went from 0/3
+to 3/3 once the named link far below the fold was offered at all.
+
+A2 and A4 are still 0/3, but they now fail further in. A4 reaches the list of
+laureates rather than stopping on the first page. A2 reaches the 1972 article
+and then follows a photograph whose caption carries the name the goal asked
+for.
 
 To move to a newer upstream:
 
