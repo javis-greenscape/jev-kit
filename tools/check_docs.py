@@ -25,6 +25,13 @@ MERMAID_HEADER_RE = re.compile(r"^(flowchart|graph)\s+(TD|TB|BT|LR|RL)\s*$")
 SKIP_SCHEMES = ("http://", "https://", "mailto:", "#")
 
 
+# A directory holding somebody else's Markdown, kept exactly as it was fetched, marks itself
+# with this file. Its links are theirs and resolve on their site, not in this tree, so
+# checking them here only produces noise; the index that points at the directory is ours and
+# is still checked. See docs/jev-reference/README.md for the one that exists today.
+VERBATIM_MARKER = ".verbatim"
+
+
 def markdown_files():
     out = [os.path.join(ROOT, "README.md")]
     for name in ("AGENTS.md", "CLAUDE.md", "ROADMAP.md"):
@@ -32,7 +39,10 @@ def markdown_files():
         if os.path.isfile(p):
             out.append(p)
     docs = os.path.join(ROOT, "docs")
-    for dirpath, _dirnames, filenames in os.walk(docs):
+    for dirpath, dirnames, filenames in os.walk(docs):
+        if VERBATIM_MARKER in filenames:
+            dirnames[:] = []
+            continue
         for f in sorted(filenames):
             if f.endswith(".md"):
                 out.append(os.path.join(dirpath, f))
