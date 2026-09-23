@@ -1,8 +1,11 @@
 """Offline contracts for a dynamic operation/target policy. No paid APIs."""
 
 import json
+import shutil
+import subprocess
 import time
 from copy import deepcopy
+from pathlib import Path
 from unittest.mock import Mock
 
 import pytest
@@ -423,3 +426,228 @@ def test_a_daemon_that_refuses_falls_back_to_https(monkeypatch, tmp_path):
     assert model.post_via_socket({"state": {}}) is None
     thread.join(timeout=5)
     server.close()
+
+
+# --- Goal-ranked off-screen candidates, same-page fragments, and the one retry ---
+
+SNAPSHOT_JS = Path(__file__).resolve().parents[1] / "jev_ultrafast" / "snapshot.js"
+
+
+def snapshot_helpers():
+    """The pure, fenced helper block out of snapshot.js, runnable on its own in node."""
+    source = SNAPSHOT_JS.read_text()
+    start = source.index("// --- goal ranking")
+    end = source.index("// --- end goal ranking")
+    return source[start:end]
+
+
+def run_js(driver):
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("node is not installed")
+    result = subprocess.run(
+        [node, "-e", snapshot_helpers() + driver], capture_output=True, text=True, timeout=30
+    )
+    assert result.returncode == 0, result.stderr
+    return json.loads(result.stdout)
+
+
+SORT_AS_SNAPSHOT_DOES = """
+    const words=jevGoalWords(goal), flat=jevGoalFlat(goal);
+    for (const r of rows) r.rank=jevGoalRank(r.label, words, flat);
+    rows.sort((a,b)=>b.rank[0]-a.rank[0] || b.rank[1]-a.rank[1] ||
+      a.distance-b.distance || a.node-b.node);
+"""
+
+
+def rank(goal, rows, field="label"):
+    """`rows` in the order snapshot.js would offer them off-viewport."""
+    return run_js(
+        "const goal=%s, rows=%s;" % (json.dumps(goal), json.dumps(rows))
+        + SORT_AS_SNAPSHOT_DOES
+        + "console.log(JSON.stringify(rows.map(r=>r[%s])));" % json.dumps(field)
+    )
+
+
+def test_a_named_hop_far_down_the_page_is_offered_before_its_nearer_neighbours():
+    # The A2 failure: "1972" sat thousands of pixels below the fold on the Chess article, so a
+    # hundred rows ordered by distance were all its neighbours and none of them was the target.
+    rows = [
+        {"label": "Chess piece", "distance": 120, "node": 1},
+        {"label": "Rules of chess", "distance": 200, "node": 2},
+        {"label": "1971", "distance": 8800, "node": 3},
+        {"label": "1972", "distance": 9000, "node": 4},
+    ]
+    assert rank("From the Chess article, open the article about 1972.", rows)[0] == "1972"
+
+
+def test_a_two_word_name_quoted_in_the_goal_outranks_a_single_shared_word():
+    rows = [
+        {"label": "Bicycle", "distance": 10, "node": 1},
+        {"label": "Wheel", "distance": 20, "node": 2},
+        {"label": "Bicycle wheel", "distance": 7000, "node": 3},
+    ]
+    assert rank("On the Bicycle article, open Bicycle wheel.", rows)[0] == "Bicycle wheel"
+
+
+def test_without_a_goal_the_order_is_still_distance_then_identity():
+    rows = [
+        {"label": "Third", "distance": 300, "node": 9},
+        {"label": "First", "distance": 100, "node": 4},
+        {"label": "Second", "distance": 300, "node": 5},
+    ]
+    assert rank("", rows) == ["First", "Second", "Third"]
+
+
+def test_equally_relevant_candidates_keep_the_nearest_one_first():
+    rows = [
+        {"label": "Physics", "distance": 4000, "node": 1},
+        {"label": "Physics", "distance": 90, "node": 2},
+    ]
+    assert rank("Open Physics", rows, field="distance") == [90, 4000]
+
+
+@pytest.mark.parametrize(
+    ("href", "same_page"),
+    [
+        ("#Microsoft", True),
+        ("https://en.wikipedia.test/wiki/Guido_van_Rossum#Microsoft", True),
+        ("/wiki/Guido_van_Rossum#Python", True),
+        ("/wiki/Microsoft", False),
+        ("/wiki/Microsoft#History", False),
+        ("https://other.test/wiki/Guido_van_Rossum#Microsoft", False),
+        ("/wiki/Guido_van_Rossum", False),
+        ("", False),
+        (None, False),
+        ("javascript:void(0)", False),
+    ],
+)
+def test_a_link_that_only_changes_the_fragment_is_recognised(href, same_page):
+    here = "https://en.wikipedia.test/wiki/Guido_van_Rossum"
+    actual = run_js(
+        "console.log(JSON.stringify(jevSamePageFragment(%s, %s)));" % (json.dumps(href), json.dumps(here))
+    )
+    assert actual is same_page
+
+
+def test_both_label_paths_carry_the_section_suffix():
+    # The A3 failure: a table-of-contents entry read exactly like the article link, so the run
+    # ended on the same page. The suffix is built once and used by both the in-viewport and the
+    # off-viewport label; this guards the wiring the node tests above cannot see.
+    source = SNAPSHOT_JS.read_text()
+    assert "' (section of this page)'" in source
+    assert "const plain=(name(e)||rname)+fragment;" in source
+    assert "label:(name(e)||rname)+fragment," in source
+
+
+def test_the_goal_is_compiled_into_the_snapshot_read():
+    from jev_ultrafast import browser as browser_module
+
+    goal = 'Open the "1972" article'
+    source = browser_module.read_state(goal)
+    assert "const GOAL_TEXT=%s;" % json.dumps(goal) in source
+    assert 'const GOAL_TEXT="";' in browser_module.read_state()
+    # The marker is computed from the same ordered table, so it has to be compiled the same way.
+    assert "const GOAL_TEXT=%s;" % json.dumps(goal) in browser_module.marker_of(source)
+
+
+def test_the_observed_read_uses_the_browsers_own_compiled_snapshot(monkeypatch):
+    import jev_ultrafast.browser as browser
+
+    b = browser.Browser.__new__(browser.Browser)
+    b.session = "test"
+    b.read_state = "COMPILED_FOR_THIS_GOAL"
+    b.after_input = None
+    seen = []
+
+    def cdp(method, **params):
+        seen.append(params.get("expression"))
+        return {"result": {"value": page()}}
+
+    monkeypatch.setattr(browser, "cdp", cdp)
+    b.observe(screenshot=False)
+    assert seen == ["COMPILED_FOR_THIS_GOAL"]
+
+
+def test_a_malformed_decision_is_asked_once_more(monkeypatch):
+    calls = []
+
+    def once(_page, _goal, _history):
+        calls.append(1)
+        if len(calls) == 1:
+            raise ValueError(model.INVALID_DECISION)
+        return {"choice": "DONE"}
+
+    monkeypatch.setattr(model, "_decide_once", once)
+    assert model.decide(page(), "Find a book", []) == {"choice": "DONE"}
+    assert len(calls) == 2
+
+
+def test_a_decision_malformed_twice_is_raised_and_not_asked_a_third_time(monkeypatch):
+    calls = []
+
+    def once(_page, _goal, _history):
+        calls.append(1)
+        raise ValueError(model.INVALID_DECISION)
+
+    monkeypatch.setattr(model, "_decide_once", once)
+    with pytest.raises(ValueError, match="Invalid TypeSafe"):
+        model.decide(page(), "Find a book", [])
+    assert len(calls) == 2
+
+
+def test_any_other_decision_failure_is_not_retried(monkeypatch):
+    calls = []
+
+    def once(_page, _goal, _history):
+        calls.append(1)
+        raise ValueError("Reached the demo's model-call budget")
+
+    monkeypatch.setattr(model, "_decide_once", once)
+    with pytest.raises(ValueError, match="budget"):
+        model.decide(page(), "Find a book", [])
+    assert len(calls) == 1
+
+
+def test_an_empty_field_value_is_asked_once_more(monkeypatch):
+    calls = []
+
+    def once(_context):
+        calls.append(1)
+        if len(calls) == 1:
+            raise ValueError(model.NO_FIELD_VALUE)
+        return "book", {"model": "test", "latency_ms": 1}
+
+    monkeypatch.setattr(model, "_field_text_once", once)
+    assert model.field_text({"goal": "Find a book"})[0] == "book"
+    assert len(calls) == 2
+
+
+def test_a_field_value_missing_twice_is_raised(monkeypatch):
+    calls = []
+
+    def once(_context):
+        calls.append(1)
+        raise ValueError(model.NO_FIELD_VALUE)
+
+    monkeypatch.setattr(model, "_field_text_once", once)
+    with pytest.raises(ValueError, match="no valid field value"):
+        model.field_text({"goal": "Find a book"})
+    assert len(calls) == 2
+
+
+def test_the_text_retry_happens_before_any_browser_input(runner, monkeypatch):
+    calls = []
+
+    def once(_context):
+        calls.append(1)
+        if len(calls) == 1:
+            raise ValueError(model.NO_FIELD_VALUE)
+        return "book", {"model": "test", "latency_ms": 1}
+
+    monkeypatch.setattr(model, "_field_text_once", once)
+    monkeypatch.setattr(loop, "field_text", model.field_text)
+    runner.command("act", {"fingerprint": runner.state["page"]["fingerprint"]})
+    # Two model calls, one input: upstream's rule that a mutation is never retried is intact.
+    assert len(calls) == 2
+    runner.state["browser"].act.assert_called_once()

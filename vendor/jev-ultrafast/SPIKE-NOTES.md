@@ -1156,3 +1156,43 @@ executor will type into after the page moved, which is a safety decision
 upstream made deliberately and not one to take in a vendored patch. The cost is
 one extra decision, about 550 ms, twice a run. It is visible in the `timing.ops`
 list every call now returns.
+
+## Ranking off-screen links by the goal, and one retry (2026-09-23)
+
+The Wikipedia suite in `bench/run_wiki_bench.py` found three failures that were
+not about speed at all.
+
+**The named hop nobody could reach.** Off-viewport candidates were ordered by
+distance from the viewport and cut at `JEV_OFFSCREEN_MAX`. On an article-length
+page that fills the budget with the target's neighbours and never the target:
+"1972" on Chess, "Bicycle wheel" on Bicycle and "Richard Feynman" on the list of
+laureates all sat thousands of pixels below the fold, and the run stopped rather
+than scroll. The order is now relevance to the goal first, distance second.
+
+The score is deterministic and costs nothing: normalised token overlap between
+the element's accessible name and the goal, plus one when the whole name appears
+in the goal verbatim, with the number of matched words breaking the tie so
+"Bicycle wheel" beats the bare "Bicycle" that shares one word with the goal. The
+250-row budget, the 100-row off-screen cap and in-viewport-first all stay as
+they were. To score against the goal, the snapshot has to know it: `browser.py`
+compiles it into `snapshot.js` the same way it compiles the off-screen cap, and
+into the marker expression too, because the marker is computed from the same
+ordered table.
+
+**The table of contents that reads like the article.** A run ended `done` at
+`Guido_van_Rossum#Microsoft`, having clicked the contents entry rather than the
+link to the company. A link whose href differs from the current URL only in its
+fragment now carries " (section of this page)" in its label, so the two are
+distinguishable without a model call.
+
+**Two failures that were only a bad answer.** One run died on `Invalid TypeSafe
+response; no action executed.` and another on `Text helper returned no valid
+field value; nothing typed.` Both are raised before anything is executed — the
+answer was rejected before it could name an action, and nothing was typed — so
+both are now asked again, once. Upstream's rule that a browser mutation is never
+retried is untouched: the retry is above the model call and below no mutation at
+all, and a second bad answer is raised as before.
+
+All of it is unit-tested offline. The two pure JavaScript helpers are fenced in
+`snapshot.js` and run directly under `node` from `tests/test_agent.py`, so the
+ordering and the fragment rule are checked without a browser.

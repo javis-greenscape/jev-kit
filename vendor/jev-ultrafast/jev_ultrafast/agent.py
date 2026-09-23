@@ -16,7 +16,7 @@ class Agent:
             raise ValueError("Supply a task")
         plan = [task]
         self.pending_text = None
-        self.browser = Browser(url)
+        self.browser = Browser(url, goal=task)
         self.record_dir = Path(record_dir) if record_dir else None
         self.screenshots = screenshots or bool(record_dir)
         try:

@@ -35,14 +35,31 @@ def offscreen_max():
         return DEFAULT_OFFSCREEN_MAX
 
 
+def read_state(goal=""):
+    """snapshot.js with the off-screen budget and the run's goal compiled in.
+
+    The goal is the only thing the snapshot needs a model for otherwise: off-viewport
+    candidates are ranked by how much their accessible name looks like the goal before they
+    are ranked by distance, which is plain token overlap, deterministic and free."""
+    source = Path(__file__).with_name("snapshot.js").read_text()
+    source = re.sub(
+        r"const OFFSCREEN_LIMIT=-?\d+;", "const OFFSCREEN_LIMIT=%d;" % offscreen_max(), source, count=1
+    )
+    return re.sub(
+        r'const GOAL_TEXT="";',
+        lambda _match: "const GOAL_TEXT=%s;" % json.dumps(goal or ""),
+        source,
+        count=1,
+    )
+
+
+def marker_of(source):
+    return f"(() => {{ const state={source}; return state?.marker ?? null; }})()"
+
+
 # Atomically read visible content and controls, preserving actual DOM node identity.
-READ_STATE = re.sub(
-    r"const OFFSCREEN_LIMIT=-?\d+;",
-    "const OFFSCREEN_LIMIT=%d;" % offscreen_max(),
-    Path(__file__).with_name("snapshot.js").read_text(),
-    count=1,
-)
-MARKER = f"(() => {{ const state={READ_STATE}; return state?.marker ?? null; }})()"
+READ_STATE = read_state()
+MARKER = marker_of(READ_STATE)
 # The scroll offsets a wheel at (550, 650) could move: the page, and every element under the cursor.
 SCROLL_POSITION = (
     "(() => { const s=[scrollX,scrollY]; let e=document.elementFromPoint(550,650); "
@@ -54,7 +71,11 @@ class StalePage(ValueError):
 
 
 class Browser:
-    def __init__(self, url):
+    def __init__(self, url, goal=""):
+        # The goal reaches the snapshot so it can rank off-viewport candidates by it. It is
+        # baked into both reads, because the marker is computed from the same ordered table.
+        self.read_state = read_state(goal)
+        self.marker = marker_of(self.read_state)
         ensure_daemon()
         self.target = cdp("Target.createTarget", url="about:blank", background=True)["targetId"]
         self.session = cdp("Target.attachToTarget", targetId=self.target, flatten=True)["sessionId"]
@@ -113,7 +134,12 @@ class Browser:
         for attempt in range(10):
             try:
                 return browser_operation(
-                    {"operation": "observe", "session": self.session, "screenshot": screenshot}
+                    {
+                        "operation": "observe",
+                        "session": self.session,
+                        "screenshot": screenshot,
+                        "read_state": self.read_state,
+                    }
                 )
             except StalePage:
                 if attempt == 9:
@@ -131,7 +157,7 @@ class Browser:
                 f"return c ? [c.pageKey(),c.guard(c.nodes.get({node}))] : null; }})()"
             )
             return current == [page["page_key"], page["guards"].get(str(node))]
-        return self.evaluate(MARKER) == page["marker"]
+        return self.evaluate(getattr(self, "marker", MARKER)) == page["marker"]
 
     def act(self, action, page, text=None):
         if not self.fresh(page, action):
@@ -234,7 +260,7 @@ def browser_operation(request):
                     call("Input.insertText", text=request["text"])
         return {"executed": action["id"]}
 
-    info = evaluate(READ_STATE)
+    info = evaluate(request.get("read_state") or READ_STATE)
     if info is None:
         raise StalePage("Document is navigating")
     info["fingerprint"] = fingerprint(info)

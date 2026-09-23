@@ -21,6 +21,35 @@
         n.nodeType===1 && n.getAttribute('aria-hidden')!=='true' ? name(n,seen) : '').join(' ').trim()) ||
       e.getAttribute('title') || e.getAttribute('placeholder') || '';
   };
+  // --- goal ranking and same-page fragments (pure; unit-tested via tests/test_agent.py) ---
+  // browser.py rewrites the GOAL_TEXT line from the run's goal before evaluating this file.
+  const GOAL_TEXT="";
+  const jevTokens = s => (s||'').toLowerCase().replace(/[^a-z0-9]+/g,' ').trim().split(' ').filter(Boolean);
+  const jevGoalWords = text => new Set(jevTokens(text));
+  const jevGoalFlat = text => ' '+jevTokens(text).join(' ')+' ';
+  // [score, matched] for a candidate's accessible name. The score is normalised token overlap
+  // with the goal plus 1 when the whole name appears in the goal verbatim; `matched` is how
+  // many of its words the goal contains, which separates "Bicycle wheel" from "Bicycle" when
+  // both are wholly inside the goal and so both score the same. Deterministic, no model call:
+  // a named hop ("1972", "Bicycle wheel") is nearly always a substring of the goal, and that
+  // alone lifts it over the neighbours that crowded it out of a distance-ordered budget.
+  const jevGoalRank = (label, goalWords, goalFlat) => {
+    const words = jevTokens(label);
+    if (!words.length || !goalWords.size) return [0,0];
+    let matched = 0;
+    for (const w of words) if (goalWords.has(w)) matched++;
+    return [matched/words.length + (goalFlat.includes(' '+words.join(' ')+' ') ? 1 : 0), matched];
+  };
+  // True when the href differs from the current page only in its fragment, so clicking it
+  // moves within this page rather than to another article.
+  const jevSamePageFragment = (href, here) => {
+    if (href === null || href === undefined || href === '') return false;
+    let target, current;
+    try { target = new URL(href, here); current = new URL(here); } catch { return false; }
+    return Boolean(target.hash) && target.origin === current.origin &&
+      target.pathname === current.pathname && target.search === current.search;
+  };
+  // --- end goal ranking and same-page fragments ---
   const roles=['button','link','checkbox','radio','switch','tab','menuitem','menuitemradio',
     'option','gridcell','combobox','textbox','searchbox','spinbutton'];
   const selector='a[href],button,input,textarea,select,summary,[contenteditable="true"],'+
@@ -60,10 +89,15 @@
   // -1 fills the budget, which is what the first version of this did.
   const OFFSCREEN_LIMIT=100;
   const actions=[], offscreen=[];
+  const goalWords=jevGoalWords(GOAL_TEXT), goalFlat=jevGoalFlat(GOAL_TEXT);
   for (const e of document.querySelectorAll(selector)) {
     if (!safe(e) || !visible(e) || e.matches(':disabled') || e.closest('[aria-disabled="true"]')) continue;
     const r=e.getBoundingClientRect(), x=r.x+r.width/2, y=r.y+r.height/2, rname=role(e);
     if (!rname || r.width<=0 || r.height<=0) continue;
+    // A link that only changes the fragment goes nowhere new; say so, so a table-of-contents
+    // entry is not mistaken for the article link with the same words in it.
+    const fragment=e.tagName==='A' && jevSamePageFragment(e.getAttribute('href'), location.href)
+      ? ' (section of this page)' : '';
     if (x<0 || y<0 || x>=innerWidth || y>=innerHeight) {
       // A long page keeps almost every link out of the viewport. Offer the nearest links and
       // buttons anyway, clearly labelled; Browser.act scrolls one into view before clicking it,
@@ -71,13 +105,15 @@
       // typing into something nobody has seen is not the same kind of safe.
       if (rname!=='link' && rname!=='button') continue;
       const where=y<0 ? 'above' : y>=innerHeight ? 'below' : 'offscreen';
-      offscreen.push({node:identity(e),role:rname,label:(name(e)||rname)+' ('+where+')',
+      const plain=(name(e)||rname)+fragment;
+      offscreen.push({node:identity(e),role:rname,label:plain+' ('+where+')',
         rect:{x:r.x,y:r.y,w:r.width,h:r.height},kind:'click',value:'',offscreen:where,
+        rank:jevGoalRank(name(e)||rname,goalWords,goalFlat),
         distance:y<0 ? -y : y>=innerHeight ? y-innerHeight+1 : 0});
       continue;
     }
     if (rname==='gridcell' && e.querySelector('button,[role="button"]')) continue;
-    const base={node:identity(e),role:rname,label:name(e)||rname,
+    const base={node:identity(e),role:rname,label:(name(e)||rname)+fragment,
       rect:{x:r.x,y:r.y,w:r.width,h:r.height}};
     for (const key of ['checked','selected','expanded']) {
       const value=e.getAttribute('aria-'+key);
@@ -98,13 +134,16 @@
       if (editable) actions.push({...base,kind:'click',value,label:'Open '+base.label});
     }
   }
-  // In-viewport actions first, then the nearest off-viewport ones, within the one budget.
-  offscreen.sort((a,b)=>a.distance-b.distance || a.node-b.node);
+  // In-viewport actions first, then the off-viewport ones within the one budget: most like the
+  // goal first, nearest second. Distance alone put the link a named hop asks for outside a
+  // hundred-row budget on an article-length page, and the run gave up rather than scroll.
+  offscreen.sort((a,b)=>b.rank[0]-a.rank[0] || b.rank[1]-a.rank[1] ||
+    a.distance-b.distance || a.node-b.node);
   let room=Math.max(0,LIMIT-actions.length);
   if (OFFSCREEN_LIMIT>=0) room=Math.min(room,OFFSCREEN_LIMIT);
   const omitted_actions=Math.max(0,actions.length-LIMIT)+Math.max(0,offscreen.length-room);
   actions.splice(LIMIT);
-  for (const a of offscreen.slice(0,room)) { delete a.distance; actions.push(a); }
+  for (const a of offscreen.slice(0,room)) { delete a.distance; delete a.rank; actions.push(a); }
   const words=[], walker=document.createTreeWalker(document.body,NodeFilter.SHOW_TEXT);
   const range=document.createRange(); let node,length=0;
   while ((node=walker.nextNode()) && length<6000) {

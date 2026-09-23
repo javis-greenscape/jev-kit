@@ -90,7 +90,7 @@ def validate_choice(answer, ids):
     except (KeyError, TypeError, ValueError):
         valid = False
     if not valid:
-        raise ValueError("Invalid TypeSafe response; no action executed.")
+        raise ValueError(INVALID_DECISION)
     return answer
 
 
@@ -202,6 +202,19 @@ def choose(state, goal, history):
     }
 
 
+INVALID_DECISION = "Invalid TypeSafe response; no action executed."
+NO_FIELD_VALUE = "Text helper returned no valid field value; nothing typed."
+
+
+def _decide_once(page, goal, history):
+    provider = os.environ.get("DECISION_PROVIDER", "jev")
+    if provider == "jev":
+        return choose(state=page, goal=goal, history=history)
+    from .decision_claude import decide as claude_decide
+
+    return claude_decide(page, goal, history, provider)
+
+
 def decide(page, goal, history):
     """Dispatch to the decision-maker selected by DECISION_PROVIDER (default: jev, unchanged).
 
@@ -210,13 +223,18 @@ def decide(page, goal, history):
     behaviour. "claude-haiku"/"claude-sonnet" route to jev_ultrafast.decision_claude instead,
     a standing `claude -p` child asked for the same operation+target decision in strict JSON,
     given the same element table. See SPIKE-NOTES.md, "Jev versus Claude as decision-maker".
-    """
-    provider = os.environ.get("DECISION_PROVIDER", "jev")
-    if provider == "jev":
-        return choose(state=page, goal=goal, history=history)
-    from .decision_claude import decide as claude_decide
 
-    return claude_decide(page, goal, history, provider)
+    A malformed answer is asked again, once. Upstream's rule that a browser mutation is never
+    retried is untouched: this retry happens before anything is executed, because the answer
+    was rejected before it could name an action. A second malformed answer is raised.
+    """
+    for attempt in (0, 1):
+        try:
+            return _decide_once(page, goal, history)
+        except ValueError as exc:
+            if attempt or INVALID_DECISION not in str(exc):
+                raise
+    raise AssertionError("unreachable")
 
 
 def field_context(goal, action, page, history):
@@ -258,6 +276,20 @@ def field_context(goal, action, page, history):
 
 
 def field_text(context):
+    """The field value, asking again once if the helper answers with nothing usable.
+
+    Same reasoning as decide(): nothing has been typed when this raises, so the retry cannot
+    repeat an input. Anything else — a missing key, a transport failure — is raised at once."""
+    for attempt in (0, 1):
+        try:
+            return _field_text_once(context)
+        except ValueError as exc:
+            if attempt or NO_FIELD_VALUE not in str(exc):
+                raise
+    raise AssertionError("unreachable")
+
+
+def _field_text_once(context):
     if os.environ.get("TEXT_MODEL_PROVIDER") == "claude-standing":
         # Standing-process adapter: one long-lived `claude` CLI child instead of a spawn per
         # call. See jev_ultrafast/text_model_claude_standing.py and SPIKE-NOTES.md.
@@ -302,7 +334,7 @@ def field_text(context):
         if set(output) != {"text"} or not isinstance(value, str) or not value.strip() or len(value) > 2000:
             raise ValueError()
     except (ValueError, KeyError, TypeError):
-        raise ValueError("Text helper returned no valid field value; nothing typed.") from None
+        raise ValueError(NO_FIELD_VALUE) from None
     return value, {
         "model": model,
         "latency_ms": round((time.perf_counter() - started) * 1000),
