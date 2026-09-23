@@ -231,7 +231,7 @@ On a Wikipedia suite of eight tasks, three runs each, on 23 September 2026:
 
 | Arm | Hops named | No hops named | Median cost, named / not |
 |---|---|---|---|
-| Jev alone | 15/18, 7.1 s | 0/6 | no Claude tokens |
+| Jev alone | 15/18, 7.1 s | 0/6 | not reported by `browse` (Haiku writes field text) |
 | `plan: true`, Sonnet low | 16/18, 16.4 s | 6/6, 33.5 s | $0.048 / $0.113 |
 | Sonnet on Playwright MCP | 17/18, 26.0 s | 6/6, 47.1 s | $0.099 / $0.182 |
 
