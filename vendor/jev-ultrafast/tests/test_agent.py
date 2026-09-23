@@ -870,3 +870,48 @@ def test_the_standing_child_takes_a_model_and_a_system_prompt_of_its_own():
 def standing_index(command, flag):
     return command.index(flag)
 
+
+# --- a low-confidence DONE or BLOCKED is looked at again, once ------------------------
+
+
+def stop_decision(operation, confidence):
+    return {"choice": operation, "operation": operation, "target": None, "confidence": confidence,
+            "probabilities": {operation: confidence}, "latency_ms": 10, "usage": {}}
+
+
+@pytest.mark.parametrize("operation", ["DONE", "BLOCKED"])
+def test_a_low_confidence_stop_is_rechecked_before_it_ends_the_run(runner, operation):
+    runner.state["decision"] = stop_decision(operation, 0.3)
+    runner.command("act", {"fingerprint": runner.state["page"]["fingerprint"]})
+    assert runner.state["status"] == "ready"
+    assert runner.state["browser"].observe.call_count == 1
+    assert runner.state["rechecks"] == [{"operation": operation, "confidence": 0.3, "url": "https://example.test/"}]
+    # The second answer stands, however unsure: the gate never loops.
+    runner.state["decision"] = stop_decision(operation, 0.2)
+    runner.command("act", {"fingerprint": runner.state["page"]["fingerprint"]})
+    assert runner.state["status"] == ("done" if operation == "DONE" else "blocked")
+
+
+def test_a_confident_done_ends_the_run_at_once(runner):
+    runner.state["decision"] = stop_decision("DONE", 0.95)
+    runner.command("act", {"fingerprint": runner.state["page"]["fingerprint"]})
+    assert runner.state["status"] == "done"
+    runner.state["browser"].observe.assert_not_called()
+
+
+def test_an_executed_action_rearms_the_gate(runner):
+    runner.state["decision"] = stop_decision("DONE", 0.3)
+    runner.command("act", {"fingerprint": runner.state["page"]["fingerprint"]})
+    runner.state["decision"] = decision("e3")
+    runner.command("act", {"fingerprint": runner.state["page"]["fingerprint"]})
+    runner.state["decision"] = stop_decision("DONE", 0.3)
+    runner.command("act", {"fingerprint": runner.state["page"]["fingerprint"]})
+    assert runner.state["status"] == "ready" and len(runner.state["rechecks"]) == 2
+
+
+def test_the_threshold_can_be_set_per_operation(runner, monkeypatch):
+    monkeypatch.setenv("JEV_DONE_CONFIDENCE", "0.1")
+    runner.state["decision"] = stop_decision("DONE", 0.3)
+    runner.command("act", {"fingerprint": runner.state["page"]["fingerprint"]})
+    assert runner.state["status"] == "done"
+

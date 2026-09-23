@@ -1,12 +1,30 @@
 """The complete agent loop. Typed choices, observable state, bounded execution."""
 
 import base64
+import os
 import time
 from pathlib import Path
 
 from .browser import Browser, StalePage
 from .model import action_space, decide, field_context, field_text
 from .questions import MAX_STEPS
+
+# Confidence gates on the two operations that end a run. TypeSafe: "A confidence threshold is
+# not one number. Different actions within the same system should be gated at different levels
+# depending on the consequences of getting it wrong" and "Low confidence: Do not act"
+# (confidence.md). Ending the run is the one action with no recovery, so a DONE or BLOCKED
+# below its threshold is not accepted at once: the page is observed again and the decision is
+# asked again, once. The second answer stands, whatever its confidence, so the gate costs at
+# most one extra decision per page and can never loop. The defaults are chosen from recorded
+# confidences, see SPIKE-NOTES.md, "Confidence gate on DONE and BLOCKED".
+STOP_CONFIDENCE_DEFAULTS = {"DONE": 0.5, "BLOCKED": 0.5}
+
+
+def stop_threshold(operation):
+    try:
+        return float(os.environ["JEV_%s_CONFIDENCE" % operation])
+    except (KeyError, ValueError):
+        return STOP_CONFIDENCE_DEFAULTS[operation]
 
 
 class Agent:
@@ -98,6 +116,21 @@ class Agent:
                 if not state["browser"].fresh(page):
                     state["status"] = "ready"
                     raise StalePage("Page changed since the decision. Choose again.")
+                confidence = decision.get("confidence")
+                if (
+                    not state.get("stop_rechecked")
+                    and isinstance(confidence, (int, float))
+                    and confidence < stop_threshold(selected)
+                ):
+                    # Not accepted yet: look again and ask again, once.
+                    state["stop_rechecked"] = True
+                    state.setdefault("rechecks", []).append(
+                        {"operation": selected, "confidence": confidence, "url": page["url"]}
+                    )
+                    state["status"] = "ready"
+                    state["page"] = state["browser"].observe(screenshot=self.screenshots)
+                    state["elapsed_ms"] = round((time.perf_counter() - state["started_at"]) * 1000)
+                    return self.snapshot()
                 state["status"] = "done" if selected == "DONE" else "blocked"
                 state["plan_index"] = int(selected == "DONE")
                 state["elapsed_ms"] = round((time.perf_counter() - state["started_at"]) * 1000)
@@ -106,6 +139,7 @@ class Agent:
             if len(state["history"]) >= MAX_STEPS:
                 state["status"] = "blocked"
                 raise ValueError(f"Stopped at the {MAX_STEPS}-action demo budget")
+            state["stop_rechecked"] = False
             text, helper = None, None
             if action["kind"] == "fill":
                 if not state["browser"].fresh(page):
