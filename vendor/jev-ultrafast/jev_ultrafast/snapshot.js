@@ -53,6 +53,12 @@
       e.getAttribute('href'),scope?.innerText?.slice(0,6000)||''];
   };
   const LIMIT=250;
+  // Off-viewport links get a budget of their own inside the 250: every row
+  // lengthens the table the chooser reads, and filling all 250 with them cost
+  // about a third of the latency of every decision. browser.py rewrites this
+  // line from JEV_OFFSCREEN_MAX; 0 is upstream's viewport-only behaviour and
+  // -1 fills the budget, which is what the first version of this did.
+  const OFFSCREEN_LIMIT=100;
   const actions=[], offscreen=[];
   for (const e of document.querySelectorAll(selector)) {
     if (!safe(e) || !visible(e) || e.matches(':disabled') || e.closest('[aria-disabled="true"]')) continue;
@@ -94,7 +100,8 @@
   }
   // In-viewport actions first, then the nearest off-viewport ones, within the one budget.
   offscreen.sort((a,b)=>a.distance-b.distance || a.node-b.node);
-  const room=Math.max(0,LIMIT-actions.length);
+  let room=Math.max(0,LIMIT-actions.length);
+  if (OFFSCREEN_LIMIT>=0) room=Math.min(room,OFFSCREEN_LIMIT);
   const omitted_actions=Math.max(0,actions.length-LIMIT)+Math.max(0,offscreen.length-room);
   actions.splice(LIMIT);
   for (const a of offscreen.slice(0,room)) { delete a.distance; actions.push(a); }

@@ -3,13 +3,62 @@
 import json
 import math
 import os
+import socket
 import time
+import uuid
 
 import httpx
 
 from .questions import NEXT_ACTION, TARGET, TEXT_VALUE
 
+# One client for the process, so HTTP/2 connection reuse survives between
+# decisions. It only helps a process that outlives a single run: a fresh
+# interpreter per call pays DNS, TCP and TLS again every time.
 CLIENT = httpx.Client(http2=True, timeout=25)
+
+# Optional local transport for the systemone request. jev-kit runs a daemon
+# that already holds pooled keep-alive connections to the same endpoint and
+# adds the Authorization header itself; when the server hands us its socket
+# path we go through it, and we fall back to the direct HTTPS call above on
+# anything at all. Nothing from that project is imported here: the protocol is
+# one JSON line each way.
+SYSTEMONE_SOCKET_ENV = "JEV_SYSTEMONE_SOCKET"
+SOCKET_CONNECT_TIMEOUT = 0.2
+
+
+def systemone_socket():
+    return os.environ.get(SYSTEMONE_SOCKET_ENV) or ""
+
+
+def post_via_socket(body, timeout=25):
+    """The response dict from the local daemon, or None to use HTTPS.
+
+    Never raises: a missing socket, a refused connection, a malformed reply
+    and a daemon-reported failure all come back as None."""
+    path = systemone_socket()
+    if not path or not hasattr(socket, "AF_UNIX"):
+        return None
+    sock = None
+    try:
+        sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        sock.settimeout(SOCKET_CONNECT_TIMEOUT)
+        sock.connect(path)
+        sock.settimeout(timeout + 0.5)
+        request = {"id": uuid.uuid4().hex, "body": body, "timeout_s": timeout}
+        sock.sendall((json.dumps(request) + "\n").encode())
+        line = sock.makefile("rb").readline()
+        if not line:
+            return None
+        answer = json.loads(line.decode())
+        return answer.get("response") if answer.get("ok") else None
+    except Exception:
+        return None
+    finally:
+        if sock is not None:
+            try:
+                sock.close()
+            except Exception:
+                pass
 
 
 def post_json(url, key, body):
@@ -116,7 +165,11 @@ def choose(state, goal, history):
         "questions": questions,
     }
     started = time.perf_counter()
-    result = post_json("https://api.typesafe.ai/v1/systemone", os.environ["TYPESAFE_API_KEY"], body)
+    result = post_via_socket(body)
+    transport = "daemon"
+    if result is None:
+        transport = "https"
+        result = post_json("https://api.typesafe.ai/v1/systemone", os.environ["TYPESAFE_API_KEY"], body)
     operation_answer = validate_choice(result["answers"].get("operation", {}), operations)
     operation = operation_answer["choice"]
     target = None
@@ -143,6 +196,7 @@ def choose(state, goal, history):
         "raw_answers": result["answers"],
         "model": result["model"],
         "usage": result.get("usage", {}),
+        "transport": transport,
         "latency_ms": round((time.perf_counter() - started) * 1000),
         "request": body,
     }

@@ -39,6 +39,7 @@ Design (measured 2026-09-19, see SPIKE-NOTES.md "Standing text model" section):
 """
 
 import atexit
+import collections
 import json
 import logging
 import os
@@ -104,6 +105,21 @@ class _Child:
         self._queue = queue.Queue()
         self._reader = threading.Thread(target=self._read_loop, daemon=True)
         self._reader.start()
+        # A child that lives for the whole of a long-running server will fill
+        # its stderr pipe and then block on a write if nobody drains it. Keep
+        # the last few lines for a diagnosis and throw the rest away.
+        self._stderr = collections.deque(maxlen=40)
+        threading.Thread(target=self._drain_stderr, daemon=True).start()
+
+    def _drain_stderr(self):
+        stderr = self.proc.stderr
+        if stderr is None:
+            return
+        try:
+            for line in stderr:
+                self._stderr.append(line.rstrip("\n"))
+        except (OSError, ValueError):
+            pass
 
     def _read_loop(self):
         stdout = self.proc.stdout

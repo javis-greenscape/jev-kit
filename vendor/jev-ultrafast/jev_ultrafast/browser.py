@@ -2,6 +2,8 @@
 
 import hashlib
 import json
+import os
+import re
 import sys
 import time
 from pathlib import Path
@@ -9,8 +11,37 @@ from pathlib import Path
 from browser_harness.admin import ensure_daemon
 from browser_harness.helpers import cdp
 
+DEFAULT_OFFSCREEN_MAX = 100
+
+
+def offscreen_max():
+    """How many off-viewport links a snapshot may offer, from JEV_OFFSCREEN_MAX.
+
+    Upstream offers none: only what is in the viewport. Offering the nearest
+    ones is what made an article-length page navigable at all, but every extra
+    row lengthens the element table the chooser reads, and filling the whole
+    250-row budget with them cost about a third of every decision's latency.
+    Hence a budget of their own. `0` restores upstream's behaviour, and a
+    negative number means "as many as the 250 allows".
+
+    100 is measured, not guessed, and the curve is not monotonic: see
+    SPIKE-NOTES.md, "How many off-screen links". A cap too small to reach the
+    link a goal wants is worse than no cap at all, because it fills the table
+    with neighbours of the target and none of them is the target."""
+    raw = os.environ.get("JEV_OFFSCREEN_MAX", "")
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        return DEFAULT_OFFSCREEN_MAX
+
+
 # Atomically read visible content and controls, preserving actual DOM node identity.
-READ_STATE = Path(__file__).with_name("snapshot.js").read_text()
+READ_STATE = re.sub(
+    r"const OFFSCREEN_LIMIT=-?\d+;",
+    "const OFFSCREEN_LIMIT=%d;" % offscreen_max(),
+    Path(__file__).with_name("snapshot.js").read_text(),
+    count=1,
+)
 MARKER = f"(() => {{ const state={READ_STATE}; return state?.marker ?? null; }})()"
 # The scroll offsets a wheel at (550, 650) could move: the page, and every element under the cursor.
 SCROLL_POSITION = (

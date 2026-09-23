@@ -349,3 +349,77 @@ def test_a_scroll_that_moves_the_page_changes_the_fingerprint():
     moved["scroll"] = {"y": 560}
     # The in-viewport action set changes with the scroll offset too; the offset alone must be enough.
     assert fingerprint(moved) != fingerprint(state)
+
+
+def test_the_offscreen_budget_comes_from_the_environment(monkeypatch):
+    import importlib
+
+    from jev_ultrafast import browser as browser_module
+
+    for raw, want in (("0", 0), ("40", 40), ("-1", -1), ("", 100), ("lots", 100)):
+        monkeypatch.setenv("JEV_OFFSCREEN_MAX", raw)
+        assert browser_module.offscreen_max() == want, raw
+        reloaded = importlib.reload(browser_module)
+        assert "const OFFSCREEN_LIMIT=%d;" % want in reloaded.READ_STATE, raw
+    monkeypatch.delenv("JEV_OFFSCREEN_MAX")
+    importlib.reload(browser_module)
+
+
+def test_the_local_socket_is_skipped_unless_one_is_named(monkeypatch):
+    monkeypatch.delenv("JEV_SYSTEMONE_SOCKET", raising=False)
+    assert model.post_via_socket({"state": {}}) is None
+    # A path that is not a socket is a fallback, not a crash.
+    monkeypatch.setenv("JEV_SYSTEMONE_SOCKET", "/nonexistent/airlock.sock")
+    assert model.post_via_socket({"state": {}}) is None
+
+
+def test_a_daemon_answer_is_used_instead_of_https(monkeypatch, tmp_path):
+    import socket as socket_module
+    import threading
+
+    path = str(tmp_path / "airlock.sock")
+    answer = {"model": "jev-test", "answers": {"operation": {"choice": "DONE"}}}
+    server = socket_module.socket(socket_module.AF_UNIX, socket_module.SOCK_STREAM)
+    server.bind(path)
+    server.listen(1)
+    seen = []
+
+    def serve():
+        conn, _ = server.accept()
+        with conn, conn.makefile("rwb") as f:
+            seen.append(json.loads(f.readline()))
+            f.write((json.dumps({"ok": True, "response": answer}) + "\n").encode())
+            f.flush()
+
+    thread = threading.Thread(target=serve, daemon=True)
+    thread.start()
+    monkeypatch.setenv("JEV_SYSTEMONE_SOCKET", path)
+    monkeypatch.setattr(model, "post_json", lambda *a, **k: pytest.fail("HTTPS was used"))
+    assert model.post_via_socket({"state": {"page": {}}}) == answer
+    thread.join(timeout=5)
+    server.close()
+    assert seen[0]["body"] == {"state": {"page": {}}}
+
+
+def test_a_daemon_that_refuses_falls_back_to_https(monkeypatch, tmp_path):
+    import socket as socket_module
+    import threading
+
+    path = str(tmp_path / "airlock.sock")
+    server = socket_module.socket(socket_module.AF_UNIX, socket_module.SOCK_STREAM)
+    server.bind(path)
+    server.listen(1)
+
+    def serve():
+        conn, _ = server.accept()
+        with conn, conn.makefile("rwb") as f:
+            f.readline()
+            f.write(b'{"ok": false, "error": "no key"}\n')
+            f.flush()
+
+    thread = threading.Thread(target=serve, daemon=True)
+    thread.start()
+    monkeypatch.setenv("JEV_SYSTEMONE_SOCKET", path)
+    assert model.post_via_socket({"state": {}}) is None
+    thread.join(timeout=5)
+    server.close()
