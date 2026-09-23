@@ -15,15 +15,21 @@ in a child process inside the clone's own environment (browse/runner.py), which
 is also what makes the per-call timeout a hard one: the child's whole process
 group is killed when the time is up.
 
-This process owns the Chromium lifecycle:
+This process owns the Chromium lifecycle, and only its own:
 
-  * If something already answers at `BU_CDP_URL` (default
-    http://127.0.0.1:9333) it is used as it is and never closed from here.
-  * Otherwise a headless Chromium is started on a free port, reused by every
-    call this process serves, and closed when the process exits.
-  * One Chromium at a time on the box. If `pgrep -a chrom` shows one this
-    process did not start, and `BU_CDP_URL` does not answer, the call is
-    refused with a message rather than starting a second browser.
+  * If `BU_CDP_URL` is set in the environment and answers, that browser is
+    used as it is and never closed from here. Somebody chose it deliberately.
+  * Otherwise a headless Chromium of this server's own is started on a free
+    port with its own temporary profile, reused by every call this process
+    serves, and closed when the process exits. If it has died since, a fresh
+    one is started and the dead one's profile directory is removed, so
+    neither browsers nor profiles pile up.
+  * Other Chromiums on the box are ignored. A Playwright MCP browser, another
+    Claude session's own `browse` server, an ordinary desktop Chrome: this
+    process never attaches to one, never kills one, and never refuses to work
+    because one exists. The default `http://127.0.0.1:9333` is not probed for
+    the same reason: whatever answers there is somebody else's browser unless
+    a person said otherwise by setting `BU_CDP_URL`.
 
 Everything fails closed with a message and never hangs. A bad request, a
 missing clone, a missing key, a timeout and a crash in the agent all come back
@@ -37,7 +43,9 @@ it is scrubbed from any text this server returns.
 Environment:
   JEV_ULTRAFAST_DIR    the clone (then AIRLOCK_BROWSER_DIR, which is what
                        browser/install.sh reads; default ~/code/jev-ultrafast)
-  BU_CDP_URL           a Chromium to attach to instead of starting one
+  BU_CDP_URL           a Chromium to attach to instead of starting one. Only
+                       an explicitly set value is honoured; unset means start
+                       our own, never probe the old default
   JEV_BROWSE_TIMEOUT   seconds allowed per call (default 90)
   JEV_BROWSE_CHROMIUM  the Chromium binary to start, if the Playwright cache
                        and PATH are not where it lives
@@ -71,7 +79,6 @@ SERVER_VERSION = "0.1.0"
 PROTOCOL_VERSIONS = ("2025-06-18", "2025-03-26", "2024-11-05")
 
 RUNNER = Path(__file__).resolve().with_name("runner.py")
-DEFAULT_CDP_URL = "http://127.0.0.1:9333"
 DEFAULT_TIMEOUT_S = 90.0
 CHROMIUM_START_S = 15.0
 TEXT_LIMIT_BYTES = 8 * 1024
@@ -334,21 +341,28 @@ class Chromium(object):
         return rows
 
     def ensure(self):
-        """The CDP URL to attach to, starting Chromium if nothing answers."""
+        """The CDP URL to use, starting this server's own Chromium if needed.
+
+        Never attaches to, and never kills, a browser this process did not
+        start. The one exception is an explicitly set `BU_CDP_URL`, which is a
+        person naming a browser to share."""
         if self.owned() and cdp_answers(self.url):
             return self.url
+        if self.proc is not None:
+            # Ours, but gone or unreachable. close() reaps it and removes its
+            # profile directory, so a restart cannot leave either behind.
+            log("this server's Chromium is no longer answering; starting a fresh one")
         self.close()
-        configured = os.environ.get("BU_CDP_URL") or DEFAULT_CDP_URL
-        if cdp_answers(configured):
+        configured = os.environ.get("BU_CDP_URL")
+        if configured and cdp_answers(configured):
             return configured
+        # Anything else running is somebody else's: a Playwright MCP browser,
+        # another session's browse server, a desktop Chrome. Noted, then
+        # ignored. The old refusal made every call fail whenever one existed.
         foreign = self._foreign()
         if foreign:
-            raise BrowseError(
-                "a Chromium this server did not start is already running (pid %s) and "
-                "nothing answers at BU_CDP_URL (%s). One Chromium at a time on this box: "
-                "close it, or set BU_CDP_URL to its --remote-debugging-port."
-                % (", ".join(str(p) for p, _ in foreign[:5]), configured)
-            )
+            log("%d other Chromium process(es) on this box; starting our own anyway"
+                % len(foreign))
         binary = find_chromium()
         if not binary or not os.path.isfile(binary):
             raise BrowseError(

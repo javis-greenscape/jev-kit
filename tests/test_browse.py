@@ -130,8 +130,8 @@ class TestTheReadLoop(unittest.TestCase):
     def _serve(self, lines, browse=None):
         browse = browse or FakeBrowse()
         out = io.StringIO()
-        server.Server(browse).serve(io.StringIO("".join(l + "\n" for l in lines)), out)
-        return [json.loads(l) for l in out.getvalue().splitlines()], browse
+        server.Server(browse).serve(io.StringIO("".join(x + "\n" for x in lines)), out)
+        return [json.loads(x) for x in out.getvalue().splitlines()], browse
 
     def test_one_response_per_request_one_line_each(self):
         out, browse = self._serve([
@@ -169,7 +169,7 @@ class TestTheReadLoop(unittest.TestCase):
                               input="\n".join(lines) + "\n", capture_output=True,
                               text=True, timeout=30)
         self.assertEqual(done.returncode, 0, done.stderr)
-        out = [json.loads(l) for l in done.stdout.splitlines()]
+        out = [json.loads(x) for x in done.stdout.splitlines()]
         self.assertEqual([r["id"] for r in out], [1, 2])
         self.assertEqual(out[1]["result"]["tools"][0]["name"], "browse")
 
@@ -411,9 +411,9 @@ class TestErrorPaths(CallCase):
             with mock.patch.dict(os.environ, {"JEV_BROWSE_TIMEOUT": raw}):
                 self.assertEqual(server.call_timeout_s(), want, raw)
 
-    def test_a_chromium_refusal_is_an_error_result(self):
-        self.browse.chromium.ensure.side_effect = server.BrowseError("a Chromium this server "
-                                                                     "did not start")
+    def test_a_chromium_failure_is_an_error_result(self):
+        self.browse.chromium.ensure.side_effect = server.BrowseError(
+            "no Chromium binary found")
         with mock.patch.object(server, "run_runner") as run:
             result = call(self.srv, goal="open https://example.com")
         self.assertTrue(result["isError"])
@@ -482,25 +482,55 @@ class TestChromium(unittest.TestCase):
         popen.assert_not_called()
         self.assertFalse(c.owned())
 
-    def test_the_default_cdp_url(self):
+    def test_an_unset_cdp_url_is_never_probed(self):
+        """The old default was http://127.0.0.1:9333. Whatever answers there
+        is somebody else's browser unless a person named it."""
         c = server.Chromium()
         with mock.patch.dict(os.environ), \
-             mock.patch.object(server, "cdp_answers", return_value=True) as answers:
+             mock.patch.object(server, "cdp_answers", return_value=True) as answers, \
+             mock.patch.object(server, "running_chromiums", return_value=[]), \
+             mock.patch.object(server, "find_chromium", return_value=None):
             os.environ.pop("BU_CDP_URL", None)
-            self.assertEqual(c.ensure(), "http://127.0.0.1:9333")
-        answers.assert_called_once_with("http://127.0.0.1:9333")
-
-    def test_a_chromium_somebody_else_started_is_a_refusal(self):
-        c = server.Chromium()
-        with mock.patch.object(server, "cdp_answers", return_value=False), \
-             mock.patch.object(server, "running_chromiums",
-                               return_value=[(4242, "chrome --headless")]), \
-             mock.patch.object(server.subprocess, "Popen") as popen:
             with self.assertRaises(server.BrowseError) as caught:
                 c.ensure()
-        self.assertIn("4242", str(caught.exception))
-        self.assertIn("One Chromium at a time", str(caught.exception))
-        popen.assert_not_called()
+        # It went looking for a binary of its own instead of attaching.
+        self.assertIn("playwright install chromium", str(caught.exception))
+        answers.assert_not_called()
+
+    def test_a_chromium_somebody_else_started_does_not_stop_us(self):
+        """A Playwright MCP browser, or another session's own browse server,
+        used to make every call here fail. Now it is noted and ignored."""
+        c = server.Chromium()
+        with mock.patch.dict(os.environ), \
+             mock.patch.object(server, "cdp_answers", return_value=False), \
+             mock.patch.object(server, "running_chromiums",
+                               return_value=[(4242, "chrome --headless")]), \
+             mock.patch.object(server, "find_chromium", return_value=None):
+            os.environ.pop("BU_CDP_URL", None)
+            with self.assertRaises(server.BrowseError) as caught:
+                c.ensure()
+        said = str(caught.exception)
+        self.assertNotIn("One Chromium at a time", said)
+        self.assertNotIn("4242", said)
+        # It got all the way to looking for its own binary.
+        self.assertIn("playwright install chromium", said)
+
+    def test_a_dead_own_chromium_is_replaced_and_its_profile_removed(self):
+        c = server.Chromium()
+        stale = tempfile.mkdtemp(prefix="jev-browse-profile-")
+        c.proc = mock.Mock(**{"poll.return_value": 9, "pid": 4242})
+        c.profile = stale
+        c.url = "http://127.0.0.1:1"
+        with mock.patch.dict(os.environ), \
+             mock.patch.object(server, "cdp_answers", return_value=False), \
+             mock.patch.object(server, "running_chromiums", return_value=[]), \
+             mock.patch.object(server, "find_chromium", return_value=None):
+            os.environ.pop("BU_CDP_URL", None)
+            with self.assertRaises(server.BrowseError):
+                c.ensure()
+        self.assertIsNone(c.proc)
+        self.assertIsNone(c.profile)
+        self.assertFalse(os.path.exists(stale))
 
     def test_no_binary_is_a_message(self):
         c = server.Chromium()

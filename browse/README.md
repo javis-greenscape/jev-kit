@@ -100,15 +100,22 @@ environment. It uses the clone's `.venv` when `uv sync` has made one, and `uv
 run` when it has not. A separate process is what makes the timeout a hard one,
 because the whole process group is killed when the time is up.
 
-The server owns the Chromium lifecycle.
+The server owns the Chromium lifecycle, and only its own.
 
-- If something answers at `BU_CDP_URL` (default `http://127.0.0.1:9333`), it
-  attaches to that and never closes it. This is how you hand it a browser that
-  is already logged in.
-- Otherwise it starts a headless Chromium on a free port. Every call this
-  server process serves reuses it, and it closes when the server exits.
-- One Chromium at a time. If `pgrep -a chrom` shows a Chromium this server did
-  not start, and `BU_CDP_URL` does not answer, the call is refused.
+- If you set `BU_CDP_URL` and something answers there, it attaches to that and
+  never closes it. This is how you hand it a browser that is already logged
+  in. Unset means unset: the old `http://127.0.0.1:9333` default is not probed
+  any more, because whatever answers there is somebody else's browser unless
+  you said otherwise.
+- Otherwise it starts a headless Chromium of its own on a free port, with its
+  own temporary profile. Every call this server process serves reuses it, and
+  it closes when the server exits. If it has died since, the next call starts
+  a fresh one and removes the dead one's profile directory.
+- Other Chromiums on the box are ignored. A Playwright MCP browser, a second
+  Claude session running its own copy of this server, an ordinary desktop
+  Chrome: none of them is attached to, none is killed, and none stops a call.
+  Until 2026-09-23 any one of them made every call fail, which taught agents
+  to go back to Playwright.
 
 Typing into a field needs a text model, which the agent reads from the clone's
 `.env`. With none configured the runner falls back to the `claude-cli` adapter
@@ -124,7 +131,7 @@ back as an `isError` result, and the read loop keeps going.
 | No clone | `browser/install.sh` and `JEV_ULTRAFAST_DIR` |
 | No TypeSafe key | `~/.config/jev-kit/env` |
 | The call ran past `JEV_BROWSE_TIMEOUT` (default 90 s) | the timeout. The agent is killed, and a Chromium this server owns is restarted. |
-| A foreign Chromium is running | its pid and `BU_CDP_URL` |
+| No Chromium binary anywhere | `npx playwright install chromium` and `JEV_BROWSE_CHROMIUM` |
 | Chromium has no usable sandbox | `JEV_BROWSE_NO_SANDBOX`, see below |
 | A bad argument | the argument |
 
@@ -152,7 +159,7 @@ AppArmor profile for the binary.
 | Variable | Default | |
 |---|---|---|
 | `JEV_ULTRAFAST_DIR` | `~/code/jev-ultrafast` | The clone. `AIRLOCK_BROWSER_DIR`, which `browser/install.sh` reads, is honoured after it. |
-| `BU_CDP_URL` | `http://127.0.0.1:9333` | A Chromium to attach to. |
+| `BU_CDP_URL` | unset | A Chromium to attach to instead of starting one. Only an explicit value counts. |
 | `JEV_BROWSE_TIMEOUT` | `90` | Seconds allowed for a call. |
 | `JEV_BROWSE_CHROMIUM` | newest in the Playwright cache, then `PATH` | The binary to start. |
 | `JEV_BROWSE_NO_SANDBOX` | unset | `1` adds `--no-sandbox`. Read the section above first. |
