@@ -157,6 +157,35 @@ decision is itself a Claude call. Jev's own usage is denominated in TypeSafe
 tokens, not Claude's. The full tables, all four arms, the `MAX_THINKING_TOKENS`
 finding and the caveats are in `browser/README.md`, with their own dates.
 
+## The `browse` tool, warm
+
+Measured 2026-09-23 through the installed MCP server over stdio, several calls
+in one server session. The goal is the vendored README's own example: open the
+Wikipedia article on Gödel's incompleteness theorems, starting from the main
+page. Upstream reports 2.798 s for it.
+
+| | before | after |
+|---|---|---|
+| first call in a server session | 14.4 s | 8.1 s |
+| calls after the first (n=4) | 14.4 s | 5.0-6.1 s |
+| writing one field value | 7.9 s | 0.72-0.98 s |
+| one Jev decision, median | ~700 ms | 537 ms |
+
+Before is a fresh agent process per call falling back to the per-call `claude`
+CLI adapter. After is one long-lived worker holding a warm Haiku child, a warm
+`browser_harness` daemon and a warm connection to the decision endpoint.
+
+Roughly 410 ms of every decision is this box's own network floor: a bare HTTPS
+GET to the decision endpoint takes that long from here, and TCP to the edge
+takes 24 ms of it. Five decisions is therefore about 2.8 s that no amount of
+warming removes.
+
+Two other goals in the same session: a link far below the fold of a long
+article, 3/3 at 3.5-5.9 s; `example.com`, 1 step, 1.4 s including starting
+Chromium. The sweep behind the `JEV_OFFSCREEN_MAX` default, the daemon
+comparison and the duplicate-decision trace are in the vendored
+`SPIKE-NOTES.md`.
+
 ## Known limits
 
 - **The bench found no denies.** The guard's measured value so far is that it

@@ -2,6 +2,8 @@
 
 import hashlib
 import json
+import os
+import re
 import sys
 import time
 from pathlib import Path
@@ -9,9 +11,55 @@ from pathlib import Path
 from browser_harness.admin import ensure_daemon
 from browser_harness.helpers import cdp
 
+DEFAULT_OFFSCREEN_MAX = 100
+
+
+def offscreen_max():
+    """How many off-viewport links a snapshot may offer, from JEV_OFFSCREEN_MAX.
+
+    Upstream offers none: only what is in the viewport. Offering the nearest
+    ones is what made an article-length page navigable at all, but every extra
+    row lengthens the element table the chooser reads, and filling the whole
+    250-row budget with them cost about a third of every decision's latency.
+    Hence a budget of their own. `0` restores upstream's behaviour, and a
+    negative number means "as many as the 250 allows".
+
+    100 is measured, not guessed, and the curve is not monotonic: see
+    SPIKE-NOTES.md, "How many off-screen links". A cap too small to reach the
+    link a goal wants is worse than no cap at all, because it fills the table
+    with neighbours of the target and none of them is the target."""
+    raw = os.environ.get("JEV_OFFSCREEN_MAX", "")
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        return DEFAULT_OFFSCREEN_MAX
+
+
+def read_state(goal=""):
+    """snapshot.js with the off-screen budget and the run's goal compiled in.
+
+    The goal is the only thing the snapshot needs a model for otherwise: off-viewport
+    candidates are ranked by how much their accessible name looks like the goal before they
+    are ranked by distance, which is plain token overlap, deterministic and free."""
+    source = Path(__file__).with_name("snapshot.js").read_text()
+    source = re.sub(
+        r"const OFFSCREEN_LIMIT=-?\d+;", "const OFFSCREEN_LIMIT=%d;" % offscreen_max(), source, count=1
+    )
+    return re.sub(
+        r'const GOAL_TEXT="";',
+        lambda _match: "const GOAL_TEXT=%s;" % json.dumps(goal or ""),
+        source,
+        count=1,
+    )
+
+
+def marker_of(source):
+    return f"(() => {{ const state={source}; return state?.marker ?? null; }})()"
+
+
 # Atomically read visible content and controls, preserving actual DOM node identity.
-READ_STATE = Path(__file__).with_name("snapshot.js").read_text()
-MARKER = f"(() => {{ const state={READ_STATE}; return state?.marker ?? null; }})()"
+READ_STATE = read_state()
+MARKER = marker_of(READ_STATE)
 # The scroll offsets a wheel at (550, 650) could move: the page, and every element under the cursor.
 SCROLL_POSITION = (
     "(() => { const s=[scrollX,scrollY]; let e=document.elementFromPoint(550,650); "
@@ -23,7 +71,11 @@ class StalePage(ValueError):
 
 
 class Browser:
-    def __init__(self, url):
+    def __init__(self, url, goal=""):
+        # The goal reaches the snapshot so it can rank off-viewport candidates by it. It is
+        # baked into both reads, because the marker is computed from the same ordered table.
+        self.read_state = read_state(goal)
+        self.marker = marker_of(self.read_state)
         ensure_daemon()
         self.target = cdp("Target.createTarget", url="about:blank", background=True)["targetId"]
         self.session = cdp("Target.attachToTarget", targetId=self.target, flatten=True)["sessionId"]
@@ -36,6 +88,15 @@ class Browser:
             if self.evaluate("document.readyState") == "complete":
                 break
             time.sleep(0.02)
+
+    def set_goal(self, goal):
+        """Rank off-viewport candidates by `goal` from the next observe on, in the same tab.
+
+        A planner runs many steps against one tab, each ranked by its own step text, and must
+        not reopen the page to change the ranking: that would lose menus, modals, filled fields
+        and any other state kept at a stable URL."""
+        self.read_state = read_state(goal)
+        self.marker = marker_of(self.read_state)
 
     def call(self, method, **params):
         return cdp(method, session_id=self.session, **params)
@@ -82,7 +143,12 @@ class Browser:
         for attempt in range(10):
             try:
                 return browser_operation(
-                    {"operation": "observe", "session": self.session, "screenshot": screenshot}
+                    {
+                        "operation": "observe",
+                        "session": self.session,
+                        "screenshot": screenshot,
+                        "read_state": self.read_state,
+                    }
                 )
             except StalePage:
                 if attempt == 9:
@@ -100,7 +166,7 @@ class Browser:
                 f"return c ? [c.pageKey(),c.guard(c.nodes.get({node}))] : null; }})()"
             )
             return current == [page["page_key"], page["guards"].get(str(node))]
-        return self.evaluate(MARKER) == page["marker"]
+        return self.evaluate(getattr(self, "marker", MARKER)) == page["marker"]
 
     def act(self, action, page, text=None):
         if not self.fresh(page, action):
@@ -164,9 +230,24 @@ def browser_operation(request):
               if (action.kind==='fill' && (e.readOnly || e.getAttribute('aria-readonly')==='true')) return null;
               // Observed off-viewport: bring it into view, then resolve geometry and hit-test as usual.
               if (action.offscreen) e.scrollIntoView({block:'center',inline:'center',behavior:'instant'});
-              const r=e.getBoundingClientRect(), x=r.x+r.width/2, y=r.y+r.height/2;
-              if (!r.width || !r.height || x<0 || y<0 || x>=innerWidth || y>=innerHeight) return null;
-              if (!e.contains(document.elementFromPoint(x,y))) return null;
+              // A link that wraps onto two lines has a bounding box whose centre can sit over
+              // the next table cell; try the centre of each line box before the whole box.
+              const point=()=>{
+                for (const r of [...e.getClientRects(), e.getBoundingClientRect()]) {
+                  const x=r.x+r.width/2, y=r.y+r.height/2;
+                  if (!r.width || !r.height || x<0 || y<0 || x>=innerWidth || y>=innerHeight) continue;
+                  if (e.contains(document.elementFromPoint(x,y))) return {x,y};
+                }
+                return null;
+              };
+              // A target observed on screen can still be clipped by a scrolled table or covered
+              // by a sticky header by the time it is clicked. Bring it to the centre once and
+              // hit-test again, rather than calling the page stale and choosing the same
+              // element again forever.
+              let at=point();
+              if (!at) { e.scrollIntoView({block:'center',inline:'center',behavior:'instant'}); at=point(); }
+              if (!at) return null;
+              const {x,y}=at;
               if (action.kind==='select') {
                 if (e.tagName!=='SELECT' || ![...e.options].some(o=>o.value===action.value &&
                     !o.disabled && !o.closest('optgroup[disabled]'))) return null;
@@ -203,7 +284,7 @@ def browser_operation(request):
                     call("Input.insertText", text=request["text"])
         return {"executed": action["id"]}
 
-    info = evaluate(READ_STATE)
+    info = evaluate(request.get("read_state") or READ_STATE)
     if info is None:
         raise StalePage("Document is navigating")
     info["fingerprint"] = fingerprint(info)

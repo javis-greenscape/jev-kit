@@ -982,6 +982,12 @@ class TestR11BrowseViaJev(unittest.TestCase):
                          '{"R11-browse-via-jev": "off"}'):
             self.assertIn(fragment, text, fragment)
 
+    def test_the_message_says_when_to_plan_and_what_it_costs(self):
+        text = rules.R11_SUGGESTION
+        for fragment in ("plan=true", "open-ended", 'plan_model="haiku"', "claude login",
+                         "spelled-out steps"):
+            self.assertIn(fragment, text, fragment)
+
     def test_the_message_advertises_no_bypass(self):
         """It used to name both escapes, which is how a subagent found them."""
         text = rules.R11_SUGGESTION

@@ -512,7 +512,8 @@ else
 fi
 # browse: run the server through a real MCP handshake over stdio. It needs the
 # vendored agent, so without one it is a skip and not a failure. No call is
-# made, so no Chromium starts and no key is read.
+# made, and JEV_BROWSE_PREWARM=0 says so explicitly even though off is already
+# the default, so no Chromium starts and no key is read.
 BROWSE_SERVER="$LIVE/browse/server.py"
 BROWSE_DIR="${JEV_ULTRAFAST_DIR:-${AIRLOCK_BROWSER_DIR:-$LIVE/vendor/jev-ultrafast}}"
 BROWSE_VENV="${JEV_ULTRAFAST_VENV:-${AIRLOCK_HOME:-$HOME/.local/share/airlock}/jev-ultrafast-venv}"
@@ -527,7 +528,7 @@ else
     '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"doctor","version":"0"}}}' \
     '{"jsonrpc":"2.0","method":"notifications/initialized"}' \
     '{"jsonrpc":"2.0","id":2,"method":"tools/list"}' \
-    | timeout 30 "$PY" "$BROWSE_SERVER" 2>/dev/null)"
+    | JEV_BROWSE_PREWARM=0 timeout 30 "$PY" "$BROWSE_SERVER" 2>/dev/null)"
   if printf '%s' "$BROWSE_OUT" | grep -q '"serverInfo"' \
      && printf '%s' "$BROWSE_OUT" | grep -q '"name": "browse"'; then
     pass "browse: server answered initialize and tools/list over stdio (tool: browse)"

@@ -54,6 +54,10 @@ a real pipe and reports PASS. With no agent environment it reports a skip.
 | `start_url` | string | Where to start. Optional when the goal contains an `http(s)` URL. |
 | `extract` | string | A CSS selector. The text of every match comes back as `extracted`. |
 | `screenshot` | boolean, default false | Write a PNG of the final page and return its path. |
+| `links` | boolean, default false | Return `links`, the final page's element table: the same candidates Jev chose between. |
+| `rank_goal` | string | Rank off-screen links against this text instead of `goal`. |
+| `plan` | boolean, default false | Put a warm Claude planner in front of Jev. For open-ended tasks only; see [Plan mode](#plan-mode). |
+| `plan_model` | `sonnet` or `haiku` | The planner's model. Default `sonnet`, or `JEV_PLANNER_MODEL`. |
 
 The result is JSON text:
 
@@ -66,10 +70,17 @@ The result is JSON text:
 | `text` | Visible text of the final page, trimmed to 8 KB. `text_truncated` is set when it was cut. |
 | `extracted` | Text at `extract`, only when you gave one. |
 | `screenshot_path` | Only when asked for. A PNG under `$XDG_STATE_HOME/jev-kit/browse/`, else `~/.local/state/jev-kit/browse/`. |
+| `timing` | Where the time went: `decisions`, `ops`, `jev_ms`, `confidence`, `rechecks`, `text_ms`, `agent_ms`, `total_ms`, `jev_transport`. |
+| `plan` | Only with `plan: true`: the planner's `model`, `turns`, `finds`, `transcript`, `planner_ms`, `browse_ms`, `tokens` and `cost_usd`. |
+
+`timing.ops` is one entry per decision Jev made, not per action executed, so a
+decision the executor threw away because the page moved under it shows up there
+and nowhere else. That is the first thing to look at when a call takes longer
+than its step count explains.
 
 Only `http://` and `https://` start pages are accepted.
 
-A real run on the development box, 2026-09-21, driven over stdio:
+A real run on the development box, 2026-09-23, driven over stdio:
 
 ```text
 goal:    "open https://example.com and report the main heading"
@@ -82,28 +93,69 @@ extract: "h1"
   "title": "Example Domain",
   "status": "done",
   "steps": 1,
-  "elapsed_ms": 2946,
+  "elapsed_ms": 1392,
   "text": "Example Domain\n\nThis domain is for use in documentation examples without needing permission. Avoid use in operations.\n\nLearn more",
-  "extracted": "Example Domain"
+  "extracted": "Example Domain",
+  "timing": {"decisions": 1, "ops": ["DONE"], "jev_ms": [431], "text_ms": [],
+             "agent_ms": 435, "total_ms": 977, "jev_transport": ["daemon"]}
 }
 ```
 
-That is one run, so treat the 2.9 seconds as an example and not a benchmark.
-It includes starting Chromium.
+That is one run, so treat the 1.4 seconds as an example and not a benchmark.
+It is the first call of a server, so it includes starting Chromium and the
+worker.
 
 ## How it runs
 
 `server.py` is standard library only. It speaks JSON-RPC 2.0 over stdio:
 `initialize`, `notifications/initialized`, `ping`, `tools/list`, `tools/call`.
 
-The agent itself runs in a child process, `runner.py`, on the vendored
+The agent runs in one long-lived worker process, `runner.py`, on the vendored
 project's own environment. That environment sits at
 `$AIRLOCK_HOME/jev-ultrafast-venv`, outside any release, and holds the
 dependencies only; `jev_ultrafast` is imported from whichever source tree the
-server resolved, which the child is told through `PYTHONPATH`. A `.venv` inside
-the source tree is used if one is there, and `uv run` is the last resort. A
-separate process is what makes the timeout a hard one, because the whole
-process group is killed when the time is up.
+server resolved, which the worker is told through `PYTHONPATH`. A `.venv`
+inside the source tree is used if one is there, and `uv run` is the last
+resort.
+
+One worker for the life of the server, not one per call. A fresh process per
+call paid for the agent's imports, a cold `browser_harness` daemon and a cold
+text model every single time, and that was most of the fourteen seconds the
+README's own Wikipedia example used to take. The timeout is still a hard one:
+the worker's whole process group is killed when the time is up, and the next
+call gets a new worker. So does a worker that died on its own, or one that was
+started against a Chromium which has since been replaced.
+
+`JEV_BROWSE_PREWARM=1` starts Chromium, the worker and the text model when the
+server starts rather than when the first call arrives. It is worth about a
+second on that first call and nothing after it, so it is off by default: a
+session that merely has this server configured should not be paying for a
+headless Chromium it never uses. Turn it on for a session you know will browse.
+
+## Typing into a field
+
+`TYPE_TEXT` needs a model to write the value, and this server picks one rather
+than leaving it to chance.
+
+| | when | what runs |
+|---|---|---|
+| Warm Haiku | the default, no key anywhere | One standing `claude` child on your ordinary login, thinking off, trimmed field context. It lives as long as the server does. |
+| OpenAI-compatible | `TEXT_MODEL_API_KEY` is set | Upstream's helper, defaulting to OpenRouter and `inception/mercury-2.5` with reasoning off. |
+
+The key can be an ordinary environment variable, or a `TEXT_MODEL_API_KEY=...`
+line in the same key file the TypeSafe key lives in (`~/.config/jev-kit/env`,
+and `airlock/keyfile.py` is where the resolution order is written down). It is
+optional: nothing here requires one, and the kit does not add one.
+
+Measured on this box, same goal, five calls in one session: warm Haiku writes a
+field value in 0.70 to 0.86 s. Upstream reports Mercury doing the same job in
+roughly 0.35 s, so a key is worth having if you already have one and is not
+worth getting if you do not. `TEXT_MODEL_PROVIDER` set by hand overrides both,
+and `vendor/jev-ultrafast/SPIKE-NOTES.md` has the full measurements.
+
+Jev's own decisions go through airlock's warm daemon when it is running, which
+saves about 70 ms on the first decision of a worker and about 25 ms after it,
+and fall back to a direct HTTPS call when it is not.
 
 The server owns the Chromium lifecycle, and only its own.
 
@@ -121,10 +173,6 @@ The server owns the Chromium lifecycle, and only its own.
   Chrome: none of them is attached to, none is killed, and none stops a call.
   Until 2026-09-23 any one of them made every call fail, which taught agents
   to go back to Playwright.
-
-Typing into a field needs a text model, which the agent reads from
-`vendor/jev-ultrafast/.env`. With none configured the runner falls back to the
-`claude-cli` adapter this project added on top of upstream.
 
 ## When it fails
 
@@ -175,6 +223,43 @@ Chromium itself, so this is no worse than the Playwright MCP server beside it.
 It is still your decision and it is never the default. The better fix is an
 AppArmor profile for the binary.
 
+## Plan mode
+
+Plain `browse` is the default, and it is the right call whenever the goal can
+spell out the steps: "open X, click Y, then click Z". Jev picks one action at a
+time out of what it can see, and it is fast at that.
+
+It is not built to work out a route. For an open-ended task, "find the year the
+author of X was born", set `plan: true`. A planner, one warm `claude -p` child
+with thinking off and `--effort low`, reads the page's element labels and names
+one step per turn:
+
+```text
+CLICK <label>          the Jev agent executes it on the current page
+TYPE <field> = <text>
+FIND <words>           every element on the page matching the words, however far down
+DONE <answer or ok>
+```
+
+The planner is Sonnet by default. `plan_model: "haiku"` (or
+`JEV_PLANNER_MODEL=haiku`) is cheaper and does as well on spelled-out hops, and
+much worse on open-ended ones; the numbers are in the main
+[README](../README.md).
+
+What it costs:
+
+- **Money.** The planner runs on the user's own `claude` login and is billed
+  there, a few cents a task. Plain `browse` spends nothing on Claude.
+- **Time.** Every turn is a planner answer plus an agent run. Expect tens of
+  seconds a task, not the few seconds a spelled-out goal takes.
+- **A process.** The child starts on the first planned call, never before, and
+  stays warm for the life of the worker. A session that never plans never
+  starts one.
+
+`JEV_BROWSE_TIMEOUT` defaults to 180 seconds for a planned call instead of 90,
+and the loop stops itself a few seconds early so the page it reached still
+comes back.
+
 ## Settings
 
 | Variable | Default | |
@@ -185,6 +270,29 @@ AppArmor profile for the binary.
 | `JEV_BROWSE_TIMEOUT` | `90` | Seconds allowed for a call. |
 | `JEV_BROWSE_CHROMIUM` | newest in the Playwright cache, then `PATH` | The binary to start. |
 | `JEV_BROWSE_NO_SANDBOX` | unset | `1` adds `--no-sandbox`. Read the section above first. |
+| `JEV_BROWSE_PREWARM` | unset | `1` warms Chromium, the worker and the text model at start-up. |
+| `TEXT_MODEL_API_KEY` | unset | Selects the OpenAI-compatible helper. Also read from the key file. |
+| `TEXT_MODEL_PROVIDER` | chosen for you | Set by hand to override the choice above. |
+| `JEV_OFFSCREEN_MAX` | `100` | How many off-viewport links a snapshot may offer. `0` is upstream's viewport-only behaviour, `-1` fills the budget. |
+| `JEV_SYSTEMONE_SOCKET` | the airlock daemon's socket | An empty value sends every decision straight over HTTPS. |
+| `JEV_PLANNER_MODEL` | `sonnet` | The planner for `plan: true` when the call names none. |
+| `JEV_PAGE_TEXT_CHARS` | see model.py | Characters of page text in Jev's state per decision. |
+| `JEV_DONE_CONFIDENCE`, `JEV_BLOCKED_CONFIDENCE` | see agent.py | Below this, a DONE or BLOCKED is looked at again once before it ends the run. |
+
+### Links below the fold
+
+A long article keeps almost every link out of the viewport, and upstream sends
+only what is in it. The snapshot also offers the nearest off-viewport links,
+labelled `(below)` or `(above)`, and the executor scrolls one into view before
+it resolves geometry and hit-tests as usual. Fields are never offered that way:
+typing into something nobody has seen is a different kind of risk.
+
+`JEV_OFFSCREEN_MAX` bounds how many, and 100 is a measured default rather than
+a round number. The curve is not monotonic. A cap too small to reach the link a
+goal actually wants is worse than offering none at all, because it fills the
+table with that link's neighbours and the agent clicks one of them instead of
+scrolling. The sweep is in
+[SPIKE-NOTES.md](../vendor/jev-ultrafast/SPIKE-NOTES.md#how-many-off-screen-links).
 
 ## What leaves the machine
 
