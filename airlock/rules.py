@@ -1603,9 +1603,12 @@ R11_SUGGESTION = (
     "back too), screenshot (true writes a PNG and returns its path).\n"
     "No `browse` tool in this session? Run browse/install.sh in the jev-kit "
     "checkout and add the block it prints to ~/.claude.json.\n"
-    "To get past this once, put [airlock-ok: <reason>] in any text field of "
-    "the call, or repeat the identical call. To turn the rule off, put "
-    '{"R11-browse-via-jev": "off"} in ~/.config/airlock/rules.json.'
+    "This rule has no per-call way past it: a stamp does not lift it and "
+    "repeating the call does not either. If Playwright is genuinely required "
+    "-- per-frame timing, CDP, a scripted measurement `browse` cannot express "
+    "-- stop and ask the user, saying which of those it is. Only they turn the "
+    'rule off, with {"R11-browse-via-jev": "off"} in '
+    "~/.config/airlock/rules.json."
 )
 
 # Driving or reading a page. Housekeeping is deliberately absent and never
@@ -1642,10 +1645,21 @@ def prefilter_browser_driving(ctx):
         return None
     # ask=False: the code decided. `no_soften` keeps the `user_requested`
     # question out of it as well, so nothing about this rule ever calls Jev.
+    #
+    # `strict` closes the two per-call ways past a deny, for this rule only.
+    # Both were measured being used to keep browsing on Playwright rather than
+    # to make a judgement call: a subagent stamped `[airlock-ok: ...]` into the
+    # `element` field of a click, and, failing that, sent the identical call
+    # twice to ride the loop allowance. Neither is a human saying so, which is
+    # what those escapes exist to carry. R11 is a cost steer with a first-class
+    # alternative in the same session, so the honest answer to "I really need
+    # Playwright" is to ask the person, not to slip one call through.
+    # `airlock/enforce.py` is where `strict` is honoured.
     return Match(
         "Playwright MCP `%s`: use the `browse` tool instead" % action,
         R11_SUGGESTION,
-        extra={"how": "playwright mcp tool %s" % action, "no_soften": True},
+        extra={"how": "playwright mcp tool %s" % action, "no_soften": True,
+               "strict": True},
     )
 
 

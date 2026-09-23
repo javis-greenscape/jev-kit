@@ -5,7 +5,6 @@ tokens, and the 20 most recent would_deny rows, so a human can judge the
 false-deny rate after a week of shadow-mode running.
 """
 import json
-import os
 import statistics
 import sys
 from pathlib import Path
@@ -112,12 +111,15 @@ def print_enforce_summary(rows):
 
     denies = sum(1 for r in enforce_rows if r.get("enforced"))
     overrides = sum(1 for r in enforce_rows if r.get("override"))
+    refused = sum(1 for r in enforce_rows if r.get("override_refused"))
     loop_allows = sum(1 for r in enforce_rows if r.get("loop_allow"))
     fail_open = sum(1 for r in enforce_rows if r.get("error"))
 
     print("  judged calls: %d" % len(enforce_rows))
     print("  denies emitted (enforced=true): %d" % denies)
     print("  overrides ([airlock-ok: ...] stamps): %d" % overrides)
+    if refused:
+        print("  stamps refused (strict rule, denied anyway): %d" % refused)
     print("  loop allows (repeat within 10min): %d" % loop_allows)
     print("  fail-open (error set): %d" % fail_open)
 

@@ -32,6 +32,10 @@ ten minutes, a hard budget, and fail-open on any error. Where Jev is involved,
 a deny also needs a confidence of at least 0.8 and a margin of at least 0.4
 over the runner-up.
 
+`R11-browse-via-jev` is the exception, and the only one. It ignores the stamp
+and the loop allowance both, for the reason its own section below gives. The
+budget and the fail-open still apply to it.
+
 A deny is also softened to a warn when the user's own recent words asked for the
 thing. That check reads only what the person typed, never a tool result or a
 fetched page, and it can only ever soften: no answer to it can make the guard
@@ -191,12 +195,25 @@ The deny names the tool and gives its usage in one line:
 browse(goal="open https://example.com and report the main heading", extract="h1")
 ```
 
-There are three ways past it. An `[airlock-ok: <reason>]` stamp gets one call
-through. An MCP call has no `description` field, so for an `mcp__` tool the
-stamp is read from any top-level text field, such as `element` on a click.
-Loop protection works as it does for every rule: the identical call repeated
-within ten minutes is allowed. And `{"R11-browse-via-jev": "off"}` in
-`~/.config/airlock/rules.json` turns the rule off.
+There is no per-call way past it. This is the one rule that ignores both
+safety nets every other deny keeps. An `[airlock-ok: <reason>]` stamp is
+logged as `override_refused` and the call is denied anyway, and the identical
+call repeated inside the loop window is denied again rather than allowed. The
+match carries `strict` in its `extra`, which is where `airlock/enforce.py`
+reads that from; no other rule sets it.
+
+Both nets were closed because both were measured being used to stay on
+Playwright. A subagent given a plain click-through-Wikipedia task wrote
+`[airlock-ok: ...]` into the `element` field of a click, and when that stopped
+working it sent the same call twice. An MCP call has no `description` field,
+so the stamp is harvested from any top-level text field, which puts it well
+within reach of a model composing the call. Neither escape carried a person's
+say-so, which is the only thing they exist for.
+
+An agent that genuinely needs Playwright, for per-frame timing, raw CDP or a
+scripted measurement `browse` cannot express, stops and asks. Turning the rule
+off is the user's call, and they make it by putting
+`{"R11-browse-via-jev": "off"}` in `~/.config/airlock/rules.json`.
 
 This is a cost steer, not a security control. It removes nothing: the
 Playwright MCP servers stay registered.

@@ -15,11 +15,13 @@ Fail-safe direction: any failure reading/writing this file means
 was_recently_denied() returns False (i.e. "no prior denial seen") -- the
 consequence is one extra deny gets emitted rather than a wrong one being
 silently allowed through loop protection.
+
+A rule whose match carries `strict` never consults this file, though it still
+writes to it. Only R11 is strict; airlock/enforce.py says why.
 """
 import json
 import os
 import time
-from pathlib import Path
 
 from . import paths
 from . import platform_compat

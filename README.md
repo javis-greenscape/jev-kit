@@ -282,6 +282,10 @@ Full tables, methods and the known limits: **[docs/measurements.md](docs/measure
 - **An override stamp.** `[airlock-ok: <reason>]` in a call's description gets
   past any deny, with the reason recorded.
 - **Loop protection.** The same call is never denied twice in ten minutes.
+- **One rule ignores those two.** `R11-browse-via-jev` is a cost steer with an
+  equally good tool sitting in the same session, so a stamp on it is logged and
+  refused and a repeat is denied again. The other nets still cover it, and only
+  the user turns it off.
 - **A kill switch that beats the mode.** `AIRLOCK_DISABLE=1`, or
   `~/.config/airlock/disabled`, or `echo off > ~/.config/airlock/mode`.
 - **Confidence bars.** Where Jev decides, a deny needs confidence of at least
@@ -355,6 +359,10 @@ Yes it can, and there are four ways out, in rising order of permanence:
 
 Loop protection also means the same call is never denied twice in ten minutes,
 so a retry gets through on its own.
+
+`R11-browse-via-jev` is the exception to the first and the last of those. A
+stamp on it is logged and refused, and a repeat is denied again. Use `browse`,
+or ask the person to switch the rule off.
 
 </details>
 
