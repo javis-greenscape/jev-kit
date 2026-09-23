@@ -38,21 +38,16 @@ one after another, never side by side, so none is timed against another's load.
                    the calls report, so the time inside the tool can be told
                    apart from the time Claude spent planning.
   haiku-plans-jev  The same division of labour with the Claude Code session
-                   taken out: one warm `claude -p` child (Haiku, thinking off,
-                   no tools, no settings), handed the task, the current URL and
-                   title, and the very element table Jev is choosing from - the
-                   on-screen candidates and the goal-ranked off-screen ones,
-                   which `browse` returns for `links: true`. It answers with one
-                   line, either a single instruction naming one of those labels
-                   or DONE with the answer, and `browse` executes that one
-                   instruction from the current page. Twelve turns at most. The
-                   planner child and the `browse` server are both started once
-                   for the sweep and reused, so only the first run of each pays
-                   a cold start. See bench/planner_arm.py.
+                   taken out, through `browse`'s own plan mode (`plan: true`,
+                   jev_ultrafast/planner.py): one warm `claude -p` child
+                   (thinking off, --effort low, no tools) reads the page's
+                   element labels and names one step per turn - CLICK, TYPE,
+                   FIND or DONE - and the Jev agent executes it. It is one
+                   `browse` call per task, so the arm measures exactly what a
+                   caller of the tool gets. One server is started for these
+                   arms and kept open, so the planner child stays warm.
   sonnet-low-plans-jev
-                   The same loop with Sonnet in place of Haiku, thinking still
-                   off. The standing adapter takes the model as an argument, so
-                   the two arms differ in that one string and nothing else.
+                   The same call with plan_model "sonnet", the tool's default.
 
 No arm is ever asked to report a fact and none is believed about its own
 success. Group A tasks name every hop and end "Stop when the X article is
@@ -82,18 +77,13 @@ from pathlib import Path
 BENCH_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(BENCH_DIR))
 
-import planner_arm  # noqa: E402
 from wiki_tasks import TASKS, check, fetch_page_text  # noqa: E402
 
 ARMS = ("jev", "sonnet-playwright", "sonnet-plans-jev",
         "haiku-plans-jev", "sonnet-low-plans-jev")
-# The two fast-planner arms in front of `browse`. Same division of labour as sonnet-plans-jev
-# without a Claude Code session in the middle: one warm `claude -p` child, thinking off, low
-# effort, no tools, asked for one line per turn. See bench/planner_arm.py.
+# The two planner arms, both through `browse`'s plan mode (plan: true). The value is the
+# plan_model argument each passes.
 PLANNER_ARMS = {"haiku-plans-jev": "haiku", "sonnet-low-plans-jev": "sonnet"}
-# What one `browse` call inside a planner turn is allowed. The turn loop owns the run budget;
-# this stops a single stuck call from eating all of it.
-PLANNER_CALL_BUDGET_S = 45.0
 RUN_BUDGET_S = 180.0
 KILL_GRACE_S = 20.0
 DEFAULT_BROWSE_SERVER = Path.home() / ".local/share/airlock/current/browse/server.py"
@@ -109,6 +99,24 @@ def chromium_pids():
         "pgrep -f chrom || true", shell=True, capture_output=True, text=True
     ).stdout
     return {int(p) for p in out.split() if p.strip().isdigit()}
+
+
+def descends_from_me(pid):
+    """Whether `pid` is a descendant of this process. Only those are ours to stop: a Chromium
+    that appeared during the sweep but belongs to another session is left alone."""
+    me = os.getpid()
+    for _ in range(64):
+        try:
+            with open("/proc/%d/stat" % pid) as fh:
+                ppid = int(fh.read().rsplit(")", 1)[1].split()[1])
+        except (OSError, ValueError, IndexError):
+            return False
+        if ppid == me:
+            return True
+        if ppid <= 1:
+            return False
+        pid = ppid
+    return False
 
 
 # --- arm: jev via one long-lived browse MCP server for the whole sweep --------
@@ -495,20 +503,37 @@ def run_sonnet_plans_jev(task, mcp_config, settings_file, log_path):
 # --- arms: a fast planner in front of browse, with no Claude Code session --------
 
 
-def run_planner(task, planner, session, arm, log_path):
-    """One planner run, scored exactly as the jev arm is: off the page, not off the model."""
-    lines = []
-    row = planner_arm.run(task, planner, session, arm, RUN_BUDGET_S, log=lines.append)
-    with open(log_path, "a") as fh:
-        fh.write("\n=== %s %s ===\n%s\n" % (arm, task["id"], "\n".join(lines)))
-    payload = row.pop("payload", None) or {}
+def run_planner(task, session, arm):
+    """One planned task: a single `browse` call with plan: true, scored off the page."""
+    row = {"arm": arm, "task_id": task["id"], "group": task["group"],
+           "planner_model": PLANNER_ARMS[arm]}
+    started = time.perf_counter()
+    payload = session.call(
+        {"goal": task["goal"], "start_url": task["start_url"], "extract": task["extract"],
+         "plan": True, "plan_model": PLANNER_ARMS[arm]},
+        time.monotonic() + RUN_BUDGET_S + KILL_GRACE_S,
+    )
+    row["wall_s"] = round(time.perf_counter() - started, 2)
+    if payload is None or payload.get("_error"):
+        reason = ("no reply within the %.0fs budget" % RUN_BUDGET_S if payload is None
+                  else "browse returned an error: " + payload["_error"])
+        row.update(passed=False, reason=reason, steps=None, final_url=None)
+        return row
+    plan = payload.get("plan") or {}
     answer = (payload.get("extracted") or "") + "\n" + (payload.get("text") or "")
     passed, reason = check(task["id"], payload.get("final_url"), answer)
     row.update(
         passed=passed,
-        reason=reason if passed else "%s (%s)" % (reason, row.get("stopped")),
-        status=payload.get("status"),
+        reason=reason if passed else "%s (%s)" % (reason, plan.get("stopped")),
+        final_url=payload.get("final_url"), title=payload.get("title"),
+        status=payload.get("status"), steps=payload.get("steps"),
+        turns=plan.get("turns"), finds=plan.get("finds"), stopped=plan.get("stopped"),
+        transcript=plan.get("transcript"),
+        planner_s=round((plan.get("planner_ms") or 0) / 1000.0, 2),
+        browse_s=round((plan.get("browse_ms") or 0) / 1000.0, 2),
+        tokens=plan.get("tokens"), cost_usd=plan.get("cost_usd"),
         extracted=(payload.get("extracted") or "")[:600],
+        timing=payload.get("timing"),
     )
     return row
 
@@ -528,7 +553,8 @@ def summarise(rows):
         lines.append("")
         lines.append("| arm | pass rate | median s (passes) | p90 s (passes) | median cost USD |")
         lines.append("|---|---|---|---|---|")
-        present = [a for a in ARMS if any(r["arm"] == a for r in group_rows)]
+        order = list(ARMS) + [a + " (before)" for a in ARMS]
+        present = [a for a in order if any(r["arm"] == a for r in group_rows)]
         for arm in present:
             mine = [r for r in group_rows if r["arm"] == arm]
             if not mine:
@@ -614,6 +640,9 @@ def main():
     parser.add_argument("--reps", type=int, default=3)
     parser.add_argument("--tasks", default="", help="comma-separated task ids, default all")
     parser.add_argument("--arms", default=",".join(ARMS))
+    parser.add_argument("--before", default="",
+                        help="comma-separated result .jsonl files from before the doc-alignment "
+                             "fixes; their rows are folded in with ' (before)' on the arm name")
     parser.add_argument("--also", default="",
                         help="comma-separated result .jsonl files whose rows are folded into "
                              "the summary without being rerun")
@@ -654,17 +683,9 @@ def main():
     # The planner arms share one `browse` server of their own, with a per-call timeout well
     # inside the run budget so that one stuck call cannot spend the whole of it. A planner
     # child per arm, warmed before its first task, and retired between tasks.
-    planner_arms = [a for a in arms if a in PLANNER_ARMS]
-    planner_session = planners = None
-    if planner_arms:
-        from jev_ultrafast.text_model_claude_standing import StandingTextModel
-
-        planner_session = JevSession(planner_log, PLANNER_CALL_BUDGET_S, "planner")
-        planners = {}
-        for arm in planner_arms:
-            planners[arm] = StandingTextModel(model=PLANNER_ARMS[arm],
-                                              system_prompt=planner_arm.SYSTEM_PROMPT)
-            planners[arm].warm()
+    planner_session = None
+    if any(a in PLANNER_ARMS for a in arms):
+        planner_session = JevSession(planner_log, RUN_BUDGET_S, "planner")
     try:
         with open(results_path, "w") as fh:
             for task in wanted:
@@ -674,11 +695,7 @@ def main():
                         if arm == "jev":
                             row = jev_session.ask(task)
                         elif arm in PLANNER_ARMS:
-                            row = run_planner(task, planners[arm], planner_session, arm,
-                                              planner_log)
-                            # A fresh conversation per run: the child keeps every earlier turn
-                            # in context, and one task's hops are noise in the next one's.
-                            planners[arm].new_session()
+                            row = run_planner(task, planner_session, arm)
                         elif arm == "sonnet-plans-jev":
                             row = run_sonnet_plans_jev(task, browse_mcp_config, settings_file, plans_log)
                         else:
@@ -697,11 +714,13 @@ def main():
             jev_session.close()
         if planner_session is not None:
             planner_session.close()
-        for planner in (planners or {}).values():
-            planner.close()
 
     after = chromium_pids()
-    strays = after - before
+    new = after - before
+    strays = {pid for pid in new if descends_from_me(pid)}
+    if new - strays:
+        log("chromium pids that appeared during the sweep but are not ours, left alone: %s"
+            % sorted(new - strays))
     log("chromium pids after: %d; started by this sweep and still alive: %s"
         % (len(after), sorted(strays) or "none"))
     for pid in strays:
@@ -736,6 +755,17 @@ def main():
                 row["reused_from"] = path.name
                 reused.append(row)
         log("folded %d earlier rows in from %s" % (len(reused), path))
+    for name in [n.strip() for n in args.before.split(",") if n.strip()]:
+        path = Path(name)
+        if not path.is_absolute():
+            path = BENCH_DIR / path
+        with open(path) as fh:
+            for line in fh:
+                if line.strip():
+                    row = json.loads(line)
+                    row["reused_from"] = path.name
+                    row["arm"] = row["arm"] + " (before)"
+                    reused.append(row)
     print(summarise(rows + reused))
     print("\nwrote %d rows to %s" % (len(rows), results_path))
     if reused:
