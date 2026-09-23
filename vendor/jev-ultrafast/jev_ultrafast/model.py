@@ -9,7 +9,7 @@ import uuid
 
 import httpx
 
-from .questions import OPERATION, TARGET, TEXT_VALUE
+from .questions import FINAL_PAGE, NEEDED_OFF_SCREEN, OPERATION, TARGET, TEXT_VALUE
 
 # One client for the process, so HTTP/2 connection reuse survives between
 # decisions. It only helps a process that outlives a single run: a fresh
@@ -216,20 +216,6 @@ def page_text_chars():
     return max(0, value)
 
 
-# "fanout": one request carrying the operation head and every target head, as upstream does
-# ("Asking a question you might not need is close to free", primitives.md). "sequential": the
-# operation first, then only the target head it needs, in a second request ("If a later
-# judgment depends on an earlier answer, make a second request in code", primitives.md). Both
-# ask one judgment per question; they differ only in round trips. Measured in SPIKE-NOTES.md,
-# "One judgment per question".
-DECISION_SHAPE_DEFAULT = "fanout"
-
-
-def decision_shape():
-    value = (os.environ.get("JEV_DECISION_SHAPE") or DECISION_SHAPE_DEFAULT).strip().lower()
-    return value if value in ("fanout", "sequential") else DECISION_SHAPE_DEFAULT
-
-
 OPERATION_LABELS = {
     "CLICK": "Click a link, button, menu option, autocomplete suggestion, checkbox or calendar day.",
     "TYPE_TEXT": "Enter or replace text in an editable field. A small LLM will supply the value from the goal.",
@@ -297,34 +283,54 @@ def _post(body):
     return post_json("https://api.typesafe.ai/v1/systemone", os.environ["TYPESAFE_API_KEY"], body), "https"
 
 
+def valid_noul(answer):
+    """The yes-probability of a Noul answer, or None when it is missing or malformed. A Noul
+    only ever adjusts a decision in code; a bad one is ignored, never acted on."""
+    value = (answer or {}).get("noul")
+    if type(value) in (int, float) and math.isfinite(value) and 0 <= value <= 1:
+        return float(value)
+    return None
+
+
+def combine(operation, confidence, nouls, controls):
+    """(operation, confidence, reason) after the Noul judgments are applied. Deterministic.
+
+    - DONE while the final-page Noul says no: the confidence DONE is gated on becomes the lower
+      of the two, so agent.py looks again before ending the run.
+    - BLOCKED while the off-screen Noul says the needed element is off screen: scroll down
+      instead, when the page can scroll. "Giving up instead of scrolling" was the failure the
+      old rulebook produced."""
+    final, off_screen = nouls.get("final_page"), nouls.get("needed_off_screen")
+    if operation == "DONE" and final is not None and final < 0.5:
+        return operation, min(confidence, final), "final_page"
+    if operation == "BLOCKED" and off_screen is not None and off_screen > 0.5 and "SCROLL_DOWN" in controls:
+        return "SCROLL_DOWN", off_screen, "needed_off_screen"
+    return operation, confidence, None
+
+
 def choose(state, goal, history):
     body, operation_head, heads, (targets, controls, operations, maps, omitted_targets) = build_questions(
         state, goal, history
     )
-    shape = decision_shape()
-    started = time.perf_counter()
-    requests = []
+    # Every question in one request: "System One models evaluate every question in a request in
+    # parallel. Adding questions barely changes the response time" (primitives.md).
     questions = {"operation": operation_head}
-    if shape == "fanout":
-        questions.update({op.lower() + "_target": head for op, head in heads.items()})
-    result, transport = _post({**body, "questions": questions})
-    requests.append(questions)
-    answers = dict(result["answers"])
-    usage = dict(result.get("usage") or {})
+    questions.update({op.lower() + "_target": head for op, head in heads.items()})
+    questions["final_page"] = {"type": "noul", "instructions": {"goal": goal, "question": FINAL_PAGE}}
+    questions["needed_off_screen"] = {"type": "noul", "instructions": {"goal": goal, "question": NEEDED_OFF_SCREEN}}
+    body["questions"] = questions
+    started = time.perf_counter()
+    result, transport = _post(body)
+    answers = result["answers"]
     operation_answer = validate_choice(answers.get("operation", {}), operations)
-    operation = operation_answer["choice"]
+    nouls = {key: valid_noul(answers.get(key)) for key in ("final_page", "needed_off_screen")}
+    operation, confidence, adjusted = combine(
+        operation_answer["choice"], operation_answer["confidence"], nouls, controls
+    )
     target = target_name = target_answer = None
     probabilities = {}
     if operation in targets:
         key = operation.lower() + "_target"
-        if shape == "sequential":
-            follow = {key: heads[operation]}
-            second, _ = _post({**body, "questions": follow})
-            requests.append(follow)
-            answers[key] = second["answers"].get(key, {})
-            for k, v in (second.get("usage") or {}).items():
-                if isinstance(v, (int, float)):
-                    usage[k] = usage.get(k, 0) + v
         # Unused target heads cannot cause an action. Validate the head selected by the operation.
         named = maps[operation]
         target_answer = validate_choice(answers.get(key, {}), named)
@@ -334,26 +340,27 @@ def choose(state, goal, history):
         probabilities = {targets[operation][k]["id"]: target_answer["probabilities"][n] for n, k in named.items()}
     else:
         choice = controls[operation]["id"] if operation in controls else operation
-        probabilities[choice] = operation_answer["probabilities"][operation]
+        probabilities[choice] = operation_answer["probabilities"].get(operation, confidence)
     return {
         "choice": choice,
         "operation": operation,
         "target": target,
         "target_name": target_name,
-        "confidence": operation_answer["confidence"],
+        "confidence": confidence,
+        "operation_confidence": operation_answer["confidence"],
+        "nouls": nouls,
+        "adjusted_by": adjusted,
         "probabilities": probabilities,
         "operation_probabilities": operation_answer["probabilities"],
         "target_probabilities": target_answer["probabilities"] if target_answer else {},
         "target_confidence": target_answer["confidence"] if target_answer else None,
         "raw_answers": answers,
         "model": result["model"],
-        "usage": usage,
+        "usage": result.get("usage", {}),
         "transport": transport,
-        "shape": shape,
-        "requests": len(requests),
         "latency_ms": round((time.perf_counter() - started) * 1000),
         "omitted_targets": omitted_targets,
-        "request": {**body, "questions": {k: v for q in requests for k, v in q.items()}},
+        "request": body,
     }
 
 

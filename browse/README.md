@@ -277,7 +277,6 @@ comes back.
 | `JEV_SYSTEMONE_SOCKET` | the airlock daemon's socket | An empty value sends every decision straight over HTTPS. |
 | `JEV_PLANNER_MODEL` | `sonnet` | The planner for `plan: true` when the call names none. |
 | `JEV_PAGE_TEXT_CHARS` | see model.py | Characters of page text in Jev's state per decision. |
-| `JEV_DECISION_SHAPE` | see model.py | `fanout`: operation and targets in one request. `sequential`: the target asked after the operation. |
 | `JEV_DONE_CONFIDENCE`, `JEV_BLOCKED_CONFIDENCE` | see agent.py | Below this, a DONE or BLOCKED is looked at again once before it ends the run. |
 
 ### Links below the fold

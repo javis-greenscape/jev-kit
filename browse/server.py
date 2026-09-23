@@ -78,7 +78,7 @@ Environment:
                        straight over HTTPS instead
   JEV_PLANNER_MODEL    the planner for plan=true when the call names none:
                        sonnet (default) or haiku
-  JEV_PAGE_TEXT_CHARS, JEV_DECISION_SHAPE, JEV_DONE_CONFIDENCE,
+  JEV_PAGE_TEXT_CHARS, JEV_DONE_CONFIDENCE,
   JEV_BLOCKED_CONFIDENCE
                        how Jev's own questions are asked; see
                        vendor/jev-ultrafast/jev_ultrafast/model.py and agent.py

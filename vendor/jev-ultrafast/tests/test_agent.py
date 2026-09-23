@@ -96,7 +96,8 @@ def test_all_heads_are_one_request_and_only_matching_head_executes(monkeypatch):
     d = model.choose(page(), "Find a book", [])
     assert len(calls) == 1
     assert d["operation"] == "TYPE_TEXT" and d["target"] == "1" and d["choice"] == "e1"
-    assert set(calls[0]["questions"]) == {"operation", "click_target", "type_text_target"}
+    assert set(calls[0]["questions"]) == {"operation", "click_target", "type_text_target",
+                                          "final_page", "needed_off_screen"}
 
 
 def test_click_cannot_consume_a_text_target(monkeypatch):
@@ -217,43 +218,61 @@ def test_page_text_is_trimmed_to_the_configured_length(monkeypatch, setting, exp
         assert len(body["state"]["page"]["text"]) == min(expected, 9000)
 
 
-# --- one judgment per question, in one request or two ------------------------------
+# --- one judgment per question, all in one request ------------------------------------
 
 
-def test_sequential_shape_asks_the_target_only_after_the_operation(monkeypatch):
-    sent = []
-
+def answer_with(operation, nouls, target=None):
     def post(_url, _key, body):
-        sent.append(body)
-        questions = body["questions"]
-        if "operation" in questions:
-            assert set(questions) == {"operation"}
-            return {"model": "test", "usage": {"input_tokens": 10},
-                    "answers": {"operation": choice(questions["operation"]["criteria"], "CLICK")}}
-        assert set(questions) == {"click_target"}
-        return {"model": "test", "usage": {"input_tokens": 5},
-                "answers": {"click_target": choice(questions["click_target"]["criteria"], "button: Go")}}
-
-    monkeypatch.setenv("TYPESAFE_API_KEY", "test")
-    monkeypatch.setenv("JEV_DECISION_SHAPE", "sequential")
-    monkeypatch.setattr(model, "post_json", post)
-    d = model.choose(page(), "Press Go", [])
-    assert len(sent) == 2 and d["requests"] == 2 and d["shape"] == "sequential"
-    assert d["choice"] == "e3" and d["usage"] == {"input_tokens": 15}
+        answers = {"operation": choice(body["questions"]["operation"]["criteria"], operation)}
+        if target:
+            head = operation.lower() + "_target"
+            answers[head] = choice(body["questions"][head]["criteria"], target)
+        answers.update({k: {"type": "noul", "noul": v} for k, v in nouls.items()})
+        return {"model": "test", "answers": answers}
+    return post
 
 
-def test_sequential_shape_makes_one_request_when_no_target_is_needed(monkeypatch):
+def scrolling_page():
+    p = page()
+    p["actions"].insert(-1, {"id": "scroll_down", "kind": "scroll", "label": "Scroll down", "delta": 560})
+    p["fingerprint"] = fingerprint(p)
+    return p
+
+
+def test_the_nouls_ride_in_the_same_single_request(monkeypatch):
     sent = []
-
-    def post(_url, _key, body):
-        sent.append(body)
-        return {"model": "test", "answers": {"operation": choice(body["questions"]["operation"]["criteria"], "DONE")}}
-
+    post = answer_with("DONE", {"final_page": 0.9, "needed_off_screen": 0.1})
     monkeypatch.setenv("TYPESAFE_API_KEY", "test")
-    monkeypatch.setenv("JEV_DECISION_SHAPE", "sequential")
-    monkeypatch.setattr(model, "post_json", post)
-    assert model.choose(page(), "Anything", [])["choice"] == "DONE"
+    monkeypatch.setattr(model, "post_json", lambda *a: sent.append(a[2]) or post(*a))
+    d = model.choose(page(), "Anything", [])
     assert len(sent) == 1
+    q = sent[0]["questions"]
+    assert q["final_page"]["type"] == q["needed_off_screen"]["type"] == "noul"
+    assert d["choice"] == "DONE" and d["confidence"] == 1.0 and d["adjusted_by"] is None
+
+
+def test_done_on_a_page_the_noul_says_is_not_final_is_gated_low(monkeypatch):
+    monkeypatch.setenv("TYPESAFE_API_KEY", "test")
+    monkeypatch.setattr(model, "post_json", answer_with("DONE", {"final_page": 0.2, "needed_off_screen": 0.1}))
+    d = model.choose(page(), "Open the result", [])
+    assert d["choice"] == "DONE" and d["confidence"] == 0.2 and d["adjusted_by"] == "final_page"
+    assert d["operation_confidence"] == 1.0
+
+
+def test_blocked_with_the_needed_element_off_screen_scrolls_instead(monkeypatch):
+    monkeypatch.setenv("TYPESAFE_API_KEY", "test")
+    monkeypatch.setattr(model, "post_json", answer_with("BLOCKED", {"final_page": 0.1, "needed_off_screen": 0.8}))
+    d = model.choose(scrolling_page(), "Open the last link", [])
+    assert d["choice"] == "scroll_down" and d["adjusted_by"] == "needed_off_screen"
+
+
+def test_blocked_stands_when_the_page_cannot_scroll_or_the_noul_is_bad(monkeypatch):
+    monkeypatch.setenv("TYPESAFE_API_KEY", "test")
+    monkeypatch.setattr(model, "post_json", answer_with("BLOCKED", {"final_page": 0.1, "needed_off_screen": 0.8}))
+    assert model.choose(page(), "g", [])["choice"] == "BLOCKED"
+    monkeypatch.setattr(model, "post_json", answer_with("BLOCKED", {"needed_off_screen": float("nan")}))
+    d = model.choose(scrolling_page(), "g", [])
+    assert d["choice"] == "BLOCKED" and d["nouls"] == {"final_page": None, "needed_off_screen": None}
 
 
 def test_quoted_task_text_still_uses_the_llm(monkeypatch):

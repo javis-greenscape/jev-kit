@@ -457,9 +457,12 @@ Noul for "the next thing the goal asks for is off screen", combined in code) is 
 shape. **Not fixed here**: it is a redesign of the policy, not a small change. Reported.
 
 **Now:** the rulebook is split into `OPERATION` (which kind of step) and `TARGET` (which
-element, for one named operation), and each head gets only its own. `JEV_DECISION_SHAPE`
-chooses one request with speculative target heads (`fanout`, the default) or the target asked
-after the operation (`sequential`); the sweep comparing them is in the README.
+element, for one named operation), and each head gets only its own. Two Noul questions ride in
+the same single request, each one glance-sized judgment: `final_page` ("is the page open now
+the one the goal ends on?") and `needed_off_screen` ("is the next element the goal needs off
+screen?"). Code combines them with the operation (`model.combine`): a DONE the final-page Noul
+doubts is gated low, and a BLOCKED while the needed element is off screen scrolls instead.
+Everything is still one request, as section 5 recommends.
 
 ### M5. `confidence` came back on every decision and gated nothing *(fixed in this branch)*
 
