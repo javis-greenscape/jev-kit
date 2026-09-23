@@ -651,3 +651,57 @@ def test_the_text_retry_happens_before_any_browser_input(runner, monkeypatch):
     # Two model calls, one input: upstream's rule that a mutation is never retried is intact.
     assert len(calls) == 2
     runner.state["browser"].act.assert_called_once()
+
+
+# --- the API's own 255-option ceiling on a Choice ------------------------------
+
+
+def select_page(option_count):
+    """A page whose one dropdown offers `option_count` choices."""
+    actions = [
+        {"id": "e%d" % (i + 1), "kind": "select", "label": "Country → Option %d" % i,
+         "role": "combobox", "value": "v%d" % i, "current_value": "", "node": 10}
+        for i in range(option_count)
+    ]
+    actions.append({"id": "wait", "kind": "wait", "label": "Wait"})
+    state = {"url": "https://example.test/", "title": "Form", "text": "Form",
+             "scroll": {"y": 0}, "actions": actions}
+    state["fingerprint"] = fingerprint(state)
+    return state
+
+
+def test_a_head_within_the_limit_is_offered_whole():
+    _, targets, _ = model.action_space(select_page(255)["actions"])
+    capped, dropped = model.cap_targets(targets)
+    assert len(capped["SELECT"]) == 255 and dropped == {}
+
+
+def test_a_head_over_the_limit_is_trimmed_to_what_the_api_accepts():
+    _, targets, _ = model.action_space(select_page(400)["actions"])
+    capped, dropped = model.cap_targets(targets)
+    assert len(capped["SELECT"]) == model.MAX_CHOICE_OPTIONS == 255
+    assert dropped == {"SELECT": 145}
+    # The kept options are the first ones action_space() built, in that order.
+    assert list(capped["SELECT"])[:2] == ["1:1", "1:2"]
+
+
+def test_no_request_offers_more_options_than_a_choice_allows(monkeypatch):
+    sent = []
+
+    def post(_url, _key, body):
+        sent.append(body)
+        return {
+            "model": "test",
+            "answers": {
+                "operation": choice(body["questions"]["operation"]["criteria"], "SELECT"),
+                "select_target": choice(list(body["questions"]["select_target"]["criteria"]), "1:1"),
+            },
+        }
+
+    monkeypatch.setenv("TYPESAFE_API_KEY", "test")
+    monkeypatch.setattr(model, "post_json", post)
+    decided = model.choose(select_page(400), "Pick a country", [])
+    criteria = sent[0]["questions"]["select_target"]["criteria"]
+    assert len(criteria) == 255
+    assert decided["omitted_targets"] == {"SELECT": 145}
+    assert decided["choice"] == "e1"

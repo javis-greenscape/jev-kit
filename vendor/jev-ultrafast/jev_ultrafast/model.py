@@ -127,8 +127,32 @@ def action_space(actions):
     return elements, targets, controls
 
 
+# TypeSafe's own limit on a Choice question: "You can have a maximum of 255 options per
+# Choice" (docs/jev-reference/typesafe-docs/api.md, the `criteria` field of a Choice). A
+# request that offers more is rejected with 422 and no action is executed at all, so the
+# whole run dies on a page the executor could otherwise have handled. The viewport budget in
+# snapshot.js caps the element table at 250 rows, which keeps the CLICK and TYPE_TEXT heads
+# inside the limit, but the SELECT head has one option per observed dropdown choice: two
+# country pickers on one page are already past 255. Trim each head to what the API accepts,
+# in the order action_space() built it, and say how many were dropped.
+MAX_CHOICE_OPTIONS = 255
+
+
+def cap_targets(targets):
+    """(targets trimmed to MAX_CHOICE_OPTIONS per head, {operation: how many were dropped})."""
+    capped, dropped = {}, {}
+    for operation, candidates in targets.items():
+        if len(candidates) <= MAX_CHOICE_OPTIONS:
+            capped[operation] = candidates
+            continue
+        capped[operation] = dict(list(candidates.items())[:MAX_CHOICE_OPTIONS])
+        dropped[operation] = len(candidates) - MAX_CHOICE_OPTIONS
+    return capped, dropped
+
+
 def choose(state, goal, history):
     elements, targets, controls = action_space(state["actions"])
+    targets, omitted_targets = cap_targets(targets)
     labels = {
         "CLICK": "Click an element, button, menu option, autocomplete suggestion, or calendar day.",
         "TYPE_TEXT": "Enter or replace text in an editable field. A small LLM will supply the value from the goal.",
@@ -198,6 +222,7 @@ def choose(state, goal, history):
         "usage": result.get("usage", {}),
         "transport": transport,
         "latency_ms": round((time.perf_counter() - started) * 1000),
+        "omitted_targets": omitted_targets,
         "request": body,
     }
 
