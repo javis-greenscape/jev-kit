@@ -54,6 +54,9 @@ CLAUDE_CONFIG_DIR = os.environ.get("CLAUDE_TEXT_MODEL_CONFIG_DIR", os.path.expan
 MODEL = os.environ.get("CLAUDE_TEXT_MODEL", "haiku")
 RECYCLE_AFTER = int(os.environ.get("TEXT_MODEL_RECYCLE_AFTER", "20"))
 REQUEST_TIMEOUT = float(os.environ.get("TEXT_MODEL_TIMEOUT", "15"))
+# `--effort low` is what the measured shape used, and MAX_THINKING_TOKENS=0 below is the other
+# half of it. Both stay settable from the environment; neither default changes here.
+EFFORT = os.environ.get("CLAUDE_TEXT_MODEL_EFFORT", "low")
 
 SYSTEM_PROMPT = (
     "Return only the text to type into the field: no quotes, no JSON, no markdown, no "
@@ -64,12 +67,12 @@ SYSTEM_PROMPT = (
 )
 
 
-def _cmd():
+def _cmd(model=None, system_prompt=None):
     return [
         "claude",
         "-p",
         "--model",
-        MODEL,
+        model or MODEL,
         "--input-format",
         "stream-json",
         "--output-format",
@@ -78,9 +81,9 @@ def _cmd():
         "--safe-mode",
         "--no-session-persistence",
         "--effort",
-        "low",
+        EFFORT,
         "--system-prompt",
-        SYSTEM_PROMPT,
+        system_prompt or SYSTEM_PROMPT,
         "--tools",
         "",
     ]
@@ -89,11 +92,11 @@ def _cmd():
 class _Child:
     """One long-lived `claude -p --input-format stream-json` process."""
 
-    def __init__(self):
+    def __init__(self, model=None, system_prompt=None):
         env = {**os.environ, "CLAUDE_CONFIG_DIR": CLAUDE_CONFIG_DIR}
         env.setdefault("MAX_THINKING_TOKENS", "0")
         self.proc = subprocess.Popen(
-            _cmd(),
+            _cmd(model, system_prompt),
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
@@ -195,18 +198,44 @@ def _parse_value(event):
 
 
 class StandingTextModel:
-    """Owns one (plus, transiently during recycle, two) standing `claude` child processes."""
+    """Owns one (plus, transiently during recycle, two) standing `claude` child processes.
 
-    def __init__(self):
+    The defaults are the TYPE_TEXT helper this module was written for. A caller that wants a
+    different short-answer job out of the same machinery - one warm child, thinking off, low
+    effort, no tools - builds its own with `model` and `system_prompt` and talks to it with
+    `ask()`. `field_text()` stays exactly what the agent's model.py calls."""
+
+    def __init__(self, model=None, system_prompt=None):
         self._lock = threading.Lock()
         self._current = None
         self._next = None
         self._replacing = False
+        self._model = model or MODEL
+        self._system_prompt = system_prompt or SYSTEM_PROMPT
+
+    @property
+    def model(self):
+        return self._model
 
     def _spawn(self):
-        child = _Child()
+        child = _Child(self._model, self._system_prompt)
         _TRACKED_CHILDREN.add(child)
         return child
+
+    def ask(self, prompt, timeout=None):
+        """The child's `result` event for one prompt. Raises after retiring a failed child.
+
+        No fallback to a per-call spawn: that adapter asks the TYPE_TEXT question and nothing
+        else, so a caller with its own system prompt has to see the failure itself."""
+        child = self._get_child()
+        try:
+            event = child.request(prompt, timeout=timeout or REQUEST_TIMEOUT)
+        except (TimeoutError, RuntimeError):
+            self._retire(child)
+            self._start_background_replacement()
+            raise
+        self._maybe_recycle(child)
+        return event
 
     def _start_background_replacement(self):
         with self._lock:
@@ -261,6 +290,21 @@ class StandingTextModel:
         if ready is not None:
             child.terminate()
             _TRACKED_CHILDREN.discard(child)
+
+    def new_session(self):
+        """Retire the current child so the next prompt starts a conversation of its own.
+
+        The child is a real multi-turn session: everything said to it is still in context on
+        the next request, and still billed. A caller working through a list of unrelated jobs
+        wants a clean one per job. A replacement queued in the background is promoted by
+        _get_child() without waiting, so calling this while there is other work to do costs
+        nothing; calling it immediately before the next prompt pays a cold start."""
+        with self._lock:
+            child, self._current = self._current, None
+        if child is not None:
+            child.terminate()
+            _TRACKED_CHILDREN.discard(child)
+        self._start_background_replacement()
 
     def warm(self):
         """Eagerly start the child so the first real request skips the cold-start cost."""

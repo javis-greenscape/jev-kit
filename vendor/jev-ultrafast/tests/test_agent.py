@@ -732,3 +732,26 @@ def test_a_planners_step_can_rank_off_screen_links_by_the_whole_task(monkeypatch
     agent_module.Agent("https://example.test/", "Reach the axle article")
     assert made == ["Starting on the Bicycle article, reach the axle article",
                     "Reach the axle article"]
+
+
+# --- the standing child, asked a different question -----------------------------
+
+
+def test_the_standing_child_takes_a_model_and_a_system_prompt_of_its_own():
+    from jev_ultrafast import text_model_claude_standing as standing
+
+    default = standing._cmd()
+    assert default[standing_index(default, "--model") + 1] == standing.MODEL
+    assert default[standing_index(default, "--system-prompt") + 1] == standing.SYSTEM_PROMPT
+    assert default[standing_index(default, "--effort") + 1] == standing.EFFORT
+
+    mine = standing._cmd("sonnet", "Answer with one line.")
+    assert mine[standing_index(mine, "--model") + 1] == "sonnet"
+    assert mine[standing_index(mine, "--system-prompt") + 1] == "Answer with one line."
+    # Everything else about the shape is the measured one: no tools, no hooks, no persistence.
+    assert {"--safe-mode", "--no-session-persistence"} <= set(mine)
+    assert mine[standing_index(mine, "--tools") + 1] == ""
+
+
+def standing_index(command, flag):
+    return command.index(flag)
