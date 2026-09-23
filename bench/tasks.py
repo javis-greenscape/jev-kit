@@ -31,9 +31,9 @@ def compute_t1_truth():
         "plocate", "-d", str(Path(HOME) / ".cache" / "plocate" / "home.db"),
         "--regex", r"\.xlsm$",
     ])
-    plocate_n = len([l for l in plocate_out.stdout.splitlines() if l.strip()])
+    plocate_n = len([line for line in plocate_out.stdout.splitlines() if line.strip()])
     fd_out = _run(["fd", "-HI", "--type", "f", "-e", "xlsm", ".", HOME])
-    fd_n = len([l for l in fd_out.stdout.splitlines() if l.strip()])
+    fd_n = len([line for line in fd_out.stdout.splitlines() if line.strip()])
     return {"plocate": plocate_n, "fd": fd_n, "agree": plocate_n == fd_n, "truth": fd_n}
 
 
@@ -41,7 +41,7 @@ def compute_t2_truth():
     """Rare-filename search: ROUTES-STAGE-NOTES.md, or anything matching
     'routes-stage' in its name. Falls back to whatever plocate finds."""
     out = _run(["plocate", "-d", str(Path(HOME) / ".cache" / "plocate" / "home.db"), "-i", "routes-stage"])
-    matches = [l.strip() for l in out.stdout.splitlines() if l.strip()]
+    matches = [line.strip() for line in out.stdout.splitlines() if line.strip()]
     return {"matches": matches, "count": len(matches)}
 
 
