@@ -279,6 +279,28 @@ def _rule_warn_text(rule_id, detail, suggestion):
     return "airlock %s: %s\n%s" % (rule_id, detail, suggestion)
 
 
+def _browse_unlock_warn_text(rule_id, detail, row):
+    """R11 standing aside because `browse` already gave up in this session.
+
+    Says WHICH failure opened the door and how long it stays open, so the
+    session can tell this apart from the rule simply not firing."""
+    row = row or {}
+    how = ("`browse` came back blocked" if row.get("status") == "blocked"
+           else "a `browse` call errored")
+    goal = row.get("goal")
+    line = "%s in this session" % how
+    if goal:
+        line += " on: %s" % (goal if len(goal) <= 120 else goal[:117] + "...")
+    return (
+        "airlock %s: %s\n"
+        "%s, so Playwright MCP is allowed for 30 minutes from then. Nothing "
+        "was blocked and this call ran as you wrote it.\n"
+        "Go back to `browse` for the next piece of browsing: this door is "
+        "open because that one failed, not because Playwright is the default "
+        "again." % (rule_id, detail, line)
+    )
+
+
 def effective_block_action(action):
     """`ask` is only a real outcome when somebody is there to answer it.
 
@@ -476,6 +498,34 @@ def _run_rule(ctx, rule, match, eff, base, override_reason, b_ms, session_id, mo
         log.append(entry)
         advice.append(_rule_warn_text(rule.id, match.detail, match.suggestion))
         return False
+
+    # The `browse` unlock, before anything else in the deny path: when the
+    # kit's own browser tool has already given up in this session, R11 has
+    # nothing left to steer anyone towards, and a strict deny would leave the
+    # session with no browser at all. A PostToolUse hook
+    # (hooks/airlock_browse_unlock.py) writes the row; airlock/browse_state.py
+    # holds it for 30 minutes. Only `browse` failing opens this -- a stamp and
+    # a repeat still do nothing, which is the rest of `strict` untouched.
+    #
+    # Checked before the `mode != enforce` return so a shadow-mode row says
+    # `unlocked_by` too, rather than reporting a would-be deny that would not
+    # have happened.
+    if match.extra.get("unlock_on_browse_blocked"):
+        row = None
+        try:
+            from . import browse_state
+            row = browse_state.recent_give_up(session_id)
+        except Exception:
+            row = None
+        if row is not None:
+            entry["unlocked_by"] = "browse_blocked"
+            entry["browse_status"] = row.get("status")
+            entry["action"] = "warn"
+            entry["enforced"] = False
+            entry["warned"] = True
+            log.append(entry)
+            advice.append(_browse_unlock_warn_text(rule.id, match.detail, row))
+            return False
 
     # deny (or ask). Softening comes first: an explicit override stamp and a
     # user_requested hit are both "the human already said so", and neither

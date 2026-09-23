@@ -493,6 +493,7 @@ if [ "$WANT_GUARD" = "1" ]; then
 
   HOOK="$AIRLOCK_HOME/current/hooks/airlock.py"
   SESSION_CHECK_HOOK="$AIRLOCK_HOME/current/hooks/airlock_session_check.py"
+  BROWSE_UNLOCK_HOOK="$AIRLOCK_HOME/current/hooks/airlock_browse_unlock.py"
   echo
   echo "   The settings.json edit. Register this ONE entry, matcher \"*\" -- the"
   echo "   rules table filters in code, far more cheaply than a regex matcher:"
@@ -537,6 +538,28 @@ EOF
 EOF
     echo
   fi
+  echo "   And the PostToolUse entry, the only way past R11. When the kit's own"
+  echo "   \`browse\` tool gives up on a goal, this records it and R11 warns"
+  echo "   instead of blocking for the next 30 minutes of that session. It is"
+  echo "   the one entry with a real matcher, because it has one tool to watch:"
+  echo
+  cat <<EOF
+     {
+       "hooks": {
+         "PostToolUse": [
+           {
+             "matcher": "mcp__browse__browse",
+             "hooks": [
+               { "type": "command",
+                 "command": "$PY $BROWSE_UNLOCK_HOOK",
+                 "timeout": 5 }
+             ]
+           }
+         ]
+       }
+     }
+EOF
+  echo
   if [ "${#WIRE_FILES[@]}" -gt 0 ]; then
     echo "   --wire given; applying to ${#WIRE_FILES[@]} file(s) (each backed up first):"
     WIRE_EXTRA_FLAGS=()

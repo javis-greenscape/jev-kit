@@ -10,7 +10,7 @@
 
 <p>
   <a href="LICENSE"><img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-blue"></a>
-  <img alt="tests" src="https://img.shields.io/badge/tests-1255%20passing-brightgreen">
+  <img alt="tests" src="https://img.shields.io/badge/tests-1303%20passing-brightgreen">
   <img alt="Python 3.10+" src="https://img.shields.io/badge/python-3.10%2B-blue">
   <img alt="Platforms" src="https://img.shields.io/badge/platforms-Linux%20%7C%20WSL2%20%7C%20Windows-lightgrey">
   <img alt="Claude Code" src="https://img.shields.io/badge/Claude%20Code-PreToolUse%20hook-8A3FFC">
@@ -157,6 +157,13 @@ Shell commands and Playwright scripts are never looked at, and the Playwright
 servers stay registered. See
 [docs/rules.md](docs/rules.md#r11-browse-via-jev-a-playwright-mcp-call-is-pointed-at-browse).
 
+`browse` cannot do everything, so the rule gives way when it fails. Jev chooses
+one step at a time out of what it can see, which puts a multi-hop task out of
+reach. When a `browse` call comes back `blocked`, or errors, a PostToolUse hook
+records it and R11 warns instead of blocking for the next thirty minutes of
+that session. Try `browse` first and the door opens by itself. Nothing else
+opens it: a stamp and a repeat still do nothing.
+
 ## What is in the kit
 
 Airlock is the tool-call guard. It is one component of the kit, not the kit.
@@ -285,7 +292,8 @@ Full tables, methods and the known limits: **[docs/measurements.md](docs/measure
 - **One rule ignores those two.** `R11-browse-via-jev` is a cost steer with an
   equally good tool sitting in the same session, so a stamp on it is logged and
   refused and a repeat is denied again. The other nets still cover it, and only
-  the user turns it off.
+  the user turns it off. Its one door is the `browse` tool failing: a `blocked`
+  or errored `browse` call turns the rule into a warn for thirty minutes.
 - **A kill switch that beats the mode.** `AIRLOCK_DISABLE=1`, or
   `~/.config/airlock/disabled`, or `echo off > ~/.config/airlock/mode`.
 - **Confidence bars.** Where Jev decides, a deny needs confidence of at least
@@ -361,8 +369,10 @@ Loop protection also means the same call is never denied twice in ten minutes,
 so a retry gets through on its own.
 
 `R11-browse-via-jev` is the exception to the first and the last of those. A
-stamp on it is logged and refused, and a repeat is denied again. Use `browse`,
-or ask the person to switch the rule off.
+stamp on it is logged and refused, and a repeat is denied again. Use `browse`.
+If `browse` comes back `blocked` or errors, Playwright is yours for the next
+thirty minutes of that session, with no stamp needed. Past that, ask the person
+to switch the rule off.
 
 </details>
 

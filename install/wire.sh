@@ -16,7 +16,7 @@ set -euo pipefail
 usage() {
   cat >&2 <<EOF
 usage: $0 --print|--apply [--belay] [--function-hooks] [--no-session-check]
-          <settings.json> [...]
+          [--no-browse-unlock] <settings.json> [...]
 
   --belay            also add the belay Stop hook (matcher "*", command
                      <HOME>/bin/airlock-belay-run, timeout 25) -- only if
@@ -24,6 +24,11 @@ usage: $0 --print|--apply [--belay] [--function-hooks] [--no-session-check]
   --function-hooks   also set env.CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1.
   --session-check    add the SessionStart session check (the default).
   --no-session-check leave the SessionStart entry out.
+  --browse-unlock    add the PostToolUse browse unlock (the default). It is
+                     what lets R11 stand aside when the kit's own 'browse'
+                     tool has given up, so leaving it out means a session
+                     whose 'browse' fails has no browser at all.
+  --no-browse-unlock leave the PostToolUse entry out.
 EOF
   exit 2
 }
@@ -46,12 +51,16 @@ FUNCTION_HOOKS=0
 # open, so a dead guard is silent, and on a workstation nothing outside the
 # machine can notice. --no-session-check opts out.
 SESSION_CHECK=1
+# Same again for the browse unlock: a default, and --no-browse-unlock opts out.
+BROWSE_UNLOCK=1
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --belay) BELAY=1; shift ;;
     --function-hooks) FUNCTION_HOOKS=1; shift ;;
     --session-check) SESSION_CHECK=1; shift ;;
     --no-session-check) SESSION_CHECK=0; shift ;;
+    --browse-unlock) BROWSE_UNLOCK=1; shift ;;
+    --no-browse-unlock) BROWSE_UNLOCK=0; shift ;;
     --) shift; break ;;
     --*) usage ;;
     *) break ;;
@@ -80,10 +89,15 @@ NEW_HOOK_COMMAND="$PY $NEW_HOOK"
 SESSION_CHECK_HOOK="$AIRLOCK_HOME/current/hooks/airlock_session_check.py"
 SESSION_CHECK_COMMAND="$PY $SESSION_CHECK_HOOK"
 
+BROWSE_UNLOCK_HOOK="$AIRLOCK_HOME/current/hooks/airlock_browse_unlock.py"
+BROWSE_UNLOCK_COMMAND="$PY $BROWSE_UNLOCK_HOOK"
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 AIRLOCK_HOME="$AIRLOCK_HOME" NEW_HOOK="$NEW_HOOK" NEW_HOOK_COMMAND="$NEW_HOOK_COMMAND" \
   APPLY="$APPLY" BELAY="$BELAY" BELAY_WRAPPER="$BELAY_WRAPPER" FUNCTION_HOOKS="$FUNCTION_HOOKS" \
   SESSION_CHECK="$SESSION_CHECK" SESSION_CHECK_HOOK="$SESSION_CHECK_HOOK" \
   SESSION_CHECK_COMMAND="$SESSION_CHECK_COMMAND" \
+  BROWSE_UNLOCK="$BROWSE_UNLOCK" BROWSE_UNLOCK_HOOK="$BROWSE_UNLOCK_HOOK" \
+  BROWSE_UNLOCK_COMMAND="$BROWSE_UNLOCK_COMMAND" \
   python3 "$SCRIPT_DIR/_wire.py" "$@"

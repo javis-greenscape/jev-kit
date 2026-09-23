@@ -135,6 +135,22 @@ back as an `isError` result, and the read loop keeps going.
 | Chromium has no usable sandbox | `JEV_BROWSE_NO_SANDBOX`, see below |
 | A bad argument | the argument |
 
+### `blocked` hands the browser back
+
+`status: blocked` means Jev gave up on the goal. It chooses one action at a
+time, out of what it can see in the viewport, so a task that needs several
+hops is beyond it. A goal written as explicit steps gets further than a goal
+written as an outcome. "Open the article, click the link to X, then click the
+link to Y, scroll if the link is not in view" is the shape that works.
+
+When it is beyond `browse` anyway, airlock notices. A PostToolUse hook,
+`hooks/airlock_browse_unlock.py`, records a `blocked` result and an errored
+call alike, and `R11-browse-via-jev` then warns instead of denying Playwright
+MCP for the next thirty minutes of that session. There is nothing to do by
+hand: try `browse` first, and a failure hands the browser back.
+[docs/rules.md](../docs/rules.md#when-browse-gives-up-r11-stands-aside) has
+the detail, including what a subagent shares with its parent.
+
 Key resolution is the same as everywhere else in the kit, and the order is
 written down once, in the module docstring of `airlock/keyfile.py`. The child
 gets the key in its environment and never on a command line. It is scrubbed

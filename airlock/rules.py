@@ -1603,11 +1603,18 @@ R11_SUGGESTION = (
     "back too), screenshot (true writes a PNG and returns its path).\n"
     "No `browse` tool in this session? Run browse/install.sh in the jev-kit "
     "checkout and add the block it prints to ~/.claude.json.\n"
-    "This rule has no per-call way past it: a stamp does not lift it and "
-    "repeating the call does not either. If Playwright is genuinely required "
-    "-- per-frame timing, CDP, a scripted measurement `browse` cannot express "
-    "-- stop and ask the user, saying which of those it is. Only they turn the "
-    'rule off, with {"R11-browse-via-jev": "off"} in '
+    "Write the goal as the steps you would take, not as the outcome you want: "
+    '"open <url>, click X, then click Y, scroll if the link is not in view". '
+    "Jev picks one action at a time out of what it can see, so a goal spelled "
+    "out that way is one it can follow and a vague one is not.\n"
+    "If `browse` comes back `blocked`, or the call errors, Playwright MCP is "
+    "yours for the next 30 minutes of this session -- this rule warns instead "
+    "of blocking, automatically, no stamp needed. Try `browse` first and that "
+    "door opens by itself.\n"
+    "A stamp does not lift this rule and repeating the call does not either. "
+    "For anything `browse` cannot express at all -- per-frame timing, CDP, a "
+    "scripted measurement -- stop and ask the user, saying which of those it "
+    'is. Only they turn the rule off, with {"R11-browse-via-jev": "off"} in '
     "~/.config/airlock/rules.json."
 )
 
@@ -1655,11 +1662,21 @@ def prefilter_browser_driving(ctx):
     # alternative in the same session, so the honest answer to "I really need
     # Playwright" is to ask the person, not to slip one call through.
     # `airlock/enforce.py` is where `strict` is honoured.
+    #
+    # `unlock_on_browse_blocked` is the one door, and `browse` itself is what
+    # opens it. When a `browse` call in this session came back `blocked`, or
+    # errored, a PostToolUse hook (hooks/airlock_browse_unlock.py) wrote a row
+    # through airlock/browse_state.py and this deny becomes a warn for the
+    # next thirty minutes. The alternative is only first-class while it works,
+    # and Jev's one-step chooser cannot plan a multi-hop task; measured, it
+    # gave up on "Paarl to Table Mountain by Wikipedia links". A strict rule on
+    # top of that leaves a session with no browser at all. The session_id is
+    # not visible here, so `airlock/enforce.py` does the lookup.
     return Match(
         "Playwright MCP `%s`: use the `browse` tool instead" % action,
         R11_SUGGESTION,
         extra={"how": "playwright mcp tool %s" % action, "no_soften": True,
-               "strict": True},
+               "strict": True, "unlock_on_browse_blocked": True},
     )
 
 
