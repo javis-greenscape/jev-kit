@@ -1,8 +1,9 @@
-"""Three ways to do bench/wiki_tasks.py: Jev alone through `browse`, a Sonnet
-Claude Code session driving Playwright MCP, and Sonnet planning the route while
-`browse` executes each step.
+"""Five ways to do bench/wiki_tasks.py: Jev alone through `browse`, a Sonnet
+Claude Code session driving Playwright MCP, Sonnet planning the route through a
+Claude Code session while `browse` executes each step, and the same division of
+labour with the session removed and a fast model planning instead.
 
-    uv run python bench/run_wiki_bench.py            # 8 tasks x 3 reps x 3 arms
+    uv run python bench/run_wiki_bench.py            # 8 tasks x 3 reps x 5 arms
     uv run python bench/run_wiki_bench.py --reps 1   # a shorter smoke sweep
 
 Every arm gets the same goal text and the same 180 s budget, and the arms run
@@ -36,12 +37,28 @@ one after another, never side by side, so none is timed against another's load.
                    carries `browse_calls` and `browse_ms`, the summed `timing`
                    the calls report, so the time inside the tool can be told
                    apart from the time Claude spent planning.
+  haiku-plans-jev  The same division of labour with the Claude Code session
+                   taken out: one warm `claude -p` child (Haiku, thinking off,
+                   no tools, no settings), handed the task, the current URL and
+                   title, and the very element table Jev is choosing from - the
+                   on-screen candidates and the goal-ranked off-screen ones,
+                   which `browse` returns for `links: true`. It answers with one
+                   line, either a single instruction naming one of those labels
+                   or DONE with the answer, and `browse` executes that one
+                   instruction from the current page. Twelve turns at most. The
+                   planner child and the `browse` server are both started once
+                   for the sweep and reused, so only the first run of each pays
+                   a cold start. See bench/planner_arm.py.
+  sonnet-low-plans-jev
+                   The same loop with Sonnet in place of Haiku, thinking still
+                   off. The standing adapter takes the model as an argument, so
+                   the two arms differ in that one string and nothing else.
 
 No arm is ever asked to report a fact and none is believed about its own
 success. Group A tasks name every hop and end "Stop when the X article is
 open" - the scorer, not the arm, reads the fact off the final page:
 `browse`'s own `text`/`extracted` for jev, and an independent urllib fetch of
-`final_url` (wiki_tasks.fetch_page_text) for the two Sonnet arms, so every arm
+`final_url` (wiki_tasks.fetch_page_text) for the Claude Code arms, so every arm
 is scored from the same kind of source. Group B is the old open-ended pair,
 kept as a labelled contrast; it never checks a fact, only the final URL.
 
