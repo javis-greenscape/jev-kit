@@ -83,11 +83,22 @@ def parse(line):
     """(verb, argument) from the planner's answer. verb is CLICK, TYPE, FIND, DONE or None.
 
     TYPE's argument is (field, value). An answer in plain words is treated as a step for the
-    Jev agent to follow, verb "STEP", because it still names something the agent can try."""
-    text = (line or "").strip()
-    line = text.splitlines()[0].strip() if text else ""
-    if not line:
+    Jev agent to follow, verb "STEP", because it still names something the agent can try.
+
+    A planner sometimes writes a sentence of reasoning before its command, so every line is
+    searched for a command before the first line is taken as a plain-words step."""
+    lines = [part.strip() for part in (line or "").strip().splitlines() if part.strip()]
+    if not lines:
         return None, None
+    for line in lines:
+        found = _command(line)
+        if found:
+            return found
+    return "STEP", lines[0]
+
+
+def _command(line):
+    """(verb, argument) when line starts with a command verb, else None."""
     upper = line.upper()
     for verb in ("DONE", "CLICK", "FIND", "TYPE"):
         if upper.startswith(verb) and (len(line) == len(verb) or not line[len(verb)].isalnum()):
@@ -102,7 +113,7 @@ def parse(line):
             if verb == "CLICK":
                 rest = strip_role(rest)
             return (verb, rest) if rest else (None, None)
-    return "STEP", line
+    return None
 
 
 def step_goal(verb, argument):

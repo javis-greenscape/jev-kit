@@ -971,6 +971,9 @@ from jev_ultrafast import planner as plan  # noqa: E402
     ("", (None, None)),
     ("Clicking is next", ("STEP", "Clicking is next")),
     ("FINDING nothing", ("STEP", "FINDING nothing")),
+    ("This path is not leading anywhere.\nCLICK link History", ("CLICK", "History")),
+    ("\n  Try the history section.\n\nDONE 1703", ("DONE", "1703")),
+    ("First try this.\nThen that.", ("STEP", "First try this.")),
 ])
 def test_planner_lines_parse(line, expected):
     assert plan.parse(line) == expected
