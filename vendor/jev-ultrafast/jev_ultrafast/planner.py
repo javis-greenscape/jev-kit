@@ -58,6 +58,15 @@ SYSTEM_PROMPT = (
 )
 
 _WORD = re.compile(r"[\w']+", re.UNICODE)
+# The roles snapshot.js reports. Each element line reads "<role> <label>", and a planner copying
+# a line sometimes copies the role with it; the agent is told to click the label, not the role.
+ROLES = ("link", "button", "textbox", "searchbox", "checkbox", "combobox", "tab", "menuitem",
+         "option", "radio", "switch", "gridcell", "spinbutton", "summary")
+
+
+def strip_role(label):
+    head, _, rest = label.partition(" ")
+    return rest.strip() if head.lower() in ROLES and rest.strip() else label
 
 
 def words(text):
@@ -81,9 +90,11 @@ def parse(line):
                 return "DONE", rest or "ok"
             if verb == "TYPE":
                 field, _, value = rest.partition("=")
-                field, value = field.strip().strip('"'), value.strip().strip('"')
+                field, value = strip_role(field.strip().strip('"')), value.strip().strip('"')
                 return ("TYPE", (field, value)) if field and value else (None, None)
             rest = rest.strip('"').strip()
+            if verb == "CLICK":
+                rest = strip_role(rest)
             return (verb, rest) if rest else (None, None)
     return "STEP", line
 

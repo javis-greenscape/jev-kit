@@ -924,6 +924,9 @@ from jev_ultrafast import planner as plan  # noqa: E402
 
 @pytest.mark.parametrize("line,expected", [
     ("CLICK Bicycle wheel", ("CLICK", "Bicycle wheel")),
+    ("CLICK link chlorophyll (below)", ("CLICK", "chlorophyll (below)")),
+    ("CLICK link", ("CLICK", "link")),
+    ("TYPE searchbox Search = Curie", ("TYPE", ("Search", "Curie"))),
     ('click: "Bicycle wheel"', ("CLICK", "Bicycle wheel")),
     ("FIND Nobel laureates in Physics", ("FIND", "Nobel laureates in Physics")),
     ("TYPE Search = Marie Curie", ("TYPE", ("Search", "Marie Curie"))),
