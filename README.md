@@ -197,7 +197,39 @@ Seven commits of ours sit on top of that pin, in this repository's history:
    click, and the first scroll after a navigation no longer dropped. A two-hop
    Wikipedia link-navigation task went from blocked to done in 7.2 s.
 
-Benchmark: Sonnet vs Jev on a Wikipedia suite, results to follow.
+### Sonnet against Jev on a Wikipedia suite
+
+Six tasks, three runs of each per arm, on 23 September 2026. One arm is Jev
+through this kit's own `browse` server. The other is `claude -p --model sonnet`
+holding the Playwright MCP server and nothing else, with this account's hooks
+switched off for that child process. Both arms got the same goal text and the
+same 180 second budget, and the two ran one after another rather than at once.
+Tasks, checks and runner are in
+[vendor/jev-ultrafast/bench](vendor/jev-ultrafast/bench), and the raw rows are
+in `results-wiki-20260923T091531Z.jsonl` beside them.
+
+| arm | pass rate | median s (passes) | p90 s (passes) | median cost per task |
+|---|---|---|---|---|
+| jev via `browse` | 5/18 (28%) | 17.8 | 28.8 | not reported by `browse` |
+| sonnet + Playwright MCP | 18/18 (100%) | 40.0 | 66.3 | $0.139 |
+
+| task | jev | sonnet |
+|---|---|---|
+| W1 two link hops to Ancient Rome | 0/3 | 3/3 |
+| W2 two link hops to Quantum mechanics | 0/3 | 3/3 |
+| W3 chess loser, his birth city, its founding year | 0/3 | 3/3 |
+| W4 Python's creator, his employer, its founding year | 0/3 | 3/3 |
+| W5 Feynman's doctoral advisor, his birth year | 2/3 | 3/3 |
+| W6 first to the Kilimanjaro summit, his nationality | 3/3 | 3/3 |
+
+Sonnet finished every run. Jev finished five of eighteen, and the runs it did
+finish took roughly half the wall time of Sonnet's.
+
+Almost all of Jev's failures have one shape. After three to five steps it
+reports itself blocked and stops, either still on the page it started from or
+one hop short of the answer. Twice it crashed instead, on a field it meant to
+type into. The one task it never missed is the one with a search box and a
+short path after it.
 
 To move to a newer upstream:
 
