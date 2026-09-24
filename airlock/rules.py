@@ -1040,11 +1040,61 @@ R7_SUGGESTION = (
 )
 
 
+# Clients that run SQL given on the command line. A DROP in any other
+# program's arguments is text (an echo, a commit message), not a statement.
+_SQL_CLIENTS = {
+    "psql", "mysql", "mariadb", "sqlite3", "sqlcmd", "duckdb", "clickhouse-client",
+    "cockroach", "mongosh", "mongo",
+}
+_SQL_DROP_RE = re.compile(r"\bDROP\s+(DATABASE|SCHEMA|TABLE)\b", re.IGNORECASE)
+# `dd of=` targets that are not a disk. `of=/dev/null` is an everyday
+# throughput test and must stay silent.
+_DD_HARMLESS = ("/dev/null", "/dev/stdout", "/dev/stderr", "/dev/tty", "/dev/fd/")
+# A download piped straight into a shell with no script argument, so the
+# shell runs whatever came down the wire. `curl page | bash norm.sh` hands the
+# page to a local script as stdin and is not this.
+_PIPE_TO_SHELL_RE = re.compile(
+    r"\b(curl|wget)\b[^|;&\n]*\|\s*(?:sudo\s+(?:-\S+\s+)*)?(?:ba|z|da|k)?sh\b"
+    r"(?:\s+-[^\s-]\S*)*\s*(?:--(?:\s|$)|$|[;&|\n)])"
+)
+
+
+def _unsudo(prog, args):
+    """R7 judges what runs, not how it was elevated (R5 owns `sudo`)."""
+    while prog == "sudo" and args:
+        rest = list(args)
+        while rest and rest[0].startswith("-"):
+            rest = rest[1:]
+        if not rest:
+            break
+        prog, args = rest[0].rsplit("/", 1)[-1], rest[1:]
+    return prog, args
+
+
+def _is_recursive_rm(args):
+    return any(a.startswith("-") and not a.startswith("--") and "r" in a.lower()
+               or a == "--recursive" for a in args)
+
+
+def _whole_tree_target(a):
+    """The rm/chmod target that takes a whole tree with it, or None. `/` is
+    compared before stripping slashes: stripped, it is the empty string and
+    matched nothing, so `rm -rf /` passed R7 silently while `rm -rf ~` warned
+    (found by the tamper-cases corpus, 2026-09-24)."""
+    raw = a
+    if raw in ("/", "/*", "~", "~/", "$HOME", "${HOME}", "*", ".", "./", "..", "../", "./*"):
+        return raw
+    p = _expand(raw)
+    if p.rstrip("/") == HOME:
+        return raw
+    return None
+
+
 def prefilter_destructive(ctx):
     if ctx["tool_name"] not in SHELL_TOOLS:
         return None
     for seg in ctx["segments"]:
-        prog, args = program_of(seg)
+        prog, args = _unsudo(*program_of(seg))
         if prog == "git" and args:
             sub = args[0]
             joined = " ".join(args)
@@ -1059,17 +1109,48 @@ def prefilter_destructive(ctx):
             if sub in ("filter-branch", "filter-repo"):
                 return Match("`git %s` rewrites history" % sub, R7_SUGGESTION)
         if prog == "rm":
-            recursive = any(a.startswith("-") and ("r" in a.lower() or a in ("--recursive",)) for a in args)
-            if not recursive:
+            if not _is_recursive_rm(args):
                 continue
             for a in args:
                 if a.startswith("-"):
                     continue
-                p = _expand(a).rstrip("/")
-                if p in ("/", HOME) or a in ("*", "~", "$HOME"):
+                if _whole_tree_target(a):
                     return Match("`rm -rf %s` would delete a whole tree" % a, R7_SUGGESTION)
+                p = _expand(a).rstrip("/")
                 if p.startswith(HOME + "/") and os.path.exists(os.path.join(p, ".git")):
                     return Match("`rm -rf %s` would delete a whole git repository" % a, R7_SUGGESTION)
+        if prog == "find":
+            for i, a in enumerate(args):
+                if a in ("-exec", "-execdir") and i + 1 < len(args) \
+                        and args[i + 1].rsplit("/", 1)[-1] == "rm" and _is_recursive_rm(args[i + 2:]):
+                    return Match("`find ... %s rm -r` recursively deletes every match" % a, R7_SUGGESTION)
+        if prog == "xargs":
+            rest = list(args)
+            while rest and rest[0].startswith("-"):
+                rest = rest[1:]
+            if rest and rest[0].rsplit("/", 1)[-1] == "rm" and _is_recursive_rm(rest[1:]):
+                return Match("`xargs rm -r` recursively deletes whatever is piped in", R7_SUGGESTION)
+        if prog in _SQL_CLIENTS:
+            m = _SQL_DROP_RE.search(seg)
+            if m:
+                return Match("`DROP %s` deletes data irreversibly" % m.group(1).upper(), R7_SUGGESTION)
+        if prog == "redis-cli" and any(a.upper() in ("FLUSHALL", "FLUSHDB") for a in args):
+            return Match("`redis-cli FLUSHALL`/`FLUSHDB` wipes the database", R7_SUGGESTION)
+        if prog in ("terraform", "tofu") and ("destroy" in args or "-destroy" in args):
+            return Match("`%s destroy` tears down real infrastructure" % prog, R7_SUGGESTION)
+        if prog == "dd":
+            for a in args:
+                if a.startswith("of=/dev/") and not a[3:].startswith(_DD_HARMLESS):
+                    return Match("`dd %s` overwrites a device" % a, R7_SUGGESTION)
+        if prog in ("chmod", "chown") and _is_recursive_rm(args):
+            for a in args[1:]:
+                if not a.startswith("-") and _whole_tree_target(a) in ("/", "/*", "~", "~/", "$HOME", "${HOME}") \
+                        or not a.startswith("-") and _expand(a).rstrip("/") == HOME:
+                    return Match("`%s -R` on `%s` rewrites permissions on a whole tree" % (prog, a),
+                                 R7_SUGGESTION)
+    m = _PIPE_TO_SHELL_RE.search(strip_heredocs(ctx.get("command") or ""))
+    if m:
+        return Match("`%s ... | sh` runs a downloaded script unread" % m.group(1), R7_SUGGESTION)
     return None
 
 

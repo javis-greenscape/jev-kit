@@ -14,7 +14,7 @@ request, no log row, no subprocess.
 | `R4-long-work-bare-shell` | Bash | warn | code, Jev for the ambiguous cases | long work on a shell a dropped connection would kill |
 | `R5-sudo` | Bash | deny | code only | `sudo` outside a named package install, or anywhere under `$HOME` |
 | `R6-gui-or-browser` | Bash | **`off` by default on every platform** | code only | opening a GUI or browser on a headless box |
-| `R7-destructive` | Bash | warn | code only | force pushes, hard resets, wholesale deletion |
+| `R7-destructive` | Bash | warn | code only | force pushes, hard resets, wholesale deletion (`rm -rf` of `/`, `~` or `.`, recursive `rm` behind `find -exec` or `xargs`), SQL `DROP`, `redis-cli FLUSHALL`, `terraform destroy`, `dd` onto a device, recursive `chmod`/`chown` of `/` or `~`, a download piped into a shell |
 | `R8-tier-guard` | Agent | deny two rungs over, **warn one rung over**, rewrite only if asked | Jev | a task dispatched to an agent more expensive than it needs |
 | `R8-tool-choice-guard` | Bash | deny | Jev | a disk-wide filename crawl, or a raw grep where a code graph exists |
 | `R9-commit-secret` | Bash | deny | code + a local credential belt | staging or committing a secret |
