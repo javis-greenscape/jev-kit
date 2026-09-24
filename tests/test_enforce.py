@@ -332,3 +332,46 @@ class InputSummaryCapsTest(unittest.TestCase):
         self.assertEqual(len(s["description"]), enforce.LOG_FIELD_CAP)
         self.assertLess(enforce.LOG_COMMAND_CAP, enforce.JEV_SUMMARY_CAP)
         self.assertLess(enforce.LOG_FIELD_CAP, enforce.JEV_SUMMARY_CAP)
+
+
+class BashDenyReasonFreshnessTests(unittest.TestCase):
+    """A suggestion that runs plocate/locate warns that the index is a
+    snapshot; one that only mentions plocate in prose does not."""
+
+    def _reason(self, suggestion):
+        return enforce._bash_deny_reason({"suggestion": suggestion, "scope": "broad"})
+
+    def test_plocate_suggestion_carries_freshness_note(self):
+        reason = self._reason(_policy_mod.PLOCATE_SUGGESTION)
+        self.assertIn(enforce.PLOCATE_FRESHNESS_NOTE, reason)
+        self.assertIn("[airlock-ok: <reason>]", reason)
+
+    def test_system_locate_suggestion_carries_freshness_note(self):
+        reason = self._reason(_policy_mod.plocate_command("system-locate"))
+        self.assertIn(enforce.PLOCATE_FRESHNESS_NOTE, reason)
+
+    def test_mixed_suggestion_carries_freshness_note(self):
+        self.assertIn(enforce.PLOCATE_FRESHNESS_NOTE,
+                      self._reason(_policy_mod.ES_WSL_MIXED_SUGGESTION))
+
+    def test_note_names_no_schedule(self):
+        # A --no-systemd install or the system database is not rebuilt hourly.
+        self.assertNotIn("hour", enforce.PLOCATE_FRESHNESS_NOTE)
+
+    def test_wsl_everything_only_suggestion_has_no_note(self):
+        # Its prose mentions "the plocate index" but it runs only es.
+        self.assertIn("plocate", _policy_mod.ES_WSL_SUGGESTION)
+        self.assertNotIn(enforce.PLOCATE_FRESHNESS_NOTE,
+                         self._reason(_policy_mod.ES_WSL_SUGGESTION))
+
+    def test_everything_suggestion_has_no_note(self):
+        self.assertNotIn(enforce.PLOCATE_FRESHNESS_NOTE,
+                         self._reason(_policy_mod.ES_SUGGESTION))
+
+    def test_graphify_suggestion_has_no_note(self):
+        self.assertNotIn(enforce.PLOCATE_FRESHNESS_NOTE,
+                         self._reason(_policy_mod.GRAPHIFY_SUGGESTION))
+
+    def test_missing_suggestion_has_no_note(self):
+        self.assertNotIn(enforce.PLOCATE_FRESHNESS_NOTE,
+                         enforce._bash_deny_reason({}))

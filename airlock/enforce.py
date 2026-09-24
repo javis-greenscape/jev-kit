@@ -209,17 +209,41 @@ def _override_texts(ctx):
     return texts
 
 
+# A plocate or locate database is a snapshot from its last rebuild. The kit's
+# own home.db is rebuilt hourly by airlock-filesearch.timer, but a
+# `--no-systemd` install or the system database can be older than that, so
+# the note names no schedule. Without it, an agent that just wrote a file and
+# then searched for it would read the empty result as "absent". Only said
+# when the suggestion actually runs plocate or locate: Everything keeps a live
+# NTFS index, and a graphify query is not a filename search at all.
+PLOCATE_FRESHNESS_NOTE = (
+    "The plocate index is a snapshot from its last rebuild, so a file created\n"
+    "since then is missing from it. For a recent file, search the directory it\n"
+    "was written to directly, with `fd` or `find` scoped to that directory.\n"
+)
+
+# A suggestion line that runs the index, as opposed to prose that mentions it
+# (ES_WSL_SUGGESTION says "the plocate index covers $HOME" and runs only es).
+_LOCATE_COMMAND_RE = re.compile(r"^\s*(?:plocate|locate)\s", re.MULTILINE)
+
+
+def suggests_locate(suggestion):
+    return bool(_LOCATE_COMMAND_RE.search(suggestion or ""))
+
+
 def _bash_deny_reason(entry):
     suggestion = entry.get("suggestion") or "a more targeted search"
     scope = entry.get("scope") or "a broad search"
+    freshness = PLOCATE_FRESHNESS_NOTE if suggests_locate(suggestion) else ""
     return (
         "BLOCKED (airlock enforce): this looks like a %s search. Run instead:\n"
         "    %s\n"
+        "%s"
         # "this call", not "this Bash call": the same rule fires for the
         # PowerShell tool on a Windows machine without Git Bash, where the
         # Bash tool is never registered at all.
         "Wrong call? Add `[airlock-ok: <reason>]` to this call's description to override."
-        % (scope, suggestion)
+        % (scope, suggestion, freshness)
     )
 
 
