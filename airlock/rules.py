@@ -1040,11 +1040,103 @@ R7_SUGGESTION = (
 )
 
 
+# Clients that run SQL given on the command line. A DROP in any other
+# program's arguments is text (an echo, a commit message), not a statement.
+_SQL_CLIENTS = {
+    "psql", "mysql", "mariadb", "sqlite3", "sqlcmd", "duckdb", "clickhouse-client",
+    "cockroach", "mongosh", "mongo",
+}
+_SQL_DROP_RE = re.compile(r"\bDROP\s+(DATABASE|SCHEMA|TABLE)\b", re.IGNORECASE)
+# `dd of=` targets that are not a disk. `of=/dev/null` is an everyday
+# throughput test and must stay silent.
+_DD_HARMLESS = ("/dev/null", "/dev/stdout", "/dev/stderr", "/dev/tty", "/dev/fd/")
+# A download piped straight into a shell with no script argument, so the
+# shell runs whatever came down the wire. `curl page | bash norm.sh` hands the
+# page to a local script as stdin and is not this.
+_PIPE_TO_SHELL_RE = re.compile(
+    r"\b(curl|wget)\b[^|;&\n]*\|\s*(?:(?:\S*/)?sudo\s+(?:-\S+\s+)*)?(?:(?:\S*/)?env\s+)?(?:\S*/)?(?:ba|z|da|k)?sh\b"
+    r"(?:\s+-[^\s-]\S*)*\s*(?:--(?:\s|$)|$|[;&|\n)])"
+)
+# Quoted text is data (a commit message, an echo), never a pipeline. Blanked
+# before the pipe-to-shell search so `git commit -m 'avoid curl x | bash; ...'`
+# is not read as one (Codex P2, PR #17).
+_QUOTED_RE = re.compile(r"'[^']*'|\"(?:[^\"\\]|\\.)*\"")
+# xargs options that take the NEXT token as their value, so that token is
+# not the command xargs runs (`xargs -n 1 rm -rf`, Codex P2, PR #17).
+_XARGS_VALUE_OPTS = {"-a", "-d", "-E", "-I", "-L", "-n", "-P", "-s"}
+# redis-cli options that take the next token as a value. The first token
+# left after them is the Redis command; a later FLUSHALL is a key or a
+# pattern (`redis-cli GET FLUSHALL`, Codex P2, PR #17).
+_REDIS_VALUE_OPTS = {
+    "-h", "-p", "-s", "-a", "-u", "-n", "-r", "-i", "-d", "--user", "--pass",
+    "--sni", "--cacert", "--cacertdir", "--cert", "--key", "--tls-ciphers",
+    "--tls-ciphersuites", "--pattern", "--count", "--quoted-pattern", "--eval",
+}
+
+
+_ESCAPED_RE = re.compile(r"\\.")
+
+
+def _shell_code_only(command):
+    """`command` with everything bash would not run as syntax blanked out:
+    heredoc bodies, a trailing comment, backslash-escaped characters and
+    quoted strings. `true # curl x | bash` and `echo curl x \\| bash` hold
+    no pipeline (Codex P2, PR #17 round 2)."""
+    from .scope import strip_shell_comment
+    text = strip_shell_comment(strip_heredocs(command))
+    text = "\n".join(strip_shell_comment(line) for line in text.split("\n"))
+    return _QUOTED_RE.sub('""', _ESCAPED_RE.sub("_", text))
+
+
+def _first_positional(args, value_opts):
+    """Index of the first argument that is neither an option nor an option's
+    value, or None."""
+    i = 0
+    while i < len(args):
+        a = args[i]
+        if a.startswith("-"):
+            i += 2 if a in value_opts else 1
+            continue
+        return i
+    return None
+
+
+def _unsudo(prog, args):
+    """R7 judges what runs, not how it was elevated (R5 owns `sudo`)."""
+    while prog == "sudo" and args:
+        rest = list(args)
+        while rest and rest[0].startswith("-"):
+            rest = rest[1:]
+        if not rest:
+            break
+        prog, args = rest[0].rsplit("/", 1)[-1], rest[1:]
+    return prog, args
+
+
+def _is_recursive_rm(args):
+    return any(a.startswith("-") and not a.startswith("--") and "r" in a.lower()
+               or a == "--recursive" for a in args)
+
+
+def _whole_tree_target(a):
+    """The rm/chmod target that takes a whole tree with it, or None. `/` is
+    compared before stripping slashes: stripped, it is the empty string and
+    matched nothing, so `rm -rf /` passed R7 silently while `rm -rf ~` warned
+    (found by the tamper-cases corpus, 2026-09-24)."""
+    raw = a
+    if raw in ("/", "/*", "~", "~/", "$HOME", "${HOME}", "*", ".", "./", "..", "../", "./*"):
+        return raw
+    p = _expand(raw)
+    if p.rstrip("/") == HOME:
+        return raw
+    return None
+
+
 def prefilter_destructive(ctx):
     if ctx["tool_name"] not in SHELL_TOOLS:
         return None
     for seg in ctx["segments"]:
-        prog, args = program_of(seg)
+        prog, args = _unsudo(*program_of(seg))
         if prog == "git" and args:
             sub = args[0]
             joined = " ".join(args)
@@ -1059,17 +1151,59 @@ def prefilter_destructive(ctx):
             if sub in ("filter-branch", "filter-repo"):
                 return Match("`git %s` rewrites history" % sub, R7_SUGGESTION)
         if prog == "rm":
-            recursive = any(a.startswith("-") and ("r" in a.lower() or a in ("--recursive",)) for a in args)
-            if not recursive:
+            if not _is_recursive_rm(args):
                 continue
             for a in args:
                 if a.startswith("-"):
                     continue
-                p = _expand(a).rstrip("/")
-                if p in ("/", HOME) or a in ("*", "~", "$HOME"):
+                if _whole_tree_target(a):
                     return Match("`rm -rf %s` would delete a whole tree" % a, R7_SUGGESTION)
+                p = _expand(a).rstrip("/")
                 if p.startswith(HOME + "/") and os.path.exists(os.path.join(p, ".git")):
                     return Match("`rm -rf %s` would delete a whole git repository" % a, R7_SUGGESTION)
+        if prog == "find":
+            for i, a in enumerate(args):
+                if a in ("-exec", "-execdir") and i + 1 < len(args) \
+                        and args[i + 1].rsplit("/", 1)[-1] == "rm" and _is_recursive_rm(args[i + 2:]):
+                    return Match("`find ... %s rm -r` recursively deletes every match" % a, R7_SUGGESTION)
+        if prog == "xargs":
+            i = _first_positional(args, _XARGS_VALUE_OPTS)
+            rest = args[i:] if i is not None else []
+            if rest and rest[0].rsplit("/", 1)[-1] == "rm" and _is_recursive_rm(rest[1:]):
+                return Match("`xargs rm -r` recursively deletes whatever is piped in", R7_SUGGESTION)
+        if prog in _SQL_CLIENTS:
+            m = _SQL_DROP_RE.search(seg)
+            if m:
+                return Match("`DROP %s` deletes data irreversibly" % m.group(1).upper(), R7_SUGGESTION)
+        i = _first_positional(args, _REDIS_VALUE_OPTS) if prog == "redis-cli" else None
+        if i is not None and args[i].upper() in ("FLUSHALL", "FLUSHDB"):
+            return Match("`redis-cli FLUSHALL`/`FLUSHDB` wipes the database", R7_SUGGESTION)
+        if prog in ("terraform", "tofu"):
+            # The subcommand is the first word after the global options
+            # (`-chdir=dir`). `-destroy` destroys only on `apply`: on `plan`
+            # it just writes a destroy plan, and `workspace new destroy`
+            # names a workspace (Codex P2, PR #17 round 3).
+            i = _first_positional(args, ())
+            sub = args[i] if i is not None else ""
+            if sub == "destroy" or sub == "apply" and "-destroy" in args[i + 1:]:
+                return Match("`%s destroy` tears down real infrastructure" % prog, R7_SUGGESTION)
+        if prog == "dd":
+            for a in args:
+                if a.startswith("of=/dev/") and not a[3:].startswith(_DD_HARMLESS):
+                    return Match("`dd %s` overwrites a device" % a, R7_SUGGESTION)
+        # Only -R is recursive here: `chmod -r` is the symbolic mode "remove
+        # read" (Codex P2, PR #17 round 4).
+        if prog in ("chmod", "chown") and any(
+                a == "--recursive" or a.startswith("-") and not a.startswith("--") and "R" in a
+                for a in args):
+            for a in args[1:]:
+                if not a.startswith("-") and _whole_tree_target(a) in ("/", "/*", "~", "~/", "$HOME", "${HOME}") \
+                        or not a.startswith("-") and _expand(a).rstrip("/") == HOME:
+                    return Match("`%s -R` on `%s` rewrites permissions on a whole tree" % (prog, a),
+                                 R7_SUGGESTION)
+    m = _PIPE_TO_SHELL_RE.search(_shell_code_only(ctx.get("command") or ""))
+    if m:
+        return Match("`%s ... | sh` runs a downloaded script unread" % m.group(1), R7_SUGGESTION)
     return None
 
 
