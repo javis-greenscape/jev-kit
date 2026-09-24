@@ -209,17 +209,31 @@ def _override_texts(ctx):
     return texts
 
 
+# The plocate index is rebuilt by airlock-filesearch.timer, hourly, so a file
+# created since the last rebuild is not in it yet. An agent that just wrote a
+# file and then searches for it would read the empty result as "absent". Only
+# said when the suggestion names plocate: Everything keeps a live NTFS index
+# and a graphify query is not a filename search at all.
+PLOCATE_FRESHNESS_NOTE = (
+    "The plocate index is rebuilt hourly, so a file created in the last hour may be\n"
+    "missing from it. For a recent file, search the working tree directly\n"
+    "(`fd '<pattern>'` or `find . -name '<pattern>'`): a scoped search is not blocked.\n"
+)
+
+
 def _bash_deny_reason(entry):
     suggestion = entry.get("suggestion") or "a more targeted search"
     scope = entry.get("scope") or "a broad search"
+    freshness = PLOCATE_FRESHNESS_NOTE if "plocate" in suggestion else ""
     return (
         "BLOCKED (airlock enforce): this looks like a %s search. Run instead:\n"
         "    %s\n"
+        "%s"
         # "this call", not "this Bash call": the same rule fires for the
         # PowerShell tool on a Windows machine without Git Bash, where the
         # Bash tool is never registered at all.
         "Wrong call? Add `[airlock-ok: <reason>]` to this call's description to override."
-        % (scope, suggestion)
+        % (scope, suggestion, freshness)
     )
 
 

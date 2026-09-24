@@ -332,3 +332,27 @@ class InputSummaryCapsTest(unittest.TestCase):
         self.assertEqual(len(s["description"]), enforce.LOG_FIELD_CAP)
         self.assertLess(enforce.LOG_COMMAND_CAP, enforce.JEV_SUMMARY_CAP)
         self.assertLess(enforce.LOG_FIELD_CAP, enforce.JEV_SUMMARY_CAP)
+
+
+class BashDenyReasonFreshnessTests(unittest.TestCase):
+    """A plocate suggestion warns that the hourly index misses recent files."""
+
+    def test_plocate_suggestion_carries_freshness_note(self):
+        reason = enforce._bash_deny_reason(
+            {"suggestion": _policy_mod.PLOCATE_SUGGESTION, "scope": "home-wide"})
+        self.assertIn(enforce.PLOCATE_FRESHNESS_NOTE, reason)
+        self.assertIn("[airlock-ok: <reason>]", reason)
+
+    def test_everything_suggestion_has_no_freshness_note(self):
+        reason = enforce._bash_deny_reason(
+            {"suggestion": _policy_mod.ES_SUGGESTION, "scope": "drive-wide"})
+        self.assertNotIn("rebuilt hourly", reason)
+
+    def test_graphify_suggestion_has_no_freshness_note(self):
+        reason = enforce._bash_deny_reason(
+            {"suggestion": _policy_mod.GRAPHIFY_SUGGESTION, "scope": "raw grep"})
+        self.assertNotIn("rebuilt hourly", reason)
+
+    def test_missing_suggestion_has_no_freshness_note(self):
+        reason = enforce._bash_deny_reason({})
+        self.assertNotIn("rebuilt hourly", reason)
