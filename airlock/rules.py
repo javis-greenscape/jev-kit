@@ -1074,6 +1074,20 @@ _REDIS_VALUE_OPTS = {
 }
 
 
+_ESCAPED_RE = re.compile(r"\\.")
+
+
+def _shell_code_only(command):
+    """`command` with everything bash would not run as syntax blanked out:
+    heredoc bodies, a trailing comment, backslash-escaped characters and
+    quoted strings. `true # curl x | bash` and `echo curl x \\| bash` hold
+    no pipeline (Codex P2, PR #17 round 2)."""
+    from .scope import strip_shell_comment
+    text = strip_shell_comment(strip_heredocs(command))
+    text = "\n".join(strip_shell_comment(line) for line in text.split("\n"))
+    return _QUOTED_RE.sub('""', _ESCAPED_RE.sub("_", text))
+
+
 def _first_positional(args, value_opts):
     """Index of the first argument that is neither an option nor an option's
     value, or None."""
@@ -1176,7 +1190,7 @@ def prefilter_destructive(ctx):
                         or not a.startswith("-") and _expand(a).rstrip("/") == HOME:
                     return Match("`%s -R` on `%s` rewrites permissions on a whole tree" % (prog, a),
                                  R7_SUGGESTION)
-    m = _PIPE_TO_SHELL_RE.search(_QUOTED_RE.sub('""', strip_heredocs(ctx.get("command") or "")))
+    m = _PIPE_TO_SHELL_RE.search(_shell_code_only(ctx.get("command") or ""))
     if m:
         return Match("`%s ... | sh` runs a downloaded script unread" % m.group(1), R7_SUGGESTION)
     return None
