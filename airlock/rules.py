@@ -1191,7 +1191,11 @@ def prefilter_destructive(ctx):
             for a in args:
                 if a.startswith("of=/dev/") and not a[3:].startswith(_DD_HARMLESS):
                     return Match("`dd %s` overwrites a device" % a, R7_SUGGESTION)
-        if prog in ("chmod", "chown") and _is_recursive_rm(args):
+        # Only -R is recursive here: `chmod -r` is the symbolic mode "remove
+        # read" (Codex P2, PR #17 round 4).
+        if prog in ("chmod", "chown") and any(
+                a == "--recursive" or a.startswith("-") and not a.startswith("--") and "R" in a
+                for a in args):
             for a in args[1:]:
                 if not a.startswith("-") and _whole_tree_target(a) in ("/", "/*", "~", "~/", "$HOME", "${HOME}") \
                         or not a.startswith("-") and _expand(a).rstrip("/") == HOME:

@@ -312,7 +312,8 @@ class TestR3HostCapacity(unittest.TestCase):
                   "tofu destroy", "terraform apply -destroy",
                   "terraform -chdir=infra destroy", "terraform -chdir=infra apply -auto-approve -destroy",
                   "dd if=/dev/zero of=/dev/sda", "sudo dd if=x.img of=/dev/nvme0n1 bs=4M",
-                  "chmod -R 777 /", "sudo chown -R me:me /", "chmod -R 700 ~"):
+                  "chmod -R 777 /", "sudo chown -R me:me /", "chmod -R 700 ~",
+                  "chmod --recursive 777 /", "chown -hR me /"):
             self.assertTrue(fired(ctx_bash(c), "R7-destructive"), c)
         for c in ('echo "DROP TABLE users"', 'git commit -m "DROP TABLE old"',
                   'psql -c "SELECT 1"', "redis-cli GET key", "redis-cli GET FLUSHALL",
@@ -321,7 +322,7 @@ class TestR3HostCapacity(unittest.TestCase):
                   "terraform apply", "terraform plan -destroy", "terraform workspace new destroy",
                   "terraform -chdir=destroy plan", "dd if=/dev/zero of=/dev/null bs=1M count=100",
                   "dd if=/dev/zero of=disk.img bs=1M count=10",
-                  "chmod -R 755 build", "chmod 777 /tmp/x", "chown -R me:me ./dist"):
+                  "chmod -R 755 build", "chmod 777 /tmp/x", "chmod -r /", "chmod -rw ~", "chown -R me:me ./dist"):
             self.assertEqual(fired(ctx_bash(c), "R7-destructive"), [], c)
 
     def test_r7_download_piped_to_shell(self):
