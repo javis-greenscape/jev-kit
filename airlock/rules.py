@@ -1178,8 +1178,15 @@ def prefilter_destructive(ctx):
         i = _first_positional(args, _REDIS_VALUE_OPTS) if prog == "redis-cli" else None
         if i is not None and args[i].upper() in ("FLUSHALL", "FLUSHDB"):
             return Match("`redis-cli FLUSHALL`/`FLUSHDB` wipes the database", R7_SUGGESTION)
-        if prog in ("terraform", "tofu") and ("destroy" in args or "-destroy" in args):
-            return Match("`%s destroy` tears down real infrastructure" % prog, R7_SUGGESTION)
+        if prog in ("terraform", "tofu"):
+            # The subcommand is the first word after the global options
+            # (`-chdir=dir`). `-destroy` destroys only on `apply`: on `plan`
+            # it just writes a destroy plan, and `workspace new destroy`
+            # names a workspace (Codex P2, PR #17 round 3).
+            i = _first_positional(args, ())
+            sub = args[i] if i is not None else ""
+            if sub == "destroy" or sub == "apply" and "-destroy" in args[i + 1:]:
+                return Match("`%s destroy` tears down real infrastructure" % prog, R7_SUGGESTION)
         if prog == "dd":
             for a in args:
                 if a.startswith("of=/dev/") and not a[3:].startswith(_DD_HARMLESS):

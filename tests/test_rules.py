@@ -310,6 +310,7 @@ class TestR3HostCapacity(unittest.TestCase):
                   'mysql app -e "DROP SCHEMA app"', "redis-cli FLUSHALL",
                   "redis-cli -n 2 flushdb", "redis-cli -h db -p 6380 FLUSHALL ASYNC", "terraform destroy -auto-approve",
                   "tofu destroy", "terraform apply -destroy",
+                  "terraform -chdir=infra destroy", "terraform -chdir=infra apply -auto-approve -destroy",
                   "dd if=/dev/zero of=/dev/sda", "sudo dd if=x.img of=/dev/nvme0n1 bs=4M",
                   "chmod -R 777 /", "sudo chown -R me:me /", "chmod -R 700 ~"):
             self.assertTrue(fired(ctx_bash(c), "R7-destructive"), c)
@@ -317,7 +318,8 @@ class TestR3HostCapacity(unittest.TestCase):
                   'psql -c "SELECT 1"', "redis-cli GET key", "redis-cli GET FLUSHALL",
                   "redis-cli SET FLUSHDB value", "redis-cli --scan --pattern FLUSHALL",
                   "terraform plan",
-                  "terraform apply", "dd if=/dev/zero of=/dev/null bs=1M count=100",
+                  "terraform apply", "terraform plan -destroy", "terraform workspace new destroy",
+                  "terraform -chdir=destroy plan", "dd if=/dev/zero of=/dev/null bs=1M count=100",
                   "dd if=/dev/zero of=disk.img bs=1M count=10",
                   "chmod -R 755 build", "chmod 777 /tmp/x", "chown -R me:me ./dist"):
             self.assertEqual(fired(ctx_bash(c), "R7-destructive"), [], c)
