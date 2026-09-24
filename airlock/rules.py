@@ -1054,9 +1054,37 @@ _DD_HARMLESS = ("/dev/null", "/dev/stdout", "/dev/stderr", "/dev/tty", "/dev/fd/
 # shell runs whatever came down the wire. `curl page | bash norm.sh` hands the
 # page to a local script as stdin and is not this.
 _PIPE_TO_SHELL_RE = re.compile(
-    r"\b(curl|wget)\b[^|;&\n]*\|\s*(?:sudo\s+(?:-\S+\s+)*)?(?:ba|z|da|k)?sh\b"
+    r"\b(curl|wget)\b[^|;&\n]*\|\s*(?:(?:\S*/)?sudo\s+(?:-\S+\s+)*)?(?:(?:\S*/)?env\s+)?(?:\S*/)?(?:ba|z|da|k)?sh\b"
     r"(?:\s+-[^\s-]\S*)*\s*(?:--(?:\s|$)|$|[;&|\n)])"
 )
+# Quoted text is data (a commit message, an echo), never a pipeline. Blanked
+# before the pipe-to-shell search so `git commit -m 'avoid curl x | bash; ...'`
+# is not read as one (Codex P2, PR #17).
+_QUOTED_RE = re.compile(r"'[^']*'|\"(?:[^\"\\]|\\.)*\"")
+# xargs options that take the NEXT token as their value, so that token is
+# not the command xargs runs (`xargs -n 1 rm -rf`, Codex P2, PR #17).
+_XARGS_VALUE_OPTS = {"-a", "-d", "-E", "-I", "-L", "-n", "-P", "-s"}
+# redis-cli options that take the next token as a value. The first token
+# left after them is the Redis command; a later FLUSHALL is a key or a
+# pattern (`redis-cli GET FLUSHALL`, Codex P2, PR #17).
+_REDIS_VALUE_OPTS = {
+    "-h", "-p", "-s", "-a", "-u", "-n", "-r", "-i", "-d", "--user", "--pass",
+    "--sni", "--cacert", "--cacertdir", "--cert", "--key", "--tls-ciphers",
+    "--tls-ciphersuites", "--pattern", "--count", "--quoted-pattern", "--eval",
+}
+
+
+def _first_positional(args, value_opts):
+    """Index of the first argument that is neither an option nor an option's
+    value, or None."""
+    i = 0
+    while i < len(args):
+        a = args[i]
+        if a.startswith("-"):
+            i += 2 if a in value_opts else 1
+            continue
+        return i
+    return None
 
 
 def _unsudo(prog, args):
@@ -1125,16 +1153,16 @@ def prefilter_destructive(ctx):
                         and args[i + 1].rsplit("/", 1)[-1] == "rm" and _is_recursive_rm(args[i + 2:]):
                     return Match("`find ... %s rm -r` recursively deletes every match" % a, R7_SUGGESTION)
         if prog == "xargs":
-            rest = list(args)
-            while rest and rest[0].startswith("-"):
-                rest = rest[1:]
+            i = _first_positional(args, _XARGS_VALUE_OPTS)
+            rest = args[i:] if i is not None else []
             if rest and rest[0].rsplit("/", 1)[-1] == "rm" and _is_recursive_rm(rest[1:]):
                 return Match("`xargs rm -r` recursively deletes whatever is piped in", R7_SUGGESTION)
         if prog in _SQL_CLIENTS:
             m = _SQL_DROP_RE.search(seg)
             if m:
                 return Match("`DROP %s` deletes data irreversibly" % m.group(1).upper(), R7_SUGGESTION)
-        if prog == "redis-cli" and any(a.upper() in ("FLUSHALL", "FLUSHDB") for a in args):
+        i = _first_positional(args, _REDIS_VALUE_OPTS) if prog == "redis-cli" else None
+        if i is not None and args[i].upper() in ("FLUSHALL", "FLUSHDB"):
             return Match("`redis-cli FLUSHALL`/`FLUSHDB` wipes the database", R7_SUGGESTION)
         if prog in ("terraform", "tofu") and ("destroy" in args or "-destroy" in args):
             return Match("`%s destroy` tears down real infrastructure" % prog, R7_SUGGESTION)
@@ -1148,7 +1176,7 @@ def prefilter_destructive(ctx):
                         or not a.startswith("-") and _expand(a).rstrip("/") == HOME:
                     return Match("`%s -R` on `%s` rewrites permissions on a whole tree" % (prog, a),
                                  R7_SUGGESTION)
-    m = _PIPE_TO_SHELL_RE.search(strip_heredocs(ctx.get("command") or ""))
+    m = _PIPE_TO_SHELL_RE.search(_QUOTED_RE.sub('""', strip_heredocs(ctx.get("command") or "")))
     if m:
         return Match("`%s ... | sh` runs a downloaded script unread" % m.group(1), R7_SUGGESTION)
     return None
