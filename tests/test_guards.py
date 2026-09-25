@@ -6,6 +6,8 @@ import tests  # noqa: F401, I001 -- MUST be the first import. `python3 -m unitte
 # Importing it explicitly, here, first, is what actually runs its HOME/
 # AIRLOCK_*-isolating fixture before any airlock.* module resolves a real path.
 
+import shutil
+import tempfile
 import unittest
 from unittest import mock
 
@@ -21,12 +23,24 @@ _AVAIL = mock.patch.object(policy, "detect_availability",
                            lambda *a, **k: ("home", True))
 
 
+# The same goes for the working directory. A `grep -rn foo .` is scoped by
+# what sits under cwd, and a directory holding two or more git repos counts
+# as disk-wide (airlock/scope.py, _contains_multiple_repos). The real /tmp
+# did on masterrig: two worktrees left there by other sessions turned every
+# "cwd": CWD test below into a disk-wide search and broke four of them.
+# An empty directory made for this module is single_dir on every machine.
+CWD = None
+
+
 def setUpModule():
+    global CWD
+    CWD = tempfile.mkdtemp(prefix="airlock-guards-")
     _AVAIL.start()
 
 
 def tearDownModule():
     _AVAIL.stop()
+    shutil.rmtree(CWD, ignore_errors=True)
 
 
 
@@ -55,7 +69,7 @@ class TestRunTierGuard(unittest.TestCase):
     def test_no_api_key_makes_no_call_and_logs_nothing(self):
         data = {
             "session_id": "s1",
-            "cwd": "/tmp",
+            "cwd": CWD,
             "tool_name": "Agent",
             "tool_input": {"subagent_type": "fable", "description": "d", "prompt": "p"},
         }
@@ -69,7 +83,7 @@ class TestRunTierGuard(unittest.TestCase):
     def test_would_deny_logged_for_mismatched_rung(self):
         data = {
             "session_id": "s1",
-            "cwd": "/tmp",
+            "cwd": CWD,
             "tool_name": "Agent",
             "tool_input": {
                 "subagent_type": "fable",
@@ -90,7 +104,7 @@ class TestRunTierGuard(unittest.TestCase):
     def test_api_error_logs_error_field_and_does_not_raise(self):
         data = {
             "session_id": "s1",
-            "cwd": "/tmp",
+            "cwd": CWD,
             "tool_name": "Agent",
             "tool_input": {"subagent_type": "worker", "description": "d", "prompt": "p"},
         }
@@ -104,7 +118,7 @@ class TestRunTierGuard(unittest.TestCase):
     def test_secrets_never_reach_the_state_sent_to_jev(self):
         data = {
             "session_id": "s1",
-            "cwd": "/tmp",
+            "cwd": CWD,
             "tool_name": "Agent",
             "tool_input": {
                 "subagent_type": "worker",
@@ -126,7 +140,7 @@ class TestSkipNoDenyPossible(unittest.TestCase):
     def test_scout_find_agent_dispatch_skips_call(self):
         data = {
             "session_id": "s1",
-            "cwd": "/tmp",
+            "cwd": CWD,
             "tool_name": "Agent",
             "tool_input": {"subagent_type": "scout-find", "description": "d", "prompt": "p"},
         }
@@ -143,7 +157,7 @@ class TestSkipNoDenyPossible(unittest.TestCase):
     def test_scout_find_agent_dispatch_sampled_still_calls(self):
         data = {
             "session_id": "s1",
-            "cwd": "/tmp",
+            "cwd": CWD,
             "tool_name": "Agent",
             "tool_input": {"subagent_type": "scout-find", "description": "d", "prompt": "p"},
         }
@@ -160,7 +174,7 @@ class TestSkipNoDenyPossible(unittest.TestCase):
     def test_non_scout_find_agent_dispatch_still_judged(self):
         data = {
             "session_id": "s1",
-            "cwd": "/tmp",
+            "cwd": CWD,
             "tool_name": "Agent",
             "tool_input": {"subagent_type": "fable", "description": "d", "prompt": "p"},
         }
@@ -172,7 +186,7 @@ class TestSkipNoDenyPossible(unittest.TestCase):
             call.assert_called_once()
 
     def test_single_repo_grep_without_graph_skips_call(self):
-        data = {"session_id": "s1", "cwd": "/tmp", "tool_name": "Bash", "tool_input": {"command": "grep -rn foo ."}}
+        data = {"session_id": "s1", "cwd": CWD, "tool_name": "Bash", "tool_input": {"command": "grep -rn foo ."}}
         with mock.patch("airlock.keyfile.get_api_key", return_value="key"), \
              mock.patch("airlock.scope.root_has_graphify_graph", return_value=False), \
              mock.patch("random.random", return_value=0.99), \
@@ -184,7 +198,7 @@ class TestSkipNoDenyPossible(unittest.TestCase):
             self.assertEqual(entry["skipped"], "no_deny_possible")
 
     def test_single_repo_grep_with_graph_still_judged(self):
-        data = {"session_id": "s1", "cwd": "/tmp", "tool_name": "Bash", "tool_input": {"command": "grep -rn foo ."}}
+        data = {"session_id": "s1", "cwd": CWD, "tool_name": "Bash", "tool_input": {"command": "grep -rn foo ."}}
         fake = (
             {
                 "model": "jev-1.13.0",
@@ -211,7 +225,7 @@ class TestSkipNoDenyPossible(unittest.TestCase):
             self.assertTrue(entry["would_deny"])
 
     def test_disk_wide_find_still_judged(self):
-        data = {"session_id": "s1", "cwd": "/tmp", "tool_name": "Bash", "tool_input": {"command": "find / -name '*.xlsm'"}}
+        data = {"session_id": "s1", "cwd": CWD, "tool_name": "Bash", "tool_input": {"command": "find / -name '*.xlsm'"}}
         fake = (
             {
                 "model": "jev-1.13.0",
@@ -235,7 +249,7 @@ class TestSkipNoDenyPossible(unittest.TestCase):
             call.assert_called_once()
 
     def test_sampled_skip_never_would_deny_even_if_answer_says_so(self):
-        data = {"session_id": "s1", "cwd": "/tmp", "tool_name": "Bash", "tool_input": {"command": "grep -rn foo ."}}
+        data = {"session_id": "s1", "cwd": CWD, "tool_name": "Bash", "tool_input": {"command": "grep -rn foo ."}}
         fake = (
             {
                 "model": "jev-1.13.0",
@@ -264,21 +278,21 @@ class TestSkipNoDenyPossible(unittest.TestCase):
 
 class TestRunToolChoiceGuard(unittest.TestCase):
     def test_non_search_command_makes_no_call(self):
-        data = {"session_id": "s1", "cwd": "/tmp", "tool_name": "Bash", "tool_input": {"command": "npm install"}}
+        data = {"session_id": "s1", "cwd": CWD, "tool_name": "Bash", "tool_input": {"command": "npm install"}}
         with mock.patch("airlock.client.ask") as call, mock.patch("airlock.log.append") as append:
             guards.run_tool_choice_guard(data)
             call.assert_not_called()
             append.assert_not_called()
 
     def test_search_command_without_key_makes_no_call(self):
-        data = {"session_id": "s1", "cwd": "/tmp", "tool_name": "Bash", "tool_input": {"command": "find / -name '*.xlsm'"}}
+        data = {"session_id": "s1", "cwd": CWD, "tool_name": "Bash", "tool_input": {"command": "find / -name '*.xlsm'"}}
         with mock.patch("airlock.keyfile.get_api_key", return_value=None), \
              mock.patch("airlock.client.ask") as call:
             guards.run_tool_choice_guard(data)
             call.assert_not_called()
 
     def test_disk_wide_search_would_deny(self):
-        data = {"session_id": "s1", "cwd": "/tmp", "tool_name": "Bash", "tool_input": {"command": "find / -name '*.xlsm'"}}
+        data = {"session_id": "s1", "cwd": CWD, "tool_name": "Bash", "tool_input": {"command": "find / -name '*.xlsm'"}}
         fake = (
             {
                 "model": "jev-1.13.0",
@@ -335,7 +349,7 @@ class TestRootHasCodeGraphField(unittest.TestCase):
         )
 
     def test_present_and_true_when_graph_present_and_branch_evaluated(self):
-        data = {"session_id": "s1", "cwd": "/tmp", "tool_name": "Bash", "tool_input": {"command": "grep -rn foo ."}}
+        data = {"session_id": "s1", "cwd": CWD, "tool_name": "Bash", "tool_input": {"command": "grep -rn foo ."}}
         with mock.patch("airlock.keyfile.get_api_key", return_value="key"), \
              mock.patch("airlock.scope.root_has_graphify_graph", return_value=True), \
              mock.patch("random.random", return_value=0.99), \
@@ -350,7 +364,7 @@ class TestRootHasCodeGraphField(unittest.TestCase):
         """Sampled shadow traffic (no deny possible) still evaluates the
         branch and still records the fact -- would_deny is forced False
         afterwards, but root_has_code_graph is the real code-side value."""
-        data = {"session_id": "s1", "cwd": "/tmp", "tool_name": "Bash", "tool_input": {"command": "grep -rn foo ."}}
+        data = {"session_id": "s1", "cwd": CWD, "tool_name": "Bash", "tool_input": {"command": "grep -rn foo ."}}
         with mock.patch("airlock.keyfile.get_api_key", return_value="key"), \
              mock.patch("airlock.scope.root_has_graphify_graph", return_value=False), \
              mock.patch("random.random", return_value=0.0), \
@@ -365,7 +379,7 @@ class TestRootHasCodeGraphField(unittest.TestCase):
     def test_absent_on_the_no_deny_possible_skip_row(self):
         """No Jev call, no evaluate_search call -- never fill the field by
         statting the filesystem after the fact."""
-        data = {"session_id": "s1", "cwd": "/tmp", "tool_name": "Bash", "tool_input": {"command": "grep -rn foo ."}}
+        data = {"session_id": "s1", "cwd": CWD, "tool_name": "Bash", "tool_input": {"command": "grep -rn foo ."}}
         with mock.patch("airlock.keyfile.get_api_key", return_value="key"), \
              mock.patch("airlock.scope.root_has_graphify_graph", return_value=False) as stat_call, \
              mock.patch("random.random", return_value=0.99), \
@@ -385,7 +399,7 @@ class TestRootHasCodeGraphField(unittest.TestCase):
     def test_absent_on_a_disk_wide_filename_search_row(self):
         """The other deny branch (filename_search on disk_wide scope) never
         touches root_has_graphify_graph at all."""
-        data = {"session_id": "s1", "cwd": "/tmp", "tool_name": "Bash", "tool_input": {"command": "find / -name '*.xlsm'"}}
+        data = {"session_id": "s1", "cwd": CWD, "tool_name": "Bash", "tool_input": {"command": "find / -name '*.xlsm'"}}
         fake = (
             {
                 "model": "jev-1.13.0",
@@ -415,7 +429,7 @@ class TestRootHasCodeGraphField(unittest.TestCase):
 
     def test_absent_on_client_ask_exception(self):
         """The call errored before evaluate_search ever ran."""
-        data = {"session_id": "s1", "cwd": "/tmp", "tool_name": "Bash", "tool_input": {"command": "grep -rn foo ."}}
+        data = {"session_id": "s1", "cwd": CWD, "tool_name": "Bash", "tool_input": {"command": "grep -rn foo ."}}
         with mock.patch("airlock.keyfile.get_api_key", return_value="key"), \
              mock.patch("airlock.scope.root_has_graphify_graph", return_value=True), \
              mock.patch("random.random", return_value=0.99), \
