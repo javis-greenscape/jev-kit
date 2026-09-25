@@ -24,11 +24,12 @@ usage: $0 --print|--apply [--belay] [--function-hooks] [--no-session-check]
   --function-hooks   also set env.CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1.
   --session-check    add the SessionStart session check (the default).
   --no-session-check leave the SessionStart entry out.
-  --browse-unlock    add the PostToolUse browse unlock (the default). It is
+  --browse-unlock    add the browse unlock under PostToolUse and
+                     PostToolUseFailure (the default). It is
                      what lets R11 stand aside when the kit's own 'browse'
                      tool has given up, so leaving it out means a session
                      whose 'browse' fails has no browser at all.
-  --no-browse-unlock leave the PostToolUse entry out.
+  --no-browse-unlock leave the browse-unlock entries out.
 EOF
   exit 2
 }
