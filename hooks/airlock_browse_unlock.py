@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""PostToolUse hook: notice when the kit's `browse` tool has given up.
+"""PostToolUse and PostToolUseFailure hook: notice when the kit's `browse` tool has given up.
 
 WHY THIS EXISTS
 ===============
@@ -14,8 +14,15 @@ viewport, so a multi-hop goal is out of reach; measured, `browse` came back
 `status: blocked` on a two-hop Wikipedia link-navigation task. A strict
 rule on top of that leaves the session with no browser at all.
 
-So this hook watches `browse` calls. When one comes back `blocked`, or the
-call itself errored, it writes a small per-session row through
+So this hook watches `browse` calls. It is registered twice, under
+PostToolUse and under PostToolUseFailure, because a call that raises never
+reaches PostToolUse at all: Claude Code sends it to PostToolUseFailure, with
+an `error` string in place of `tool_response`. Registered under PostToolUse
+alone, the hook missed every errored call, which is the commonest way
+`browse` gives up (measured 2026-09-25: three "60-action demo budget" errors
+in one session, an empty state file, and R11 still denying).
+
+When a call comes back `blocked`, or the call itself errored, it writes a small per-session row through
 airlock/browse_state.py, and R11 turns from a deny into a warn for the next
 thirty minutes of that session. Nothing else opens that door: with no row,
 stamps and repeats still do nothing.
@@ -44,6 +51,9 @@ box:
         "Error: browse failed: a Chromium this server did not start is ..."
   - a DICT in the MCP CallToolResult shape, `{"content": [...], "isError": true}`,
     which is what browse/server.py itself returns over the wire.
+  - NO `tool_response`, on PostToolUseFailure: the payload carries
+    `hook_event_name: "PostToolUseFailure"`, a top-level `error` string and
+    `is_interrupt`. Any failure but an interrupt records "error".
 
 The text inside is JSON from browse/server.py: `final_url`, `title`, `status`,
 `steps`, `elapsed_ms`, `text`. `status` is the field that matters. `done`
@@ -129,6 +139,18 @@ def _looks_like_browse_error(text):
     return head.startswith("Error:") or "browse failed:" in head
 
 
+def _is_failure_event(payload):
+    """True for a PostToolUseFailure payload. Keyed on the event name, with
+    the payload's shape as the fallback for a host that leaves the name out:
+    a top-level `error` and no `tool_response`."""
+    event = payload.get("hook_event_name")
+    if event == "PostToolUseFailure":
+        return True
+    if event:
+        return False
+    return "error" in payload and "tool_response" not in payload
+
+
 def outcome(payload):
     """(status, goal, url) to record, or None to record nothing.
 
@@ -144,6 +166,15 @@ def outcome(payload):
         tool_input = tool_input if isinstance(tool_input, dict) else {}
         goal = tool_input.get("goal")
         url = tool_input.get("start_url")
+
+        # A call that raised arrives as PostToolUseFailure: an `error` string
+        # and no `tool_response` at all. That is the ordinary shape of a
+        # broken `browse`, so it counts. An interrupt is the user pressing
+        # Esc, which says nothing about whether `browse` could do the job.
+        if _is_failure_event(payload):
+            if payload.get("is_interrupt"):
+                return None
+            return ("error", goal, url)
 
         text, is_error = _text_and_error(payload.get("tool_response"))
 

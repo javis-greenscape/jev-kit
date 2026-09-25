@@ -538,15 +538,27 @@ EOF
 EOF
     echo
   fi
-  echo "   And the PostToolUse entry, the only way past R11. When the kit's own"
-  echo "   \`browse\` tool gives up on a goal, this records it and R11 warns"
-  echo "   instead of blocking for the next 30 minutes of that session. It is"
-  echo "   the one entry with a real matcher, because it has one tool to watch:"
+  echo "   And the browse-unlock entries, the only way past R11. When the kit's"
+  echo "   own \`browse\` tool gives up on a goal, this records it and R11 warns"
+  echo "   instead of blocking for the next 30 minutes of that session. It goes"
+  echo "   under PostToolUse AND PostToolUseFailure, because a \`browse\` call"
+  echo "   that errors only ever reaches the second. They are the entries with a"
+  echo "   real matcher, because they have one tool to watch:"
   echo
   cat <<EOF
      {
        "hooks": {
          "PostToolUse": [
+           {
+             "matcher": "mcp__browse__browse",
+             "hooks": [
+               { "type": "command",
+                 "command": "$PY $BROWSE_UNLOCK_HOOK",
+                 "timeout": 5 }
+             ]
+           }
+         ],
+         "PostToolUseFailure": [
            {
              "matcher": "mcp__browse__browse",
              "hooks": [

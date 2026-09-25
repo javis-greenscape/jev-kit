@@ -59,7 +59,8 @@ install/install.sh --guard --session-check --wire ~/.claude/settings.json
 
 The **browse unlock** rides with the guard the same way, and is on by default
 (`install/wire.sh --no-browse-unlock` leaves it out). It is a `PostToolUse`
-hook on the single tool name `mcp__browse__browse`, and it is the only thing
+and `PostToolUseFailure` hook on the single tool name `mcp__browse__browse`
+(a `browse` call that errors only reaches the second), and it is the only thing
 that lets `R11-browse-via-jev` stand aside when the kit's own `browse` tool
 has given up. Without it, a session whose `browse` call fails has no browser
 at all. The same re-run of the wire step adds it to an older install.

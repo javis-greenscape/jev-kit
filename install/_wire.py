@@ -13,7 +13,8 @@ Two jobs, both idempotent:
      the SessionStart session-check entry (a DEFAULT component: the guard
      fails open, so a dead guard is silent, and on a workstation the only
      reliable moment to say so is when somebody starts a session), the
-     PostToolUse browse-unlock entry (also a default: it is the only thing
+     PostToolUse and PostToolUseFailure browse-unlock entries (also a
+     default: they are the only thing
      that lets R11 stand aside when the kit's own `browse` tool has given up
      -- see hooks/airlock_browse_unlock.py), and, opt in per flag, the belay
      Stop hook and the function-hooks env var.
@@ -70,6 +71,11 @@ BROWSE_UNLOCK_COMMAND = os.environ.get("BROWSE_UNLOCK_COMMAND", BROWSE_UNLOCK_HO
 # anything about, so the filtering is worth doing before the interpreter
 # starts rather than inside it.
 BROWSE_UNLOCK_MATCHER = "mcp__browse__browse"
+# The unlock is registered under BOTH of these. A `browse` call that raises
+# never reaches PostToolUse: Claude Code sends it to PostToolUseFailure
+# instead, and an errored call is the commonest way `browse` gives up. Wired
+# under PostToolUse alone, the unlock never saw one (2026-09-25).
+BROWSE_UNLOCK_EVENTS = ("PostToolUse", "PostToolUseFailure")
 # 5 s here on every platform, including native Windows: the enforce judgement
 # budget there is 2000ms (airlock/enforce.py:WINDOWS_DEFAULT_BUDGET_MS, no
 # warm daemon so every call is a fresh HTTPS connection, measured median
@@ -244,6 +250,20 @@ def _browse_unlock_block():
          "timeout": BROWSE_UNLOCK_TIMEOUT}]}
 
 
+def _event_has_browse(data, event):
+    """True if `event` already runs the browse-unlock hook, at any path. A
+    stale path is the repoint's business, not a reason to add a second one."""
+    pattern = _browse_cmd_pattern()
+    for entry in ((data.get("hooks") or {}).get(event) or []):
+        if not isinstance(entry, dict):
+            continue
+        for h in entry.get("hooks") or []:
+            cmd = h.get("command") if isinstance(h, dict) else None
+            if isinstance(cmd, str) and pattern.match(cmd):
+                return True
+    return False
+
+
 def _browse_unlock_ok():
     """Same test as the session check's, and for the same reason: an entry
     pointing at nothing would run and fail after every `browse` call."""
@@ -302,7 +322,8 @@ def _fresh_settings():
     if _session_check_ok():
         data["hooks"]["SessionStart"] = [_session_check_block()]
     if _browse_unlock_ok():
-        data["hooks"]["PostToolUse"] = [_browse_unlock_block()]
+        for event in BROWSE_UNLOCK_EVENTS:
+            data["hooks"][event] = [_browse_unlock_block()]
     if BELAY and BELAY_WRAPPER and os.path.isfile(BELAY_WRAPPER):
         data["hooks"]["Stop"] = [_belay_block()]
     if FUNCTION_HOOKS:
@@ -323,10 +344,11 @@ def _describe_fresh():
                          % (SESSION_CHECK_HOOK or "<unset>"))
     if BROWSE_UNLOCK:
         if _browse_unlock_ok():
-            lines.append("  PostToolUse (browse unlock): matcher \"%s\", "
-                         "command \"%s\", timeout %d"
-                         % (BROWSE_UNLOCK_MATCHER, BROWSE_UNLOCK_COMMAND,
-                            BROWSE_UNLOCK_TIMEOUT))
+            for event in BROWSE_UNLOCK_EVENTS:
+                lines.append("  %s (browse unlock): matcher \"%s\", "
+                             "command \"%s\", timeout %d"
+                             % (event, BROWSE_UNLOCK_MATCHER,
+                                BROWSE_UNLOCK_COMMAND, BROWSE_UNLOCK_TIMEOUT))
         else:
             lines.append("  PostToolUse (browse unlock): SKIPPED, no hook at %s"
                          % (BROWSE_UNLOCK_HOOK or "<unset>"))
@@ -460,7 +482,11 @@ def process(path):
     browse_ok = _browse_unlock_ok()
     browse_missing_hook = bool(BROWSE_UNLOCK and BROWSE_UNLOCK_HOOK and not browse_ok)
     browse_matches = [(m[0], m[1]) for m in _browse_text_pattern().findall(text)]
-    needs_add_browse = browse_ok and not browse_matches
+    # Asked per event: an install from before PostToolUseFailure was wired
+    # has the PostToolUse entry and still needs the other one.
+    browse_events_to_add = [e for e in BROWSE_UNLOCK_EVENTS
+                            if browse_ok and not _event_has_browse(data, e)]
+    needs_add_browse = bool(browse_events_to_add)
     needs_repoint_browse = bool(browse_matches) and BROWSE_UNLOCK_HOOK and not all(
         hook_path == _json_inner(BROWSE_UNLOCK_HOOK)
         for _prefix, hook_path in browse_matches)
@@ -548,13 +574,13 @@ def process(path):
             actions.append('added SessionStart (session check): matcher "*", '
                            'command "%s", timeout %d'
                            % (SESSION_CHECK_COMMAND, SESSION_CHECK_TIMEOUT))
-    if needs_add_browse:
-        if _append_hook(new_data, "PostToolUse", _browse_unlock_block(),
+    for event in browse_events_to_add:
+        if _append_hook(new_data, event, _browse_unlock_block(),
                         BROWSE_UNLOCK_COMMAND, BROWSE_UNLOCK_MATCHER):
-            actions.append('added PostToolUse (browse unlock): matcher "%s", '
+            actions.append('added %s (browse unlock): matcher "%s", '
                            'command "%s", timeout %d'
-                           % (BROWSE_UNLOCK_MATCHER, BROWSE_UNLOCK_COMMAND,
-                              BROWSE_UNLOCK_TIMEOUT))
+                           % (event, BROWSE_UNLOCK_MATCHER,
+                              BROWSE_UNLOCK_COMMAND, BROWSE_UNLOCK_TIMEOUT))
     if needs_belay:
         if _append_hook(new_data, "Stop", _belay_block(), BELAY_WRAPPER):
             actions.append('added Stop (belay): matcher "*", command "%s", timeout %d'

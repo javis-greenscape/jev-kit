@@ -230,8 +230,11 @@ spend it was avoiding.
 
 So `browse` failing is what opens the door, and nothing else does.
 
-- A **PostToolUse hook**, `hooks/airlock_browse_unlock.py`, is registered
-  against the one tool name `mcp__browse__browse`. It reads the response and
+- A **PostToolUse and PostToolUseFailure hook**,
+  `hooks/airlock_browse_unlock.py`, is registered against the one tool name
+  `mcp__browse__browse` under both events. A call that errors never reaches
+  PostToolUse, so it arrives on PostToolUseFailure with an `error` string in
+  place of a response. It reads the response and
   writes a small per-session row when the status is `blocked`, or when the
   call itself errored. A `done` result writes nothing. A response it cannot
   parse writes nothing either, and it never prints a word or blocks anything.

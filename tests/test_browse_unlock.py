@@ -54,6 +54,19 @@ def payload(response, session_id="sess-browse", goal="click through to X"):
             "tool_response": response}
 
 
+def failure_payload(error="browse failed: ValueError: Stopped at the 60-action demo budget",
+                    session_id="sess-browse", goal="click through to X",
+                    is_interrupt=False, event="PostToolUseFailure"):
+    """What Claude Code sends when the `browse` call itself raised: no
+    `tool_response`, an `error` string and `is_interrupt` instead."""
+    p = {"session_id": session_id, "cwd": "/tmp", "tool_name": BROWSE_TOOL,
+         "tool_input": {"goal": goal, "start_url": "https://example.com"},
+         "error": error, "is_interrupt": is_interrupt}
+    if event:
+        p["hook_event_name"] = event
+    return p
+
+
 class BrowseStateCase(unittest.TestCase):
     """Every test gets its own state file, the way tests/test_state.py does."""
 
@@ -178,6 +191,36 @@ class TestHookParsing(unittest.TestCase):
             p["tool_name"] = tool
             self.assertIsNone(hook.outcome(p), tool)
 
+    def test_a_post_tool_use_failure_counts_as_a_failure(self):
+        """The shape that was missed: a `browse` call that raised arrives on
+        PostToolUseFailure, with no `tool_response` to read."""
+        self.assertEqual(hook.outcome(failure_payload()),
+                         ("error", "click through to X", "https://example.com"))
+
+    def test_a_failure_without_an_event_name_still_counts(self):
+        self.assertEqual(hook.outcome(failure_payload(event=None))[0], "error")
+
+    def test_a_failure_with_any_error_text_counts(self):
+        for error in ("", "the server went away", "Exit code 1"):
+            self.assertEqual(hook.outcome(failure_payload(error=error))[0],
+                             "error", error)
+
+    def test_an_interrupt_records_nothing(self):
+        """Esc from the user says nothing about whether `browse` could do it."""
+        self.assertIsNone(hook.outcome(failure_payload(is_interrupt=True)))
+
+    def test_a_failure_of_another_tool_records_nothing(self):
+        p = failure_payload()
+        p["tool_name"] = "mcp__playwright__browser_navigate"
+        self.assertIsNone(hook.outcome(p))
+
+    def test_a_post_tool_use_payload_with_an_error_key_is_read_normally(self):
+        """The event name wins over the shape: a PostToolUse `done` result is
+        still a success even if some host also carries an `error` field."""
+        p = payload(done_response())
+        p["error"] = "irrelevant"
+        self.assertIsNone(hook.outcome(p))
+
     def test_a_differently_named_browse_server_still_counts(self):
         p = payload(blocked_response())
         p["tool_name"] = "mcp__jev-browse__browse"
@@ -233,6 +276,13 @@ class TestHookEndToEnd(unittest.TestCase):
             self.assertEqual(proc.returncode, 0, raw)
             self.assertEqual(proc.stderr, "", raw)
         self.assertEqual(self.rows(), {})
+
+    def test_a_failed_call_writes_an_error_row_and_says_nothing(self):
+        proc = self.run_hook(failure_payload(session_id="live-4"))
+        self.assertEqual(proc.returncode, 0)
+        self.assertEqual(proc.stdout, "")
+        self.assertEqual(proc.stderr, "")
+        self.assertEqual(self.rows()["live-4"]["status"], "error")
 
     def test_another_tool_is_ignored(self):
         p = payload(blocked_response(), session_id="live-3")
@@ -354,6 +404,18 @@ class TestR11Unlocked(BrowseStateCase):
         """The whole path in one test: the PostToolUse payload goes in, and
         the next Playwright call in that session comes back allowed."""
         found = hook.outcome(payload(blocked_response(), session_id=self.SESSION))
+        self.assertIsNotNone(found)
+        status, goal, url = found
+        browse_state.record_gave_up(self.SESSION, status, goal=goal, url=url)
+        denied, deny, warn = self._run(self._payload())
+        self.assertFalse(denied)
+        deny.assert_not_called()
+        warn.assert_called_once()
+
+    def test_a_failed_browse_call_unlocks_end_to_end(self):
+        """The same path from a PostToolUseFailure payload, the shape a
+        `browse` call that raised actually produces."""
+        found = hook.outcome(failure_payload(session_id=self.SESSION))
         self.assertIsNotNone(found)
         status, goal, url = found
         browse_state.record_gave_up(self.SESSION, status, goal=goal, url=url)

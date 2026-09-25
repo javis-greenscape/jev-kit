@@ -571,9 +571,12 @@ class TestBrowseUnlockEntry(WireTestBase):
     def _post_entries(self, path):
         return (self._data(path).get("hooks") or {}).get("PostToolUse") or []
 
-    def _post_commands(self, path):
+    def _failure_entries(self, path):
+        return (self._data(path).get("hooks") or {}).get("PostToolUseFailure") or []
+
+    def _post_commands(self, path, entries=None):
         out = []
-        for entry in self._post_entries(path):
+        for entry in (self._post_entries(path) if entries is None else entries):
             for h in entry.get("hooks") or []:
                 out.append(h.get("command"))
         return out
@@ -588,6 +591,32 @@ class TestBrowseUnlockEntry(WireTestBase):
         self.assertEqual(entries[0]["hooks"][0]["command"],
                          "%s %s" % (PYTHON3, hook))
         self.assertEqual(entries[0]["hooks"][0]["timeout"], 5)
+        # And again under PostToolUseFailure, where an errored call lands.
+        failure = self._failure_entries(path)
+        self.assertEqual(len(failure), 1)
+        self.assertEqual(failure[0]["matcher"], self.MATCHER)
+        self.assertEqual(failure[0]["hooks"][0]["command"],
+                         "%s %s" % (PYTHON3, hook))
+
+    def test_an_older_install_gets_the_failure_entry_added(self):
+        """A settings file wired before PostToolUseFailure was: the
+        PostToolUse entry is kept as it is and the missing one is added."""
+        hook = self._hook_file()
+        existing = "/usr/bin/python3.11 %s" % hook
+        path = self._file(json.dumps({"hooks": {
+            "PreToolUse": [{"matcher": "*", "hooks": [
+                {"type": "command", "command": NEW_HOOK_COMMAND, "timeout": 5}]}],
+            "PostToolUse": [{"matcher": self.MATCHER, "hooks": [
+                {"type": "command", "command": existing, "timeout": 5}]}]}}))
+        out = _run(path, apply_=True, browse_unlock=True, browse_hook=hook)
+        self.assertEqual(self._post_commands(path), [existing])
+        self.assertEqual(self._post_commands(path, self._failure_entries(path)),
+                         ["%s %s" % (PYTHON3, hook)])
+        self.assertIn("PostToolUseFailure", out.stdout)
+        before = Path(path).read_text()
+        out = _run(path, apply_=True, browse_unlock=True, browse_hook=hook)
+        self.assertEqual(Path(path).read_text(), before)
+        self.assertIn("already wired", out.stdout)
 
     def test_it_is_added_to_a_file_that_already_wires_the_guard(self):
         hook = self._hook_file()
@@ -646,6 +675,7 @@ class TestBrowseUnlockEntry(WireTestBase):
         path = self._file(_settings(NEW_HOOK_COMMAND))
         _run(path, apply_=True, browse_unlock=False, browse_hook=hook)
         self.assertEqual(self._post_commands(path), [])
+        self.assertEqual(self._failure_entries(path), [])
 
     def test_print_mode_touches_nothing(self):
         hook = self._hook_file()

@@ -200,9 +200,9 @@ servers stay registered. See
 
 `browse` cannot do everything, so the rule gives way when it fails. Jev chooses
 one step at a time out of what it can see, which puts a multi-hop task out of
-reach. When a `browse` call comes back `blocked`, or errors, a PostToolUse hook
-records it and R11 warns instead of blocking for the next thirty minutes of
-that session. Try `browse` first and the door opens by itself. Nothing else
+reach. When a `browse` call comes back `blocked`, or errors, a PostToolUse (or
+PostToolUseFailure) hook records it and R11 warns instead of blocking for the
+next thirty minutes of that session. Try `browse` first and the door opens by itself. Nothing else
 opens it: a stamp and a repeat still do nothing.
 
 ## jev-ultrafast, the vendored agent
